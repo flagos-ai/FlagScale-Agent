@@ -245,7 +245,7 @@ def pasted_input(text: str):
 
 # ── Banner ──────────────────────────────────────────────────────────────
 
-def banner(provider, model, mode=None, extra_lines=None):
+def banner(provider, model, mode=None, context_window=None, extra_lines=None):
     from flagscale_agent import __version__
 
     # ASCII logo
@@ -263,7 +263,8 @@ def banner(provider, model, mode=None, extra_lines=None):
 
     title = f"FlagScale Agent v{__version__}"
     mode_str = f" | Mode: {mode}" if mode else ""
-    info = f"Provider: {provider} | Model: {model}{mode_str}"
+    ctx_str = f" | Context: {context_window // 1000}k" if context_window else ""
+    info = f"Provider: {provider} | Model: {model}{mode_str}{ctx_str}"
     cmds = "Commands: /skill  /file  /plan  /save  /load  /resume  /export  /memory  /mode  /reload  /quit"
     lines = [info, cmds]
     if extra_lines:
@@ -828,7 +829,7 @@ def interrupted():
 
 def goodbye():
     _stop_all_spinners()
-    _print(green("\n  Goodbye."))
+    _print(green("\n  I'll remember where we left off. See you next time. 🚀\n"))
 
 
 def skill_auto_loaded(name):

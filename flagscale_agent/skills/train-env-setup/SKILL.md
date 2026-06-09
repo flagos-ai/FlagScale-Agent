@@ -528,9 +528,18 @@ pip install torch=={exact_version_from_step_1d} torchvision torchaudio --extra-i
 python -c "import torch; print(torch.__version__, torch.version.cuda)"
 ```
 
-### 3b. Install FlagScale editable
+### 3b. Clone and Install FlagScale
 
-From the FlagScale project root:
+FlagScale-Agent is an independent repository. FlagScale itself must be cloned separately:
+
+```bash
+# Clone FlagScale into the workspace code directory
+mkdir -p {workspace_root}/code
+git clone --depth 1 https://github.com/FlagOpen/FlagScale.git {workspace_root}/code/FlagScale
+cd {workspace_root}/code/FlagScale
+```
+
+Then install in editable mode:
 
 ```bash
 pip install -e ".[cuda-train]"

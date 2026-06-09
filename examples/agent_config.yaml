@@ -1,0 +1,24 @@
+# FlagScale-Agent Configuration
+# Place this at ~/.flagscale/agent.yaml
+
+# ── LLM Provider ──
+provider: anthropic                        # anthropic | openai
+model: claude-sonnet-4-20250514            # Model name
+
+# ── Execution Mode ──
+mode: auto                                 # auto | confirm
+max_iterations: 200                        # Max tool-call turns per session
+
+# ── Skills ──
+auto_skill: true                           # Auto-load skills based on task context
+auto_plan: true                            # Auto-create plans for multi-step tasks
+
+# ── Network (optional) ──
+# shell_env:
+#   HTTP_PROXY: "http://your-proxy:port"
+#   HTTPS_PROXY: "http://your-proxy:port"
+
+# ── Budget Limits ──
+# budget:
+#   max_tokens: 1000000                    # Max total tokens per session
+#   max_tool_calls: 500                    # Max tool calls per session

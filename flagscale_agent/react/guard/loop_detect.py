@@ -120,14 +120,16 @@ class LoopDetectGuard(Guard):
             if self._exact_loop_inject_count >= 3:
                 return GuardVerdict.escalate(
                     f"[LoopDetect] Same tool call repeated {recent_same} times across "
-                    f"{self._exact_loop_inject_count} warnings. You are stuck in a loop. "
-                    "STOP and ask the user for guidance.",
+                    f"{self._exact_loop_inject_count} warnings. "
+                    "You're in a loop. The approach isn't working — repeating it won't help. "
+                    "Diagnose why it's failing and propose a different strategy.",
                     reason=f"exact_loop_persistent: {ctx.tool_name}",
                 )
             return GuardVerdict.inject(
                 f"[LoopDetect] Same tool call repeated {recent_same} times. "
-                "The previous attempts did not produce the desired result. "
-                "Try a different approach.",
+                "Each attempt gave the same result. "
+                "Why? What's different about what you need vs what you're getting? "
+                "Answer that before trying again.",
                 reason=f"looping on {ctx.tool_name}",
             )
 
@@ -161,14 +163,15 @@ class LoopDetectGuard(Guard):
                 if self._exact_loop_inject_count >= 3:
                     return GuardVerdict.escalate(
                         f"[LoopDetect] '{ctx.tool_name}' called {same_tool_count}/{self._SEMANTIC_WINDOW} "
-                        f"times in recent window with varying args. You are repeating the same "
-                        f"operation without making progress. STOP and ask the user for guidance.",
+                        f"times with varying args. You're trying variations but not getting different outcomes. "
+                        "The tool itself isn't the problem — your expectation or approach is. "
+                        "Step back: what are you actually trying to achieve?",
                         reason=f"same_tool_dominance_persistent: {ctx.tool_name}",
                     )
                 return GuardVerdict.inject(
-                    f"[LoopDetect] '{ctx.tool_name}' called {same_tool_count}/{self._SEMANTIC_WINDOW} "
-                    f"times in recent window. You appear to be repeating the same type of "
-                    f"operation. Verify the previous attempt succeeded before retrying.",
+                    f"[LoopDetect] '{ctx.tool_name}' called {same_tool_count}/{self._SEMANTIC_WINDOW} times. "
+                    f"You're tweaking arguments but the outcome isn't changing. "
+                    f"Before calling it again, verify what the last attempt actually did.",
                     reason=f"same_tool_dominance: {ctx.tool_name}",
                 )
 
@@ -222,18 +225,21 @@ class LoopDetectGuard(Guard):
                             # Escalate on 2nd+ trigger — abort entire batch
                             if self._semantic_warn_count >= 2:
                                 return GuardVerdict.escalate(
-                                    f"[LoopDetect] Stuck in read-only loop for {self._semantic_warn_count} "
-                                    "consecutive windows. STOP and ask the user for guidance. "
-                                    "You have been repeating plan_status/memory_list/shell(ls) "
-                                    "without making progress.",
+                                    f"[LoopDetect] You've been reading without acting for "
+                                    f"{self._semantic_warn_count} consecutive windows. "
+                                    "Forward progress isn't just gathering information — "
+                                    "it's moving toward the goal. "
+                                    "State what you've learned and what decision you need to make. "
+                                    "Then either act or ask the user for direction.",
                                     reason="semantic_loop_persistent",
                                 )
 
                             return GuardVerdict.inject(
-                                f"[LoopDetect] {effective_read_count}/{len(window)} recent calls are read-only "
-                                "with no productive output (write/edit/productive shell). You appear stuck in "
-                                "an information-gathering loop. Take action: write a file, run a "
-                                "command that modifies state, or create a plan to move forward.",
+                                f"[LoopDetect] {effective_read_count}/{len(window)} recent calls are read-only. "
+                                "You're gathering information but not acting on it. "
+                                "Ask yourself: do I have enough to move forward? "
+                                "If yes — write, build, or fix something. "
+                                "If no — what specific piece is missing?",
                                 reason=f"semantic loop: {effective_read_count}/{len(window)} read-only",
                             )
 

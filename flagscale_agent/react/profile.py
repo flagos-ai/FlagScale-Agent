@@ -4,7 +4,7 @@ A WorkerProfile is NOT a separate Agent class. It's a configuration that tells
 a single WorkerAgent class which skills to load, which Checklist to use, and
 which scene constraints to activate.
 
-新增场景 = 新增一个 WorkerProfile 注册。不需要写新 class。
+Adding a new scenario = registering a new WorkerProfile. No new class needed.
 """
 
 from __future__ import annotations
@@ -39,12 +39,6 @@ PROFILES: dict[str, WorkerProfile] = {
         skills=["train-model-porter", "train-config", "train-data-prep"],
         scene_constraints=["is_migration"],
     ),
-    "chip-migration": WorkerProfile(
-        name="chip-migration",
-        description="Migrate from FlagScale+Nvidia to FlagScale+domestic chip",
-        skills=["train-model-porter", "train-precision-alignment", "train-config", "train-data-prep"],
-        scene_constraints=["is_migration", "is_chip_migration"],
-    ),
     "training-reproduce": WorkerProfile(
         name="training-reproduce",
         description="Reproduce training results from papers/reference implementations",
@@ -59,7 +53,7 @@ PROFILES: dict[str, WorkerProfile] = {
     ),
     "inference-deploy": WorkerProfile(
         name="inference-deploy",
-        description="Deploy inference services with vllm/sglang",
+        description="Deploy inference services with vllm/sglang (coming soon)",
         skills=["train-config"],  # future: inference-specific skills
         scene_constraints=["is_inference"],
     ),

@@ -72,16 +72,19 @@ class CircuitBreakerGuard(Guard):
                     # Escalate if agent keeps hitting the open circuit
                     if self._open_block_count.get(category, 0) >= 3:
                         return GuardVerdict.escalate(
-                            f"[CircuitBreaker] Circuit for '{category}' is OPEN and agent "
-                            f"keeps attempting blocked operations. "
-                            f"Change your approach or ask the user for guidance.",
+                            f"[CircuitBreaker] The '{category}' circuit has been OPEN and you've "
+                            f"hit it {self._open_block_count[category]} times. "
+                            f"The current approach is fundamentally not working. "
+                            f"Step back: what assumption is wrong? Explain your diagnosis "
+                            f"and propose a completely different strategy.",
                             reason=f"circuit_open_persistent_{category}",
                         )
                     return GuardVerdict.block(
-                        f"[CircuitBreaker] Tripped for '{category}' errors "
+                        f"[CircuitBreaker] '{category}' circuit is OPEN "
                         f"({self._error_counts.get(category, 0)} consecutive failures). "
-                        f"Cooldown: {remaining} iteration(s) remaining. "
-                        f"Change your approach or ask the user for guidance.",
+                        f"Cooldown: {remaining} iteration(s). "
+                        f"Use this time to rethink — what's the root cause? "
+                        f"Don't retry the same approach.",
                         reason=f"circuit_open_{category}",
                     )
 
@@ -116,8 +119,10 @@ class CircuitBreakerGuard(Guard):
             self._circuit_state[category] = self.OPEN
             self._trip_iteration[category] = self._current_iteration
             return GuardVerdict.inject(
-                f"[CircuitBreaker] Probe FAILED for '{category}' — re-tripped circuit. "
-                f"The issue persists. Try a fundamentally different approach.",
+                f"[CircuitBreaker] Probe FAILED for '{category}' — circuit re-tripped. "
+                f"The underlying issue hasn't changed. Ask yourself: "
+                f"am I missing information, or is my mental model wrong? "
+                f"Try a fundamentally different approach.",
                 reason=f"circuit_retrip_{category}",
             )
 

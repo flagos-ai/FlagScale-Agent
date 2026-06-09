@@ -14,6 +14,48 @@ DEFAULT_MODELS = {
     "anthropic": "claude-sonnet-4-20250514",
 }
 
+# Model → context window size mapping (tokens).
+# If a model is not listed, falls back to DEFAULT_CONTEXT_TOKENS.
+DEFAULT_CONTEXT_TOKENS = 200000
+
+MODEL_CONTEXT_WINDOWS = {
+    # Anthropic
+    "claude-sonnet-4-20250514": 200000,
+    "claude-opus-4-20250514": 200000,
+    "claude-3-7-sonnet-20250219": 200000,
+    "claude-3-5-sonnet-20241022": 200000,
+    "claude-3-5-haiku-20241022": 200000,
+    "claude-3-opus-20240229": 200000,
+    "claude-3-sonnet-20240229": 200000,
+    "claude-3-haiku-20240307": 200000,
+    # OpenAI
+    "gpt-4o": 128000,
+    "gpt-4o-mini": 128000,
+    "gpt-4-turbo": 128000,
+    "gpt-4": 8192,
+    "gpt-4-32k": 32768,
+    "o1": 200000,
+    "o1-mini": 128000,
+    "o1-pro": 200000,
+    "o3": 200000,
+    "o3-mini": 200000,
+    "o4-mini": 200000,
+    # DeepSeek
+    "deepseek-chat": 64000,
+    "deepseek-reasoner": 64000,
+}
+
+
+def _resolve_context_window(model: str) -> int:
+    """Resolve context window for a model name, with prefix matching fallback."""
+    if model in MODEL_CONTEXT_WINDOWS:
+        return MODEL_CONTEXT_WINDOWS[model]
+    # Prefix match: e.g. "gpt-4o-2024-08-06" matches "gpt-4o"
+    for prefix, tokens in MODEL_CONTEXT_WINDOWS.items():
+        if model.startswith(prefix):
+            return tokens
+    return DEFAULT_CONTEXT_TOKENS
+
 
 @dataclass
 class AgentConfig:
@@ -22,7 +64,7 @@ class AgentConfig:
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     max_iterations: int = 200
-    max_context_tokens: int = 200000
+    max_context_tokens: int = 0  # 0 = auto-detect from model
     shell_remind_interval: int = 60
     dangerous_commands_check: bool = True
     confirm_commands: bool = True
@@ -49,6 +91,10 @@ class AgentConfig:
         if self.model is None:
             env_model = os.environ.get("ANTHROPIC_MODEL") if self.provider == "anthropic" else None
             self.model = env_model or DEFAULT_MODELS.get(self.provider, "claude-sonnet-4-20250514")
+
+        # Auto-detect context window from model if not explicitly set
+        if self.max_context_tokens <= 0:
+            self.max_context_tokens = _resolve_context_window(self.model)
 
         if self.api_key is None:
             if self.provider == "anthropic":

@@ -599,7 +599,8 @@ class WorkerAgent:
                 break
 
         extra = self._startup_hints()
-        display.banner(self.config.provider, self.config.model, mode=self.config.mode, extra_lines=extra)
+        display.banner(self.config.provider, self.config.model, mode=self.config.mode,
+                       context_window=self.config.max_context_tokens, extra_lines=extra)
         self._check_proxy()
 
         if auto_resume_id:

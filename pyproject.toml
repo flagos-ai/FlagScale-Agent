@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=77.0", "wheel>=0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flagscale-agent"
+version = "0.1.0"
+description = "FlagScale Agent - AI infrastructure agent for large-scale model training, inference, and serving."
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+dependencies = [
+    "typer>=0.9.0",
+    "anthropic>=0.39.0",
+    "openai>=1.0.0",
+    "pyyaml>=6.0",
+    "prompt_toolkit>=3.0",
+    "requests>=2.28.0",
+    "beautifulsoup4>=4.12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.25.0",
+    "pytest-cov>=6.0.0",
+    "pytest-mock>=3.14.0",
+    "ruff>=0.4.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/flagos-ai/FlagScale-Agent"
+
+[project.scripts]
+flagscale-agent = "flagscale_agent.cli:app_entry"
+
+[tool.setuptools.packages.find]
+include = ["flagscale_agent*"]
+exclude = ["**/__pycache__", "**/__pycache__/**", "tests*"]
+
+[tool.setuptools.package-data]
+"flagscale_agent" = ["**/*.yaml", "**/*.yml", "**/*.md"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "I", "B"]
+ignore = ["E402", "E501", "E722", "E731", "E741", "F403", "F405"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+known-local-folder = ["flagscale_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

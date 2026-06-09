@@ -178,6 +178,7 @@ All artifacts go under `<root>` (the detected storage root):
 
 | Artifact | Path |
 |----------|------|
+| FlagScale source code | `<root>/code/FlagScale/` |
 | Qwen2.5-7B-Instruct weights | `<root>/models/Qwen/Qwen2.5-7B-Instruct/` |
 | SigLIP vision encoder | `<root>/models/google/siglip-so400m-patch14-384/` |
 | Processed Megatron data | `<root>/datasets/pile-10k/` |

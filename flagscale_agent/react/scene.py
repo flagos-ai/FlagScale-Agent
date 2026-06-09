@@ -1,12 +1,12 @@
-"""Scene preset — parameterizes WorkerAgent behavior by scenario.
+"""Scene preset — parameterizes agent behavior by scenario.
 
 ScenePreset replaces free-form SceneContext dataclass construction.
 Users select a preset (or auto-detect), then optionally override fields.
 
-Key design: constraints set 是机器可消费的标记:
-- WorkerProfile.scene_constraints 声明"我在这些 constraint 下才激活"
-- Interrupt.activate_on 声明"我在这些 constraint 下才生效"
-- Checklist 根据 constraints 决定激活哪些检查项
+Key design: constraints set is machine-consumable tags:
+- WorkerProfile.scene_constraints declares "I activate under these constraints"
+- Interrupt.activate_on declares "I activate under these constraints"
+- Checklist uses constraints to decide which checks to activate
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ class ScenePreset:
     mode: str  # "training" | "inference_serving" | "inference_engine"
 
     # Hardware
-    chip_type: str  # "nvidia" | "ascend" | "kunlun" | "dcu" | "mthreads"
-    chip_vendor_sdk: str  # "cuda" | "ascend" | "kunlunxin" | "rocm"
+    chip_type: str  # "nvidia"
+    chip_vendor_sdk: str  # "cuda"
 
     # Framework
     target_framework: str  # "megatron-core" | "flagscale+vllm" | "flagscale+sglang"
@@ -41,31 +41,25 @@ class ScenePreset:
 
     @classmethod
     def from_env_and_input(cls, user_input: str = "") -> "ScenePreset":
-        """Detect scene from environment only (no regex).
+        """Detect scene from environment and user input.
 
         Uses keyword-based matching on user_input for mode/hints.
         Full intent classification (migration vs training vs inference,
         multi-node) should be done by Judge; this is a lightweight fallback.
         """
-        # ── Chip type (env only) ──
+        # Chip type (env only)
         chip_type = "nvidia"
         chip_vendor_sdk = "cuda"
-        if os.environ.get("ASCEND_HOME"):
-            chip_type = "ascend"
-            chip_vendor_sdk = "ascend"
-        elif os.environ.get("ROCM_PATH"):
-            chip_type = "dcu"
-            chip_vendor_sdk = "rocm"
 
-        # ── Mode hints (keyword, not regex) ──
+        # Mode hints (keyword-based)
         constraints: set[str] = set()
         mode = "training"
         text_lower = user_input.lower()
 
-        inference_keywords = ["inference", "serving", "vllm", "sglang", "推理", "部署"]
-        migration_keywords = ["migrate", "port", "porting", "from ", "迁移"]
-        multi_node_keywords = ["multi-node", "multi_node", "集群", "cluster", "slurm"]
-        rl_keywords = ["rl", "reinforcement", "ppo", "grpo", "reward", "强化学习"]
+        inference_keywords = ["inference", "serving", "vllm", "sglang"]
+        migration_keywords = ["migrate", "port", "porting", "from "]
+        multi_node_keywords = ["multi-node", "multi_node", "cluster", "slurm"]
+        rl_keywords = ["rl", "reinforcement", "ppo", "grpo", "reward"]
 
         if any(k in text_lower for k in inference_keywords):
             mode = "inference_serving"
@@ -75,8 +69,6 @@ class ScenePreset:
 
         if any(k in text_lower for k in migration_keywords):
             constraints.add("is_migration")
-            if chip_type != "nvidia":
-                constraints.add("is_chip_migration")
 
         if any(k in text_lower for k in multi_node_keywords):
             constraints.add("requires_multi_node")
@@ -87,9 +79,9 @@ class ScenePreset:
         if any(k in text_lower for k in rl_keywords):
             constraints.add("is_rl")
 
-        # ── Source framework hints ──
+        # Source framework hints
         source = ""
-        if "megatron" in text_lower and any(k in text_lower for k in ["from ", "迁移", "migrate", "原来是"]):
+        if "megatron" in text_lower and any(k in text_lower for k in ["from ", "migrate"]):
             source = "megatron"
         elif "deepspeed" in text_lower:
             source = "deepspeed"
@@ -98,15 +90,15 @@ class ScenePreset:
         elif any(k in text_lower for k in ["vllm", "vLLM"]):
             source = "vllm"
 
-        # ── Target ──
+        # Target
         target = "megatron-core"
         if mode == "inference_serving":
             target = "flagscale+vllm"
 
-        # ── Precision ──
-        precision = "bf16" if chip_type == "nvidia" else "fp16"
+        # Precision
+        precision = "bf16"
 
-        # ── Name ──
+        # Name
         name = f"{target.split('+')[0]}-{mode}-{chip_type}"
         if source:
             name += f"-from-{source}"
@@ -129,7 +121,7 @@ class ScenePreset:
         return cls.from_env_and_input(user_input=user_input)
 
 
-# ── Preset library ────────────────────────────────────────────────────────
+# Preset library
 
 PRESETS: dict[str, ScenePreset] = {
     "megatron-training-nvidia": ScenePreset(
@@ -142,17 +134,6 @@ PRESETS: dict[str, ScenePreset] = {
         default_precision="bf16",
         network_topology="single_node",
         constraints={"is_training"},
-    ),
-    "megatron-training-ascend": ScenePreset(
-        name="megatron-training-ascend",
-        mode="training",
-        chip_type="ascend",
-        chip_vendor_sdk="ascend",
-        target_framework="megatron-core",
-        source_framework="",
-        default_precision="fp16",
-        network_topology="single_node",
-        constraints={"is_training", "is_chip_migration", "flash_attn_no_ascend"},
     ),
     "vllm-inference-nvidia": ScenePreset(
         name="vllm-inference-nvidia",
@@ -177,3 +158,4 @@ PRESETS: dict[str, ScenePreset] = {
         constraints={"is_training", "is_migration"},
     ),
 }
+

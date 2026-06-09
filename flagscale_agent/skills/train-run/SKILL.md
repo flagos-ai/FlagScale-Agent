@@ -79,20 +79,20 @@ Launch, stop, and manage FlagScale distributed training jobs on GPU servers.
 
 - SSH access to training server
 - Docker container with FlagScale environment (or bare metal with conda)
-- FlagScale repo with conda environment activated
-- Training config files ready (see train-config skill)
+- FlagScale cloned and installed in the conda environment (see `train-env-setup` skill)
+- Training config files ready (see `train-config` skill)
 
 ---
 
 ## Step 1: Connect to Server
 
-SSH into training server, enter Docker container, activate conda env, cd to FlagScale project root.
+SSH into training server, enter Docker container, activate conda env, cd to FlagScale project directory.
 
 ```bash
 sudo docker exec -it <container_name> bash
 # In non-interactive shells (agent), use: conda run --prefix <env_path> <command>
 # In interactive shells (user), use: conda activate <env_name>
-cd <flagscale_project_path>
+cd <workspace_root>/code/FlagScale
 ```
 
 ---

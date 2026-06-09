@@ -110,7 +110,7 @@ Generate and manage FlagScale training configuration files for distributed train
 
 ## Two-Level YAML Structure
 
-FlagScale uses Hydra for configuration management with two levels.
+FlagScale uses Hydra for configuration management with two levels. All paths below are relative to the FlagScale project root (e.g., `<workspace_root>/code/FlagScale/`).
 
 ### Level 1: Experiment Config
 

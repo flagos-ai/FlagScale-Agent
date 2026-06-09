@@ -88,26 +88,27 @@ class ProgressGuard(Guard):
                 self._progress_block_count += 1
                 if self._progress_block_count >= 3:
                     return GuardVerdict.escalate(
-                        f"[PROGRESS] Blocked {self._progress_block_count} times — "
-                        f"you've made {self._reads_since_last_new_file} calls without "
-                        f"discovering new files or producing output. "
-                        "STOP and ask the user for guidance.",
+                        f"[PROGRESS] You've been busy but not productive — "
+                        f"{self._reads_since_last_new_file} calls without new discoveries. "
+                        "This means you're missing something fundamental. "
+                        "State what you know, what you're looking for, and what's blocking you. "
+                        "Then ask the user for direction.",
                         reason=f"progress_stall_persistent: {self._reads_since_last_new_file} reads",
                     )
                 return GuardVerdict.block(
-                    f"[PROGRESS BLOCK] You've made {self._reads_since_last_new_file} "
-                    f"calls without discovering any new files or producing output. "
-                    "This suggests you're stuck.\n"
-                    "Create a plan (plan_create) to organize what you know and "
-                    "identify what's missing, then continue with focused goals.",
+                    f"[PROGRESS] {self._reads_since_last_new_file} calls without "
+                    f"new files or output. You're stuck — acknowledge it.\n"
+                    "Ask yourself: am I missing information, or is my approach wrong? "
+                    "Create a plan (plan_create) to structure what you know, "
+                    "then continue with a specific hypothesis to test.",
                     reason=f"extended staleness: {self._reads_since_last_new_file} reads",
                 )
             else:
                 return GuardVerdict.inject(
-                    "\n[PROGRESS NOTE] You've been re-reading known files without "
-                    "discovering new information. If you're looking for something specific, "
-                    "consider: what exact question are you trying to answer? "
-                    "A memory_write of current findings can help clarify next steps.",
+                    "\n[PROGRESS] You're re-reading known files without learning anything new. "
+                    "What specific question are you trying to answer? "
+                    "If you've found what you need, move to action. "
+                    "If not, a memory_write of current findings can clarify your next move.",
                     reason="re-reading known files",
                 )
 
