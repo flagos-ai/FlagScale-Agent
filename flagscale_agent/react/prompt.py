@@ -115,7 +115,7 @@ Writing fast is good. Writing correct is better.""",
 
     "user_commands": """## User Commands
 
-`/mode auto|confirm`, `/memory list|clear|delete`, `/skill <name>`, `/file <path>`, `/plan`, `/plan abandon`, `/reload`, `/quit`""",
+`/mode auto|confirm`, `/memory list|clear|delete`, `/skill <name>`, `/plan`, `/plan abandon`, `/save`, `/resume`, `/compact`, `/reload`, `/quit`""",
 
     "inference": """## Inference Workflow
 

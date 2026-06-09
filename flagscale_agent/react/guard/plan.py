@@ -43,12 +43,26 @@ class PlanGuard(Guard):
         self._pre_plan_tool_calls = 0
         self._block_count = 0
 
+    def _has_active_plan(self) -> bool:
+        """Check if a plan already exists (active or paused)."""
+        if self._task_plan is None:
+            return False
+        try:
+            return self._task_plan.get_active() is not None
+        except Exception:
+            return False
+
     def check_pre(self, ctx: GuardContext) -> GuardVerdict | None:
         if not ctx.tool_name:
             return None
 
         # Plan-related tools are always allowed
         if ctx.tool_name in ("plan_create", "memory_write", "workspace_experiment"):
+            return None
+
+        # If a plan already exists, skip all plan-gate logic — the agent is
+        # executing under a plan and should not be blocked for reading files.
+        if self._has_active_plan():
             return None
 
         # Use tool_effects to classify: read-only = exploratory
@@ -113,6 +127,7 @@ class PlanGuard(Guard):
         if ctx.tool_name in ("plan_create",):
             self._complex_task_no_plan = False
             self._pre_plan_tool_calls = 0
+            self._consecutive_reads = 0
             self._block_count = 0
         return None
 
