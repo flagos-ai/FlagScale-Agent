@@ -137,34 +137,40 @@ constraints:
   correction: "Build from source: git clone --recursive https://github.com/flagos-ai/TransformerEngine-FL.git && cd TransformerEngine-FL &&
     NVTE_FRAMEWORK=pytorch pip install --no-build-isolation . Pre-built whls are NOT acceptable."
 - id: train_env_setup_pytorch_must_match_driver
-  description: PyTorch CUDA tag must match the driver's max supported CUDA version, not FlagScale's default requirement.
+  description: PyTorch CUDA tag should match the driver's max supported CUDA to avoid source-build mismatches. While torch+cu128 CAN run on driver 535 (forward compat), it causes problems when source-building Apex/TE/Flash-Attn because system nvcc (12.4) mismatches torch.version.cuda (12.8).
   trigger:
     tools:
     - shell
     keywords:
     - pip install torch
     - pip3 install torch
-  prompt: "SCOPE: pip install torch/pytorch. CHECK: Is the CUDA tag (cu118/cu121/cu124/cu126/cu128) compatible with the
-    system driver's max supported CUDA? E.g., if driver is 535.x (max CUDA 12.4), installing torch+cu128 is WRONG.
-    The agent should have already determined the driver's max CUDA in Step 1a."
-  correction: "PyTorch CUDA tag must match driver's max supported CUDA. Check nvidia-smi for driver version, then choose
-    the appropriate cuXXX tag. E.g., Driver 535.x → max cu124, Driver 560.x → max cu126, Driver 570.x → max cu128."
+  prompt: "SCOPE: pip install torch/pytorch. CHECK: Does the CUDA tag match the driver's max supported CUDA? 
+    While torch+cu128 can technically RUN on driver 535 (CUDA forward compat), it creates a nvcc vs torch.version.cuda 
+    mismatch that breaks source builds of Apex/TE/Flash-Attn. For FlagScale training (which requires source builds), 
+    the CUDA tag MUST match the system nvcc version. E.g., Driver 535.x + nvcc 12.4 → use cu124 tag."
+  correction: "PyTorch CUDA tag must match the system nvcc version (for source build compatibility). 
+    Check nvidia-smi for driver version → determine max CUDA → use matching cu tag.
+    E.g., Driver 535.x → max cu124, Driver 560.x → max cu126, Driver 570.x → max cu128.
+    Note: the version+tag combination must also exist on PyPI — verify with --dry-run."
 - id: train_env_setup_torch_version_from_pypi_not_requirements
-  description: PyTorch version must come from PyPI availability for the driver's CUDA tag, NOT from FlagScale's requirements files.
-    E.g., if driver supports cu124, install the latest torch that has a cu124 wheel (e.g., 2.6.0), even if train.txt says 2.9.0.
+  description: PyTorch version+CUDA tag must be verified to exist on PyPI BEFORE installing. FlagScale's version often does NOT have a wheel for older CUDA tags (e.g., torch 2.9.0 has no cu124 wheel).
+    Always try FlagScale's version first, but fall back to the latest version that has a wheel for the driver's CUDA tag.
   trigger:
     tools:
     - shell
     keywords:
     - pip install torch
     - pip3 install torch
-  prompt: "SCOPE: pip install torch. CHECK: Is the torch version being installed actually available as a wheel for the
-    driver's max CUDA tag? Common mistake: agent reads torch==2.9.0 from FlagScale's train.txt and tries torch==2.9.0+cu124,
-    but 2.9.0 only ships cu126/cu128 wheels. The correct approach is to query PyPI for the latest torch version that HAS
-    a wheel for the driver's CUDA tag. If the version+cu_tag combination doesn't exist on PyPI, this is a violation."
-  correction: "Do NOT use FlagScale's torch version. Query PyPI for available versions with your CUDA tag:
-    pip install torch==<version>+<cu_tag> --dry-run. If it fails, the version doesn't exist for that CUDA.
-    Use the latest torch that actually has a wheel for your driver's max CUDA."
+  prompt: "SCOPE: pip install torch. CHECK: Has the agent verified the exact version+cu_tag combination exists on PyPI?
+    The correct approach is:
+    1. Try FlagScale's version with driver's CUDA tag: pip install torch==X.Y.Z+cuXXX --dry-run
+    2. If NOT FOUND, read the available versions from the error output
+    3. Pick the LATEST version that has a +cuXXX wheel
+    Common MISTAKE: assuming a version exists without checking (e.g., torch 2.9.0+cu124 does NOT exist — cu124 maxes out at 2.6.0).
+    Another MISTAKE: using pip index versions which shows ALL versions including untagged ones that resolve to wrong CUDA."
+  correction: "Verify the exact combination exists BEFORE installing:
+    pip install torch==<version>+<cu_tag> --extra-index-url https://download.pytorch.org/whl/<cu_tag> --dry-run
+    If error, pick the latest version with +<cu_tag> from the available versions list in the error output."
 - id: train_env_setup_no_whl_for_fl_deps
   description: Megatron-LM-FL, TransformerEngine-FL, Apex, and Flash-Attention must ALL be source-built. No whl installs.
   trigger:
@@ -411,25 +417,30 @@ Write a COMPLETE compatibility table covering ALL components. Do NOT skip to Ste
 Do NOT write "torch_ver+cuXXX" as a placeholder. You MUST determine the EXACT PyTorch version that exists for the driver's max CUDA tag:
 
 1. From Step 1a, you know the driver's max CUDA (e.g., Driver 535.x → max cu124)
-2. **IGNORE FlagScale's torch version** — it's for a different CUDA. Do NOT combine FlagScale's version number with your CUDA tag.
-3. Query PyPI to find the LATEST PyTorch version available for YOUR CUDA tag:
+2. From Step 1b, you know the FlagScale-preferred torch version (e.g., `torch==2.9.0` from requirements)
+3. **Query PyPI to check if FlagScale's version has a wheel for your CUDA tag**:
    ```bash
-   pip install torch== 2>&1 | grep -oP '\d+\.\d+\.\d+' | sort -V | tail -10
-   # Then check which versions have your CUDA tag:
-   pip install torch==<latest_version>+cu124 --dry-run 2>&1 | head -5
+   pip install torch==<flagscale_version>+<your_cu_tag> --extra-index-url https://download.pytorch.org/whl/<your_cu_tag> --dry-run 2>&1 | head -10
    ```
-   Or use the PyTorch download page logic:
-   - cu124: latest is typically 2.6.0
-   - cu126: latest is typically 2.7.0+
-   - cu128: latest is typically 2.9.0+
-4. Choose the LATEST stable version that has a wheel for your CUDA tag
+4. **Decision logic**:
+   - If `torch==<flagscale_version>+<your_cu_tag>` EXISTS → use it (ideal: matches both FlagScale and driver)
+   - If it does NOT exist → find the LATEST torch version that HAS a `+<your_cu_tag>` wheel from the available versions list in the error output
 5. Write the EXACT version in the table (e.g., `torch==2.6.0+cu124`)
+
+**KEY INSIGHT**: PyTorch does NOT ship all CUDA tags for every version. Newer CUDA tags (cu126, cu128) are added as older ones (cu118, cu121, cu124) are dropped. Always verify the exact combination exists before attempting install. The `pip install --dry-run` error message conveniently lists all available versions with their tags — use that list to find the latest compatible version.
 
 **Example decision flow**:
 - Driver 535.x → max CUDA 12.4 → need cu124 wheels
-- FlagScale train.txt says `torch==2.9.0+cu128` → **IGNORE this** (2.9.0 has no cu124 wheel)
-- Query PyPI: latest torch with cu124 is 2.6.0
+- FlagScale train.txt says `torch==2.9.0+cu128` → try `torch==2.9.0+cu124`
+- Query PyPI: `pip install torch==2.9.0+cu124 --dry-run` → NOT FOUND (2.9.0 only ships cu126/cu128)
+- From error output, find latest version with cu124: `2.6.0+cu124`
 - Write in table: `torch==2.6.0+cu124`
+
+**Example when FlagScale version IS available**:
+- Driver 570.x → max CUDA 12.8 → need cu128 wheels
+- FlagScale train.txt says `torch==2.9.0+cu128` → try `torch==2.9.0+cu128`
+- Query PyPI: EXISTS
+- Write in table: `torch==2.9.0+cu128`
 
 This eliminates trial-and-error in Step 3a — you install exactly what you determined here.
 
@@ -515,7 +526,7 @@ python --version
 
 **CRITICAL**: Use the EXACT version determined in Step 1d. Do NOT re-derive or guess the version here. The version was already verified to exist on PyPI during Step 1d.
 
-**CRITICAL**: The PyTorch CUDA tag is determined by the DRIVER, not by FlagScale. If FlagScale's train.txt says `torch==2.9.0+cu128` but your driver only supports cu124, install the latest torch available for cu124 (e.g., `torch==2.6.0+cu124`). NEVER try to install a torch version that doesn't have a wheel for your CUDA tag.
+**CRITICAL**: The PyTorch CUDA tag is determined by the DRIVER, not by FlagScale. If FlagScale's train.txt says `torch==2.9.0+cu128` but your driver only supports cu124, you must use the latest torch that has a cu124 wheel (e.g., `torch==2.6.0+cu124`). NEVER try to install a torch version+tag combination that doesn't exist on PyPI — always verify with `--dry-run` first.
 
 **CRITICAL**: `pip install -e ".[cuda-train]"` will pull in ALL requirements, including PyTorch from the requirements files. If those requirements specify a different CUDA version than what your driver supports, pip will silently upgrade PyTorch and all CUDA libraries. This is the #1 cause of wasted time in environment setup.
 
