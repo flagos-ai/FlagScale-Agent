@@ -506,19 +506,23 @@ class Orchestrator:
 
     # ── Public routing API for WorkerAgent interactive loop ─────────────────
 
-    def route(self, user_input: str) -> dict:
+    def route(self, user_input: str, history_context: str = "") -> dict:
         """Public routing method — returns route dict for external dispatch.
 
         Combines LLM-based routing (primary) and keyword-based fallback.
         Returns a dict with keys: mode, profile, template, batch_tasks.
 
         Used by WorkerAgent.run() to decide execution path in interactive mode.
+
+        Args:
+            history_context: Summary of completed stages from conversation history.
+                Passed to Judge to prevent re-routing to subtask mode when work is done.
         """
         # 1. Detect scene (env-based, no LLM needed)
         self.scene = self._refine_scene(user_input)
 
         # 2. Try LLM-based routing first
-        route = self._route_via_llm(user_input)
+        route = self._route_via_llm(user_input, history_context=history_context)
         if route is not None:
             return route
 
@@ -565,6 +569,53 @@ class Orchestrator:
         profile = route["profile"] or self.subtask_runner._pick_profile_keyword(user_input)
         worker = self._create_worker(profile)
         return worker.execute(user_input)
+
+    def check_stages_completed_in_history(
+        self,
+        route: dict,
+        user_input: str,
+        history_messages: list[dict],
+    ) -> dict[str, str] | None:
+        """Check if subtask stages have already been completed in conversation history.
+
+        Scans history for [system: task stage result] markers and matches them
+        against the stages in the given route. If ALL stages are already completed
+        (status OK), returns a dict of {stage_id: summary} from the history.
+
+        Returns None if not all stages are completed (pipeline should run normally).
+        """
+        subtasks = self._build_subtask_definitions(route, user_input)
+        if not subtasks:
+            return None
+
+        stage_ids = {sub.id for sub in subtasks}
+        completed_stages: dict[str, str] = {}
+
+        import re
+        # Pattern: [Stage X/Y] stage_id: OK — summary
+        stage_pattern = re.compile(
+            r"\[Stage\s+\d+/\d+\]\s+(\w+):\s+OK\s*[—–-]\s*(.*)", re.DOTALL
+        )
+
+        for msg in history_messages:
+            content = msg.get("content", "")
+            if not isinstance(content, str):
+                continue
+            if "[system: task stage result]" not in content:
+                continue
+
+            match = stage_pattern.search(content)
+            if match:
+                stage_id = match.group(1)
+                summary = match.group(2).strip()
+                if stage_id in stage_ids:
+                    completed_stages[stage_id] = summary
+
+        # All stages must be completed
+        if stage_ids and stage_ids <= set(completed_stages.keys()):
+            return completed_stages
+
+        return None
 
     def run_subtask_interactive(
         self,
@@ -706,8 +757,12 @@ class Orchestrator:
 
     # ── LLM-based routing (primary) ───────────────────────────────────────
 
-    def _route_via_llm(self, user_input: str) -> dict | None:
-        """Route via Judge. Returns route dict or None if Judge unavailable."""
+    def _route_via_llm(self, user_input: str, history_context: str = "") -> dict | None:
+        """Route via Judge. Returns route dict or None if Judge unavailable.
+
+        Args:
+            history_context: Summary of completed stages in conversation history.
+        """
         judge = self.judge
         if judge is None:
             if self.provider is None:
@@ -718,7 +773,10 @@ class Orchestrator:
         templates_str = self.subtask_runner.template_descriptions()
 
         try:
-            result, source = judge.route(user_input, profiles_str, templates_str)
+            result, source = judge.route(
+                user_input, profiles_str, templates_str,
+                history_context=history_context,
+            )
         except Exception as e:
             return None
 
