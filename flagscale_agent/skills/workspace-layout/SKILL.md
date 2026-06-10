@@ -81,6 +81,21 @@ constraints:
     - huggingface download
   prompt: Check if memory was consulted for existing artifact paths before downloading
   correction: Check memory_read for existing paths before downloading. Avoid duplicate downloads.
+- id: workspace_isolation_no_other_users
+  description: Never search, reference, or use artifacts from other users' directories. Only look within YOUR workspace root.
+  trigger:
+    tools:
+    - shell
+    keywords:
+    - find /share/project
+    - ls /share/project
+    - /share/project/weixin
+    - /share/project/fengyupu
+    - /share/project/gzy
+  prompt: "Check if the agent is about to search or reference artifacts from other users' workspace directories. The only valid
+    search scope is the agent's own workspace root. If an artifact doesn't exist there, clone/download it fresh."
+  correction: "Do NOT search other users' directories. Clone or download the artifact fresh into YOUR workspace root
+    ({workspace_root}/code/, {workspace_root}/models/, etc.)."
 - id: workspace_layout_experiment_must_be_training
   description: workspace_experiment create should only be used for actual training/inference experiments, not for environment setup,
     data download, or other infrastructure tasks. If created, the experiment MUST be updated (workspace_experiment update) before
@@ -256,13 +271,31 @@ Warn if free space < estimated total. For long training runs, also warn about ch
 
 ## Step 5: Artifact Discovery
 
+### CRITICAL: Workspace Isolation Principle
+
+**NEVER search, reference, or use artifacts from other users' directories.** Even if you can see other projects at sibling paths (e.g., `/share/project/other_user/FlagScale`), treat them as off-limits. Reasons:
+- Using another user's repo risks breaking their environment (editable installs, dirty state)
+- Their code may be at a different version, with local patches or uncommitted changes
+- It creates invisible dependencies — if they delete or move their directory, your setup breaks
+- Reading their configs/code to "learn" the structure still leaks assumptions that may be wrong for your version
+
+**The only valid search scope is YOUR workspace root** (i.e., `<root>/` as determined in Step 1). If an artifact doesn't exist under your root, the correct action is to **download/clone it fresh**, not to search the filesystem for someone else's copy.
+
+### Discovery procedure
+
 Before creating or downloading anything:
 
 1. Check memory for previously recorded paths (`workspace_root`, model paths, env paths, etc.)
-2. Check standard paths under `<root>/`
-3. Check common alternatives (`~/.cache/huggingface/hub/`, `/tmp/`, working directory)
+2. Check standard paths under YOUR `<root>/` only (e.g., `<root>/code/FlagScale`, `<root>/models/...`)
+3. Check `~/.cache/huggingface/hub/` for model weights (this is user-local, safe to reuse)
 4. List what was found and what's missing
 5. Only proceed to download/create what's actually missing
+
+**DO NOT**:
+- Run `find /share/project -name "FlagScale"` or similar broad searches
+- Look at sibling directories under `/share/project/`
+- Reference paths you saw in other users' directories
+- Use `ls /share/project/` to discover what's available
 
 After creating or downloading:
 - Record the path in memory with a descriptive key (e.g., `model_qwen2.5_7b_path`, `env_flagscale_path`)

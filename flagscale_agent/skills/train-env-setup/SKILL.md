@@ -294,7 +294,7 @@ The ONLY valid sources of truth for dependency versions are:
 3. Megatron-LM-FL, TransformerEngine-FL, Apex, and Flash-Attention MUST ALL be built from source. Pre-built whls (including from FlagScale PyPI) are NOT acceptable — they are compiled against a specific CUDA version that may not match the system. Source builds are the ONLY way to guarantee binary compatibility with the actual hardware. Never install from generic PyPI (pypi.org) either — those packages are either wrong (apex) or missing FL customizations
 4. Never modify dependency source code to work around errors — report to user
 5. **After EVERY pip install, VERIFY the import works.** DO NOT assume a successful pip exit code means the package is usable. Immediately test: `python -c "import <package>; print(<package>.__version__)"`. For large packages (torch, flash-attn, apex), if `import` hangs >10s, the install is corrupt and must be redone. On NFS/shared storage, use `timeout 15 python -c "import <package>"` to catch hangs quickly without blocking the session.
-6. **Auto-fetch FL dependencies**: When Megatron-LM-FL or TransformerEngine-FL source code is needed (for analysis, compilation, or debugging) and is not available locally, pull the latest automatically — don't ask the user. Repos: `https://github.com/flagos-ai/Megatron-LM-FL.git`, `https://github.com/flagos-ai/TransformerEngine-FL.git` (use `--recursive` for TE-FL)
+6. **Auto-fetch FL dependencies**: When Megatron-LM-FL or TransformerEngine-FL source code is needed (for analysis, compilation, or debugging) and is not available under YOUR workspace root, clone it fresh into `{deps_dir}` — don't ask the user. NEVER search for or reuse copies from other users' directories. Repos: `https://github.com/flagos-ai/Megatron-LM-FL.git`, `https://github.com/flagos-ai/TransformerEngine-FL.git` (use `--recursive` for TE-FL)
 7. **ALL FL-customized dependencies are MANDATORY.** Do NOT skip Megatron-LM-FL, TransformerEngine-FL, Apex, or Flash-Attention. These are not optional — FlagScale training will fail or produce incorrect results without them. If one is difficult to install, try the source build fallback. Only skip a dependency if the user explicitly requests it after being warned of the consequences.
 8. **If the user asks to create a new environment, create a new environment.** Do not reuse an existing one, even if it appears to have the right packages. Existing environments may have editable installs pointing to other workspaces, patched packages, or stale versions. A fresh environment is the only way to guarantee a clean, reproducible baseline. If you believe reusing is genuinely better, explain why and ask — but do not silently substitute.
 9. **NEVER copy packages between environments using `cp -r` from site-packages.** This bypasses pip's metadata tracking — pip won't know the package exists, so dependency resolution, upgrades, and uninstalls all break silently. Always install via `pip install` (from wheel, PyPI, or source build). If a prebuilt wheel isn't available, build from source — it takes longer but produces a properly registered package.
@@ -530,10 +530,12 @@ python -c "import torch; print(torch.__version__, torch.version.cuda)"
 
 ### 3b. Clone and Install FlagScale
 
-FlagScale-Agent is an independent repository. FlagScale itself must be cloned separately:
+FlagScale-Agent is an independent repository. FlagScale itself must be cloned separately.
+
+**CRITICAL: Workspace Isolation** — If FlagScale source code is not already present under YOUR workspace root (`{workspace_root}/code/FlagScale`), clone it fresh. Do NOT search for or reuse copies from other users' directories. Other copies may be at different versions, have local patches, or have editable installs that would break if you modify them. Always clone your own copy.
 
 ```bash
-# Clone FlagScale into the workspace code directory
+# Clone FlagScale into YOUR workspace code directory
 mkdir -p {workspace_root}/code
 git clone --depth 1 https://github.com/FlagOpen/FlagScale.git {workspace_root}/code/FlagScale
 cd {workspace_root}/code/FlagScale
