@@ -55,19 +55,12 @@ class CommandHandler:
         elif cmd == "/skill":
             self._handle_skill(user_input)
             return True
-        elif cmd == "/file":
-            self._handle_file(user_input)
-            return True
+
         elif cmd == "/save":
             self.agent._save_conversation(completed=False)
             print("Conversation saved.")
             return True
-        elif cmd == "/load":
-            self._handle_load(user_input)
-            return True
-        elif cmd == "/export":
-            self._handle_export(user_input)
-            return True
+
         elif cmd == "/memory":
             self._handle_memory(user_input)
             return True
@@ -101,45 +94,6 @@ class CommandHandler:
             print(f"Skill '{name}' loaded.")
         except FileNotFoundError:
             print(f"Skill '{name}' not found.")
-
-    def _handle_file(self, user_input: str):
-        """Handle /file command - read and display file."""
-        parts = user_input.split()
-        if len(parts) < 2:
-            print("Usage: /file <path>")
-            return
-        path = parts[1]
-        if os.path.isfile(path):
-            result = self.agent.tool_registry.execute("read_file", path=path)
-            print(result[:2000])
-        else:
-            print(f"File not found: {path}")
-
-    def _handle_load(self, user_input: str):
-        """Handle /load command - load previous session."""
-        parts = user_input.split()
-        sessions = find_resumable_sessions(self.agent._sessions_root)
-        if len(parts) >= 2 and parts[1].isdigit():
-            idx = int(parts[1]) - 1
-            if 0 <= idx < len(sessions):
-                s = sessions[idx]
-                data = load_conversation(s["session_dir"])
-                if data:
-                    self.agent._restore_session(data)
-                    print(f"Loaded session: {s.get('last_user_msg', '')[:60]}")
-                    return
-        if not sessions:
-            print("No resumable sessions found.")
-            return
-        print("Resumable sessions:")
-        for i, s in enumerate(sessions[:10], 1):
-            print(f"  {i}. [{time.strftime('%m-%d %H:%M', time.localtime(s['timestamp']))}] {s.get('last_user_msg', '')[:60]}")
-        print("Usage: /load <number>")
-
-    def _handle_export(self, user_input: str):
-        """Handle /export command - export conversation."""
-        path = os.path.join(self.agent._session_dir, "conversation.json")
-        print(f"Conversation exported to: {path}")
 
     def _handle_memory(self, user_input: str):
         """Handle /memory command - manage session memory."""

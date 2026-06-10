@@ -219,6 +219,36 @@ class TestPlanGuard:
         g.check_post(ctx)
         assert g._complex_task_no_plan is False
         assert g._pre_plan_tool_calls == 0
+        assert g._consecutive_reads == 0
+
+    def test_does_not_block_when_plan_exists(self):
+        """Regression: once a plan exists, PlanGuard must not block reads."""
+        from unittest.mock import MagicMock
+        task_plan = MagicMock()
+        task_plan.get_active.return_value = {"title": "test", "steps": []}
+
+        g = PlanGuard(task_plan=task_plan)
+        g.mark_complex_task()
+        # Simulate many consecutive reads — should NOT block because plan exists
+        for i in range(20):
+            ctx = _ctx("read_file", {"path": f"/tmp/f{i}.py"},
+                       tool_effects=ToolEffect(reads=frozenset({"filesystem"})))
+            result = g.check_pre(ctx)
+            assert result is None, f"Should not block at call {i+1} when plan exists"
+
+    def test_independent_mode_does_not_block_when_plan_exists(self):
+        """Regression: independent mode (no mark_complex_task) also respects existing plan."""
+        from unittest.mock import MagicMock
+        task_plan = MagicMock()
+        task_plan.get_active.return_value = {"title": "docs plan", "steps": [{"status": "doing"}]}
+
+        g = PlanGuard(task_plan=task_plan)
+        # Do NOT call mark_complex_task — this tests independent mode
+        for i in range(15):
+            ctx = _ctx("read_file", {"path": f"/tmp/f{i}.py"},
+                       tool_effects=ToolEffect(reads=frozenset({"filesystem"})))
+            result = g.check_pre(ctx)
+            assert result is None, f"Independent mode should not block at call {i+1} when plan exists"
 
 
 # ── TrainingRuntimeGuard ──────────────────────────────────────────────────

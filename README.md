@@ -82,12 +82,6 @@ flagscale-agent "Check if CUDA 12.1 is available on this server"
 flagscale-agent "Generate a FlagScale config for Qwen2.5 7B with TP=4, DP=2"
 ```
 
-#### Auto Mode (Fully Autonomous)
-```bash
-flagscale-agent --config ~/.flagscale/agent.yaml
-# then type: /mode auto
-```
-
 ---
 
 ## 📚 Core Concepts
@@ -107,20 +101,26 @@ Built-in skills:
 - `train-monitor` — Analyze logs, detect training issues
 - `train-parallel-strategy` — Design parallelism strategies (TP/PP/DP/EP/SP)
 - `train-precision-alignment` — Debug precision mismatches
+- `train-model-porter` — Port models from HuggingFace to Megatron
+- `train-reproduce` — Reproduce training results from references
 - `debug-strategy` — Systematic debugging for training failures
 - `topo-detect` — Detect hardware topology (NVLink, NUMA, RDMA)
+- `workspace-layout` — Standardized workspace directory layout
+- `ops-discipline` — General operational discipline
 
 Skills are automatically loaded based on task context. Use `/skill <name>` to manually load.
 
 ### Tools
-The agent has 20+ built-in tools:
+The agent has 19 built-in tools:
 - **File ops**: `read_file`, `write_file`, `edit_file`
 - **Shell**: `shell` (execute commands with timeout/background support)
-- **Training**: `find_latest_log`, `monitor`, `validate_config`, `inspect_checkpoint`
+- **Training**: `find_latest_log`, `parse_training_metrics`, `monitor`, `validate_config`, `inspect_checkpoint`
 - **Memory**: `memory_write`, `memory_read`, `memory_list`
 - **Planning**: `plan_create`, `plan_update`, `plan_status`
 - **Experiments**: `workspace_experiment` (track training attempts)
+- **Skills**: `load_skill` (load domain knowledge)
 - **Web**: `web_fetch` (read documentation, GitHub issues)
+- **Context**: `compact_context` (manual context compaction)
 
 ### Guards
 Guards are behavioral constraints with lifecycle hooks that enforce safety and quality:
@@ -212,6 +212,16 @@ The agent:
 - Sets up NCCL environment variables
 - Monitors all nodes' logs in parallel
 
+### 6. Model Porting
+```bash
+flagscale-agent "Convert HuggingFace LLaMA-3 weights to Megatron format"
+```
+The agent:
+- Analyzes model architecture and layer mapping
+- Writes conversion script with shape validation
+- Executes conversion with progress tracking
+- Verifies output checkpoint integrity
+
 ---
 
 ## 🛠️ Advanced Usage
@@ -220,38 +230,26 @@ The agent:
 Create your own skill by adding a `SKILL.md` file to `~/.flagscale/skills/my-skill/`:
 
 ```markdown
+---
+name: my-skill
+description: Automate XYZ training pipeline
+keywords: [xyz, training, pipeline]
+constraints:
+  - id: xyz_env_check
+    trigger: {tools: [shell]}
+    prompt: "Always set XYZ_ENV=production before running XYZ_SCRIPT"
+    correction: "Add export XYZ_ENV=production before the command"
+---
 # My Custom Training Workflow
 
-## Description
-Automate XYZ training pipeline.
+## Steps
+1. Check environment variables
+2. Launch XYZ training script
+3. Monitor output
 
-## When to Use
-- User mentions "XYZ training"
-
-## Tools
-- shell, read_file, monitor
-
-## Constraints
-```yaml
-- trigger:
-    tool: shell
-    pattern: "XYZ_SCRIPT"
-  must: "Always set XYZ_ENV=production before running"
-  judge: "Check if XYZ_ENV is set in the shell command"
+## Notes
+- Always verify GPU availability first
 ```
-
-## Examples
-...
-```
-
-### Custom Tools
-Add custom tools via `plugin_tool_dirs` in `agent.yaml`:
-```yaml
-plugin_tool_dirs:
-  - /path/to/my/tools
-```
-
-Each tool file should define a `Tool` class inheriting from `BaseTool`.
 
 ### Config Options
 See `flagscale_agent/react/config.py` for all options:
@@ -267,8 +265,9 @@ Inside the agent:
 - `/skill <name>` — Load a skill
 - `/plan` — Show current plan
 - `/memory list` — List memories
-- `/save <name>` — Save session
-- `/load <name>` — Load session
+- `/save` — Save session
+- `/resume` — Resume previous session
+- `/compact` — Compact context manually
 - `/reload` — Reload config
 - `/quit` — Exit
 
@@ -325,7 +324,6 @@ Built on top of:
 ## 📬 Contact
 
 - GitHub Issues: [https://github.com/flagos-ai/FlagScale-Agent/issues](https://github.com/flagos-ai/FlagScale-Agent/issues)
-- Email: caozhou.1995@gmail.com
 
 ---
 
