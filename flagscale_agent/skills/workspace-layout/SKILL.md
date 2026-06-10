@@ -81,21 +81,6 @@ constraints:
     - huggingface download
   prompt: Check if memory was consulted for existing artifact paths before downloading
   correction: Check memory_read for existing paths before downloading. Avoid duplicate downloads.
-- id: workspace_isolation_no_other_users
-  description: Never search, reference, or use artifacts from other users' directories. Only look within YOUR workspace root.
-  trigger:
-    tools:
-    - shell
-    keywords:
-    - find /share/project
-    - ls /share/project
-    - /share/project/weixin
-    - /share/project/fengyupu
-    - /share/project/gzy
-  prompt: "Check if the agent is about to search or reference artifacts from other users' workspace directories. The only valid
-    search scope is the agent's own workspace root. If an artifact doesn't exist there, clone/download it fresh."
-  correction: "Do NOT search other users' directories. Clone or download the artifact fresh into YOUR workspace root
-    ({workspace_root}/code/, {workspace_root}/models/, etc.)."
 - id: workspace_layout_experiment_must_be_training
   description: workspace_experiment create should only be used for actual training/inference experiments, not for environment setup,
     data download, or other infrastructure tasks. If created, the experiment MUST be updated (workspace_experiment update) before
