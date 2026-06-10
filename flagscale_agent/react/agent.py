@@ -715,8 +715,11 @@ class WorkerAgent:
             self._run_single_mode(user_input)
             return
 
+        # Build history context for routing — summarize completed stages
+        history_context = self._build_stage_history_context()
+
         print(display.dim("\n[Orchestrator] Routing..."))
-        route = o.route(user_input)
+        route = o.route(user_input, history_context=history_context)
 
         mode = route.get("mode", "single")
         template = route.get("template", "")
@@ -746,6 +749,29 @@ class WorkerAgent:
 
         # ── Subtask mode: show stage overview, then serial execution ──
         if mode == "subtask":
+            # Check if all stages are already completed in history
+            completed = o.check_stages_completed_in_history(
+                route, user_input, self.history.messages
+            )
+            if completed:
+                # All stages already done — downgrade to single mode with context
+                stage_summary = "\n".join(
+                    f"  - {sid}: {summary[:200]}" for sid, summary in completed.items()
+                )
+                print(display.dim(
+                    f"[Orchestrator] All stages already completed in history. "
+                    f"Routing to single worker with existing results."
+                ))
+                # Inject context and run as single worker
+                context_msg = (
+                    f"The following precision alignment stages have already been completed "
+                    f"with existing data. Use these results directly — do NOT re-execute "
+                    f"the pipeline:\n{stage_summary}\n\n"
+                    f"User request: {user_input}"
+                )
+                self._run_single_mode(context_msg)
+                return
+
             subtasks = o._build_subtask_definitions(route, user_input)
             if not subtasks:
                 print(display.red("\nNo stages to execute for this task."))
@@ -942,6 +968,37 @@ class WorkerAgent:
                             texts.append(block.get("text", ""))
                     return " ".join(texts)[:300]
         return ""
+
+    def _build_stage_history_context(self) -> str:
+        """Build a summary of completed stages from conversation history.
+
+        Scans for [system: task stage result] markers and returns a concise
+        summary for the routing LLM, so it knows prior work exists.
+        """
+        import re
+        stage_pattern = re.compile(
+            r"\[Stage\s+(\d+)/(\d+)\]\s+(\w+):\s+(OK|FAILED|INTERRUPTED)\s*[—–-]?\s*(.*)"
+        )
+        completed = []
+        for msg in self.history.messages:
+            content = msg.get("content", "")
+            if not isinstance(content, str):
+                continue
+            if "[system: task stage result]" not in content:
+                continue
+            match = stage_pattern.search(content)
+            if match:
+                stage_id = match.group(3)
+                status = match.group(4)
+                completed.append(f"{stage_id}:{status}")
+
+        if not completed:
+            return ""
+
+        return (
+            f"PRIOR COMPLETED STAGES in this conversation: [{', '.join(completed)}]. "
+            f"These stages have already been executed. Do NOT re-run them as subtask mode."
+        )
 
     def _inject_subtask_result_to_history(self, summary: str):
         """Inject a structured subtask/batch result into the main agent's history.

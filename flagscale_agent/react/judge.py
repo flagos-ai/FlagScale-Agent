@@ -360,16 +360,21 @@ You are routing a user request to the right execution mode.
 
 User request: {user_input}
 
+{history_context}
+
 Determine the execution mode:
 
 - "single": Simple task that one worker can handle directly.
   Examples: "read this file", "run this command", "explain this code",
   "fix this bug", "configure this parameter", "check GPU status",
   "what version is installed", "how do I..."
+  IMPORTANT: Also use "single" when the task's pipeline stages have ALREADY been completed
+  (indicated by prior stage results in history). Do NOT re-run a completed pipeline.
 
 - "subtask": Multi-stage task that needs a serial pipeline with DAG stages.
   Examples: "set up environment AND reproduce training", "migrate model from HF to Megatron",
   "download source code AND configure AND train", "build env, download data, run training"
+  ONLY use this when the work has NOT been done yet. If prior results already exist, use "single".
 
 - "batch": Comparing multiple independent variants.
   Examples: "compare training with tp=2 vs tp=4", "run experiment A and experiment B",
@@ -976,7 +981,8 @@ class Judge:
 
     # ── Route intent (replaces Orchestrator regex routing) ─────────────────
 
-    def route(self, user_input: str, profiles: str, templates: str) -> tuple[dict, str]:
+    def route(self, user_input: str, profiles: str, templates: str,
+              history_context: str = "") -> tuple[dict, str]:
         """Route a user request to the right execution mode via LLM.
 
         Returns ((mode_dict, source)), where source is SOURCE_LLM / SOURCE_UNAVAILABLE.
@@ -985,6 +991,10 @@ class Judge:
         Callers should check source: if SOURCE_UNAVAILABLE, fall back to regex routing.
         This does NOT consume budget — routing happens once per user request,
         before the agent loop starts.
+
+        Args:
+            history_context: Optional summary of completed stages from prior runs.
+                If non-empty, signals the LLM that prior work exists.
         """
         if self.provider is None:
             return ({"mode": "single"}, SOURCE_UNAVAILABLE)
@@ -993,6 +1003,7 @@ class Judge:
             "user_input": user_input,
             "profiles": profiles,
             "templates": templates,
+            "history_context": history_context or "",
         }
         value, source = self.classify_traced("route_intent", context,
             default={"mode": "single"})
