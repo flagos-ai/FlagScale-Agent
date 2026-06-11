@@ -176,13 +176,17 @@ def _training_guardrails(command: str) -> list:
 
 
 def _inject_proxy_exports(command: str, env: dict) -> str:
+    import sys as _sys
     exports = []
     for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"):
         val = env.get(var)
         if val:
-            # Use shlex.quote to prevent shell injection via proxy values
-            import shlex
-            exports.append(f'export {var}={shlex.quote(val)}')
+            if _sys.platform == "win32":
+                # Windows CMD: set VAR=value (no quoting needed, value injected via env dict)
+                exports.append(f'set "{var}={val}"')
+            else:
+                import shlex
+                exports.append(f'export {var}={shlex.quote(val)}')
     if not exports:
         return command
     return " && ".join(exports) + " && " + command
@@ -199,17 +203,23 @@ def _inject_git_timeout(command: str) -> str:
     (e.g., behind a proxy that accepts TCP but never responds to HTTPS).
     GIT_HTTP_LOW_SPEED_LIMIT=1000 + GIT_HTTP_LOW_SPEED_TIME=60 means:
     kill if transfer drops below 1KB/s for 60 seconds.
+    Cross-platform: uses 'set VAR=value &&' prefix on Windows.
     """
+    import sys as _sys
     if not re.search(r'\bgit\s+(clone|fetch|pull|push|submodule)\b', command):
         return command
     # Don't inject if user already set these
     if 'GIT_HTTP_LOW_SPEED' in command:
         return command
-    timeout_vars = (
-        'GIT_HTTP_LOW_SPEED_LIMIT=1000 '
-        'GIT_HTTP_LOW_SPEED_TIME=60'
-    )
-    return f'{timeout_vars} {command}'
+    if _sys.platform == "win32":
+        # Windows CMD: set vars before the command using && chaining
+        prefix = (
+            'set "GIT_HTTP_LOW_SPEED_LIMIT=1000" && '
+            'set "GIT_HTTP_LOW_SPEED_TIME=60" && '
+        )
+    else:
+        prefix = 'GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60 '
+    return f'{prefix}{command}'
 
 
 def _strip_grep_patterns(command: str) -> str:
@@ -480,6 +490,8 @@ class ShellTool(Tool):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 env=run_env,
             )
 

@@ -467,6 +467,7 @@ class TestFindLatestLogTool:
 
     def test_picks_last_rank(self, tmp_path):
         """Should pick rank 7 (last) over rank 0."""
+        import os
         from flagscale_agent.react.tools.find_log import FindLatestLogTool
         base = tmp_path / "exp" / "logs" / "details" / "host_0" / "20260101" / "default_x" / "attempt_0"
         for r in range(8):
@@ -476,7 +477,8 @@ class TestFindLatestLogTool:
         tool = FindLatestLogTool(outputs_dir=str(tmp_path))
         result = tool.execute(experiment="exp", log_type="stdout")
         assert "rank 7 output" in result
-        assert "/7/" in result
+        # Use os.sep so this works on both Linux (/) and Windows (\)
+        assert f"{os.sep}7{os.sep}" in result
 
     def test_picks_last_node(self, tmp_path):
         """Multi-node: should pick host_1 over host_0."""
@@ -529,22 +531,38 @@ class TestFindLatestLogTool:
 
 
 class TestInjectProxyExports:
+    """_inject_proxy_exports sets proxy env vars before the command.
+
+    The exact syntax is platform-dependent:
+      - Linux/macOS: export VAR=value && ...
+      - Windows:     set "VAR=value" && ...
+    Tests check for the variable name and value regardless of syntax.
+    """
+
+    @staticmethod
+    def _has_var(result, var, value):
+        """Return True if result contains the var=value assignment in any form."""
+        import sys as _sys
+        if _sys.platform == "win32":
+            return f'"{var}={value}"' in result or f'{var}={value}' in result
+        return f'export {var}={value}' in result or f'{var}={value}' in result
+
     def test_non_network_cmd_still_gets_proxy(self):
         result = _inject_proxy_exports("echo hello", {"HTTP_PROXY": "http://p:8080"})
-        assert 'export HTTP_PROXY=http://p:8080' in result
+        assert self._has_var(result, "HTTP_PROXY", "http://p:8080")
         assert result.endswith("&& echo hello")
 
     def test_wget_with_proxy(self):
         env = {"HTTP_PROXY": "http://p:8080", "HTTPS_PROXY": "http://p:8080"}
         result = _inject_proxy_exports("wget http://example.com/file.tar", env)
-        assert 'export HTTP_PROXY=http://p:8080' in result
-        assert 'export HTTPS_PROXY=http://p:8080' in result
+        assert self._has_var(result, "HTTP_PROXY", "http://p:8080")
+        assert self._has_var(result, "HTTPS_PROXY", "http://p:8080")
         assert result.endswith("&& wget http://example.com/file.tar")
 
     def test_pip_install_with_proxy(self):
         env = {"http_proxy": "http://p:8080"}
         result = _inject_proxy_exports("pip install numpy", env)
-        assert 'export http_proxy=http://p:8080' in result
+        assert self._has_var(result, "http_proxy", "http://p:8080")
 
     def test_no_proxy_vars_set(self):
         result = _inject_proxy_exports("wget http://example.com", {})
@@ -553,7 +571,7 @@ class TestInjectProxyExports:
     def test_git_clone(self):
         env = {"HTTPS_PROXY": "http://p:8080"}
         result = _inject_proxy_exports("git clone https://github.com/repo.git", env)
-        assert "export HTTPS_PROXY" in result
+        assert self._has_var(result, "HTTPS_PROXY", "http://p:8080")
 
 
 class TestEnsureWgetContinue:
