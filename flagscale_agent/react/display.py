@@ -25,8 +25,50 @@ def _write(text):
         sys.stdout.flush()
 
 
+def _enable_windows_ansi() -> bool:
+    """Enable ANSI escape processing on Windows via SetConsoleMode.
+
+    Returns True if ANSI is supported/enabled, False otherwise.
+    Only has effect on Windows; no-op on other platforms.
+    """
+    import sys as _sys
+    if _sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        import ctypes.wintypes
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        # Get handle to stdout
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        if handle == -1:
+            return False
+        # Get current console mode
+        mode = ctypes.wintypes.DWORD()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        if mode.value & ENABLE_VIRTUAL_TERMINAL_PROCESSING:
+            return True  # already enabled
+        new_mode = mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        return bool(kernel32.SetConsoleMode(handle, new_mode))
+    except Exception:
+        return False
+
+
+# Try to enable ANSI on Windows at import time
+_WINDOWS_ANSI_ENABLED = _enable_windows_ansi()
+
+
 def _use_color():
-    return os.environ.get("NO_COLOR") is None and hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+    import sys as _sys
+    if os.environ.get("NO_COLOR") is not None:
+        return False
+    if not hasattr(sys.stdout, "isatty") or not sys.stdout.isatty():
+        return False
+    if _sys.platform == "win32":
+        return _WINDOWS_ANSI_ENABLED
+    return True
 
 
 def _c(code, text):
@@ -505,6 +547,10 @@ class _ParallelDisplay:
             self._stop.wait(0.5)
 
     def _redraw(self):
+        # Skip in-place animation if ANSI cursor control is not available
+        # (e.g. Windows CMD without virtual terminal processing enabled).
+        if not _use_color():
+            return
         with self._lock:
             results = dict(self._results)
             hints = dict(self._hints)

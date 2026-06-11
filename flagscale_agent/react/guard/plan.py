@@ -41,6 +41,7 @@ class PlanGuard(Guard):
         """Called externally when a plan is created."""
         self._complex_task_no_plan = False
         self._pre_plan_tool_calls = 0
+        self._consecutive_reads = 0
         self._block_count = 0
 
     def _has_active_plan(self) -> bool:

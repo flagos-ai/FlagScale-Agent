@@ -3,7 +3,6 @@
 import math
 import os
 import re
-import subprocess
 import time
 
 from flagscale_agent.react.tools.base import Tool, EFFECT_READ_FS
@@ -27,12 +26,14 @@ def _numeric_key(name: str):
 
 
 def _tail(path: str, n: int = 50) -> str:
+    """Return the last n lines of a file. Pure-Python, cross-platform."""
     try:
-        out = subprocess.run(
-            ["tail", f"-{n}", path],
-            capture_output=True, text=True, timeout=10,
-        )
-        return out.stdout or "(empty)"
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+        tail_lines = lines[-n:] if len(lines) > n else lines
+        return "".join(tail_lines) or "(empty)"
+    except FileNotFoundError:
+        return "(empty)"
     except Exception as e:
         return f"ERROR reading: {e}"
 

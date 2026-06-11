@@ -90,5 +90,8 @@ class TestSession:
         assert data["completed"] is True
 
     def test_get_session_dir(self, monkeypatch):
+        import os
         monkeypatch.setattr("flagscale_agent.react.session._sessions_root", lambda: "/tmp/test_sessions")
-        assert get_session_dir("abc") == "/tmp/test_sessions/abc"
+        result = get_session_dir("abc")
+        # Normalise separators so the test works on both Linux (/) and Windows (\)
+        assert os.path.normpath(result) == os.path.normpath("/tmp/test_sessions/abc")

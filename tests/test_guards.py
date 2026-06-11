@@ -215,11 +215,27 @@ class TestPlanGuard:
         g = PlanGuard()
         g.mark_complex_task()
         g._pre_plan_tool_calls = 5
+        g._consecutive_reads = 9
+        g._block_count = 1
         ctx = _ctx("plan_create", {})
         g.check_post(ctx)
         assert g._complex_task_no_plan is False
         assert g._pre_plan_tool_calls == 0
         assert g._consecutive_reads == 0
+        assert g._block_count == 0
+
+    def test_reset_plan_state_clears_consecutive_reads(self):
+        """reset_plan_state must also clear _consecutive_reads (bug fix)."""
+        g = PlanGuard()
+        g.mark_complex_task()
+        g._consecutive_reads = 11
+        g._pre_plan_tool_calls = 4
+        g._block_count = 2
+        g.reset_plan_state()
+        assert g._complex_task_no_plan is False
+        assert g._consecutive_reads == 0
+        assert g._pre_plan_tool_calls == 0
+        assert g._block_count == 0
 
     def test_does_not_block_when_plan_exists(self):
         """Regression: once a plan exists, PlanGuard must not block reads."""
@@ -249,6 +265,16 @@ class TestPlanGuard:
                        tool_effects=ToolEffect(reads=frozenset({"filesystem"})))
             result = g.check_pre(ctx)
             assert result is None, f"Independent mode should not block at call {i+1} when plan exists"
+
+    def test_independent_warn_still_fires_without_plan(self):
+        """Without active plan, independent-mode warn still triggers at threshold."""
+        g = PlanGuard(task_plan=None)
+        g._consecutive_reads = g._PLAN_GATE_INDEPENDENT_WARN - 1
+        ctx = _ctx("read_file", {"path": "/tmp/warn.py"},
+                   tool_effects=ToolEffect(reads=frozenset({"filesystem"})))
+        result = g.check_pre(ctx)
+        assert result is not None
+        assert result.action == "inject_msg"
 
 
 # ── TrainingRuntimeGuard ──────────────────────────────────────────────────

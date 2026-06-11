@@ -544,22 +544,84 @@ class MonitorTool(Tool):
 
         Default pattern matches common training launchers while excluding
         the agent's own process (which contains 'flagscale' in its path).
+        Cross-platform:
+          - Linux/macOS: uses 'pgrep -f' for full command-line matching.
+          - Windows: uses 'psutil' if available (full cmdline match), otherwise
+            falls back to 'tasklist' for image-name matching, or returns True
+            (assume alive) when the pattern cannot be mapped to an image name.
         """
+        import sys as _sys
         pattern = process_pattern or r'torchrun|deepspeed|python.*train\.py|python.*finetune|accelerate\s+launch'
-        try:
-            result = subprocess.run(
-                ["pgrep", "-f", pattern],
-                capture_output=True, text=True, timeout=5
-            )
-            if result.returncode != 0:
+        my_pid = os.getpid()
+
+        if _sys.platform == "win32":
+            # Prefer psutil for full command-line matching (cross-platform, accurate)
+            try:
+                import psutil  # type: ignore
+                import re as _re
+                pat = _re.compile(pattern, _re.IGNORECASE)
+                for proc in psutil.process_iter(['pid', 'cmdline']):
+                    try:
+                        if proc.pid == my_pid:
+                            continue
+                        cmdline = ' '.join(proc.info['cmdline'] or [])
+                        if pat.search(cmdline):
+                            return True
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
                 return False
-            # Filter out our own process and pgrep itself
-            my_pid = os.getpid()
-            pids = [int(p) for p in result.stdout.strip().splitlines() if p.strip()]
-            alive_pids = [p for p in pids if p != my_pid]
-            return len(alive_pids) > 0
-        except Exception:
-            return True
+            except ImportError:
+                pass
+
+            # Fallback: tasklist with image-name mapping for known launchers.
+            # Only attempt when the pattern contains a recognisable launcher name;
+            # otherwise return True (assume alive) to avoid false "process dead" reports.
+            import re as _re
+            _KNOWN = {
+                "torchrun": "python.exe",
+                "deepspeed": "python.exe",
+                "accelerate": "python.exe",
+                "python": "python.exe",
+                "pytest": "python.exe",  # test runner
+            }
+            # Extract the first plain word from the regex pattern
+            first_kw = _re.split(r'[|\\.\s*?+^$(){}[\]]', pattern)[0].lower()
+            target_image = _KNOWN.get(first_kw)
+            if target_image is None:
+                # Cannot reliably map — assume alive to avoid false dead reports
+                return True
+            try:
+                result = subprocess.run(
+                    ["tasklist", "/FI", f"IMAGENAME eq {target_image}", "/NH", "/FO", "CSV"],
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5
+                )
+                lines = [l for l in result.stdout.splitlines() if target_image.lower() in l.lower()]
+                for line in lines:
+                    parts = line.strip().strip('"').split('","')
+                    if len(parts) >= 2:
+                        try:
+                            pid = int(parts[1])
+                            if pid != my_pid:
+                                return True
+                        except ValueError:
+                            continue
+                return False
+            except Exception:
+                return True
+        else:
+            # Linux / macOS — full command-line search via pgrep
+            try:
+                result = subprocess.run(
+                    ["pgrep", "-f", pattern],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode != 0:
+                    return False
+                pids = [int(p) for p in result.stdout.strip().splitlines() if p.strip()]
+                alive_pids = [p for p in pids if p != my_pid]
+                return len(alive_pids) > 0
+            except Exception:
+                return True
 
     def _read_file(self, path):
         try:
@@ -573,7 +635,8 @@ class MonitorTool(Tool):
     def _run_command(self, cmd):
         try:
             result = subprocess.run(
-                cmd, shell=True, capture_output=True, text=True, timeout=30
+                cmd, shell=True, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=30
             )
             return result.stdout + result.stderr
         except subprocess.TimeoutExpired:
