@@ -25,6 +25,9 @@ EXPECTED_SKILLS = {
     "workspace-layout",
     "train-parallel-strategy",
     "debug-strategy",
+    "infer-env-setup",
+    "infer-hw-adapt",
+    "infer-model-adapt",
 }
 
 REQUIRED_FRONTMATTER_FIELDS = {"name", "description", "keywords"}

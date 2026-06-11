@@ -41,7 +41,7 @@ constraints:
     tools: [shell]
     keywords: [pytest, python examples, vllm serve]
   prompt: Check if the test command includes 2>&1 | tee /workspace/adapt-logs/
-  correction: Add `2>&1 | tee /workspace/adapt-logs/<stage>_$(date +%Y%m%d_%H%M%S).log` to the command.
+  correction: "Add `2>&1 | tee /workspace/adapt-logs/<stage>_$(date +%Y%m%d_%H%M%S).log` to the command."
 - id: one_patch_per_failure
   description: Fix one failure at a time — patch, re-test, then move to next failure
   trigger:
@@ -54,20 +54,20 @@ constraints:
     tools: [edit_file, write_file]
     keywords: [def forward, def __init__, ops.dispatch]
   prompt: Check if new hardware-specific code is wrapped in a platform check
-  correction: Wrap with `if current_platform.is_<backend>():` or equivalent.
+  correction: "Wrap with `if current_platform.is_<backend>():` or equivalent."
 - id: todo_on_workaround
   description: Every temporary workaround must have a TODO comment
   trigger:
     tools: [edit_file, write_file]
     keywords: [workaround, temporary, hack, TODO]
   prompt: Check if the workaround has a TODO stating when it can be removed
-  correction: Add `# TODO: Remove when <condition>` above the workaround.
+  correction: "Add `# TODO: Remove when <condition>` above the workaround."
 - id: squash_before_pr
   description: All adaptation commits must be squashed into one before PR
   trigger:
     keywords: [git push, create pr, open pr]
   prompt: Check if commits have been squashed
-  correction: Run `git rebase -i HEAD~N` to squash all adaptation commits into one.
+  correction: "Run `git rebase -i HEAD~N` to squash all adaptation commits into one."
 context_injection:
   always:
   - Critical Rules
