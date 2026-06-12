@@ -59,6 +59,17 @@ constraints:
     - snapshot_download
   prompt: Check if a large download/install is about to happen without prior disk space check
   correction: Check disk space with `df -h` before large downloads or builds.
+- id: experiment_tracking_gate
+  description: Every training launch MUST be preceded by workspace_experiment(add_attempt) and followed by workspace_experiment(update_last_attempt)
+  trigger:
+    keywords:
+    - flagscale train
+    - train_gpt
+    - torchrun
+    - launch training
+    - monitor(
+  prompt: Check if workspace_experiment(add_attempt) was called BEFORE this training launch. If not, the launch is invalid.
+  correction: "STOP. Call workspace_experiment(add_attempt) with change, config, hardware, output_dir BEFORE launching. After results: call workspace_experiment(update_last_attempt). No exceptions."
 context_injection:
   always:
   - Reading strategy — depth over speed
@@ -137,3 +148,26 @@ Before operations >30 seconds:
 - **Training launch**: validate config arithmetic, verify ALL dependencies importable
 - **Memory budget**: `params × 2 (bf16) + grads × 2 + optimizer × (8/DP)` — if exceeds GPU memory, don't launch
 - **Config arithmetic**: `global_batch_size % (micro_batch_size × DP) == 0`, `num_heads % TP == 0`
+
+---
+
+## Experiment Tracking — HARD GATE
+
+**Every training launch MUST follow this protocol. No exceptions. Not even "quick retries."**
+
+The sequence is: `create` → `add_attempt` → launch → monitor → `update_last_attempt` → (repeat or `finalize`)
+
+| When | Action | Tool Call |
+|------|--------|-----------|
+| First time working on a model/task | Create experiment | `workspace_experiment(action="create", name=..., purpose=..., hypothesis=...)` |
+| BEFORE every `flagscale train` | Record attempt | `workspace_experiment(action="add_attempt", name=..., change=..., config={...}, hardware={...}, output_dir=...)` |
+| AFTER every result (success or crash) | Record result | `workspace_experiment(action="update_last_attempt", name=..., result="...")` |
+| Done with this experiment line | Close it | `workspace_experiment(action="finalize", name=..., status=..., learnings=[...])` |
+
+**Why this matters:**
+- Rapid debug-fix-retry cycles are the HARDEST to reconstruct after the fact
+- Without tracking, you repeat failed approaches because you forgot what you tried
+- The `change` field forces you to articulate what's different — if you can't, you shouldn't launch
+- The `learnings` field in finalize builds institutional knowledge across sessions
+
+**Self-check:** If you're about to call `flagscale train` and haven't called `add_attempt` in this turn, STOP.

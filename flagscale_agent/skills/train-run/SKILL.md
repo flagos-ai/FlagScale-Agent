@@ -374,60 +374,69 @@ python run.py --config-path ./examples/<model>/conf --config-name train action=s
 flagscale train <model> --dryrun
 ```
 
-### Post-Launch Protocol (MANDATORY)
+### Pre-Launch and Post-Launch Protocol (MANDATORY)
 
-After launching training, follow this sequence EVERY time. Do NOT skip steps.
+This protocol is a **HARD GATE**. You CANNOT call `flagscale train` without completing the pre-launch steps. This applies to EVERY launch — including quick retries after config changes. No exceptions.
 
-**Before launch — HARD GATE: register the experiment and create its directory:**
+#### PRE-LAUNCH (do ALL of these BEFORE `flagscale train`):
 
-0a. Create a DEDICATED experiment directory for this run. Never reuse a directory from a previous experiment. Naming convention: `<model>_<config>_<purpose>_v<N>` (e.g., `qwen3_tp4_pp1_pretrain_v1`).
+**0a. Create experiment (first launch only):**
+
+```
+workspace_experiment(action="create", name="<model>_<config>_<purpose>",
+    purpose="<what you are verifying and why>",
+    hypothesis="<expected outcome — e.g., loss ~ ln(vocab) and decreases>")
+```
+
+If the experiment already exists (retry after failure), skip this step.
+
+**0b. Record this attempt — BLOCKING GATE:**
+
+```
+workspace_experiment(action="add_attempt", name="<experiment_name>",
+    change="<what changed vs previous attempt, or 'initial run'>",
+    config={"model": "...", "tp": N, "pp": N, "dp": N, "ep": N,
+            "global_batch_size": N, "micro_batch_size": N, "seq_length": N,
+            "precision": "bf16", "train_iters": N, ...},
+    hardware={"gpus": N, "gpu_type": "...", "driver": "...", "cuda": "..."},
+    output_dir="<unique output directory for this attempt>")
+```
+
+**If you haven't called `add_attempt`, you are NOT allowed to call `flagscale train`.** This is the single most important discipline rule. During rapid debug-fix-retry cycles, this is ESPECIALLY critical — those are exactly the attempts you'll need to reconstruct later.
 
 **Version bumping rule — what counts as a new experiment:**
-- Produced at least 1 step of metrics → real experiment. Next meaningful change → bump version.
-- Changed a meaningful parameter (LR, TP/PP, batch size, data, model code, freeze strategy) → new version.
-- Launch failed before any metrics (import error, path error, config typo, port conflict) → NOT a new experiment. Record as "launch attempt N failed: reason" in the current entry's **Launch notes** field. Fix and retry under the same version and directory.
-- Training crashed after producing metrics, restarting with same config → still the same experiment. Note the crash in Result.
+- Changed a meaningful parameter (LR, TP/PP, batch size, data, model code) → new experiment (`create`)
+- Launch failed before any metrics (import error, path error, config typo) → same experiment, new attempt (`add_attempt` with change description)
+- Training crashed after producing metrics, restarting with same config → same experiment, new attempt
 
-0b. Write the experiment entry in workspace_state (section "Experiments") BEFORE launching. **If you haven't written this entry, you are NOT allowed to launch.**
+**0c. Kill old processes and verify GPUs free:**
 
-   ```
-   workspace_state(action="write", section="Experiments", content="""
-   ### <model>_<config>_<purpose> (running)
-   - **Purpose**: <what you are verifying and why>
-   - **Hypothesis**: <expected outcome — e.g., loss starts near ln(vocab_size) and decreases>
-   - **Config**: TP=<N> PP=<N> DP=<N>, micro_bs=<N>, seq_len=<N>, bf16, <N> steps
-   - **Dir**: <experiment_directory>
-   - **Launch notes**: (record failed launch attempts here, not as separate experiments)
-   - **Result**: (pending)
-   - **Reflection**: (pending)
-   - **Next**: (pending)
-   """)
-   ```
+```bash
+pgrep -fa "torchrun|train_|flagscale" | grep -v grep
+# If any found:
+pkill -9 -f "torchrun|train_|flagscale" 2>/dev/null; sleep 5
+nvidia-smi | grep -E "MiB|%"
+```
 
-   Purpose and Hypothesis are the most important fields — they force you to think about WHY before acting. If you can't articulate the purpose, you're not ready to launch.
+#### POST-RESULT (do IMMEDIATELY after monitor/metrics return):
 
-0b-retry. **If a launch fails before producing metrics**, update the SAME entry's Launch notes:
-   ```
-   workspace_state(action="write", section="Experiments", content="""
-   ### <model>_<config>_<purpose> (running)
-   ...same fields...
-   - **Launch notes**: attempt 1 failed: <reason>. Fixed: <what you changed>.
-   """)
-   ```
-   Then fix and retry. Do NOT create a new experiment entry or bump the version.
+**8a. Record the result — BLOCKING GATE:**
 
-0c. **Verify no old training processes are running.** Before every launch, check for leftover processes from previous runs and clean them up:
+```
+workspace_experiment(action="update_last_attempt", name="<experiment_name>",
+    result="<SUCCESS/FAILED — key metrics, loss trajectory, throughput, or error cause>")
+```
 
-   ```bash
-   # Check for existing training processes
-   pgrep -fa "torchrun|train_|flagscale" | grep -v grep
-   # If any found, kill them and wait for GPU memory to be released
-   pkill -9 -f "torchrun|train_|flagscale" 2>/dev/null; sleep 5
-   # Verify GPUs are free
-   nvidia-smi | grep -E "MiB|%"
-   ```
+**If you haven't called `update_last_attempt`, you are NOT allowed to proceed to the next task or launch.** Do this BEFORE fixing config, BEFORE analyzing, BEFORE anything else.
 
-   Launching a new training run while an old one is still alive causes port conflicts, GPU OOM, and log corruption. This check takes seconds; debugging the resulting failures takes much longer.
+**8b. Finalize (when done with this experiment line):**
+
+```
+workspace_experiment(action="finalize", name="<experiment_name>",
+    status="completed|failed",
+    learnings=["lesson 1", "lesson 2", ...],
+    root_cause="<if failed, what was the fundamental problem>")
+```
 
 **Within 30 seconds of launch:**
 1. **Wait 10-15 seconds** before checking logs — the log directory may not exist yet (race condition with nohup/background launch)
@@ -448,22 +457,7 @@ After launching training, follow this sequence EVERY time. Do NOT skip steps.
 
 **After training completes or fails — close the experiment:**
 
-8. Update the experiment entry with Result, Reflection, and Next:
-
-   ```
-   workspace_state(action="write", section="Experiments", content="""
-   ### <model>_<config>_<purpose> (completed)
-   - **Purpose**: <same as above>
-   - **Hypothesis**: <same as above>
-   - **Config**: <same as above>
-   - **Dir**: <experiment_directory>
-   - **Result**: <actual outcome — steps completed, loss trajectory, key metrics, peak memory>
-   - **Reflection**: <lessons learned — what worked, what was tight, what surprised you>
-   - **Next**: <what to try next based on this result>
-   """)
-   ```
-
-   The Reflection field is critical — it captures lessons that prevent future experiments from repeating mistakes. A failed experiment with good reflection is more valuable than a successful one with no reflection.
+8. Record result and finalize — see POST-RESULT section above (8a and 8b). This MUST happen before any further analysis or next launch.
 
 **If health judge killed a long-running command:**
 When the agent's health judge kills a `sleep` or `tail -f` command, do NOT blindly retry with another sleep. Instead:
