@@ -66,6 +66,19 @@ constraints:
   prompt: Check if log file discovery might return old logs from previous runs
   correction: 'Old log trap: find without timestamp filtering returns ALL previous runs. Use monitor tool or filter by latest
     timestamp dir.'
+- id: post_result_tracking
+  description: After any training result (success or crash), immediately call workspace_experiment(update_last_attempt)
+  trigger:
+    keywords:
+    - OOM
+    - FAILED
+    - SUCCESS
+    - training completed
+    - crashed
+    - iteration
+    - loss
+  prompt: Check if workspace_experiment(update_last_attempt) was called after this training result was observed
+  correction: "STOP. Call workspace_experiment(action='update_last_attempt', name=..., result='...') BEFORE proceeding to fix config or launch next attempt."
 context_injection:
   always:
   - Critical Rules
