@@ -99,6 +99,7 @@ class TestStateMachine:
 class ConcreteGuard(Guard):
     name = "test_guard"
     priority = 10
+    activate_on_states = {AgentState.EXECUTING}
 
     def __init__(self, verdict=None):
         self._verdict = verdict
@@ -187,7 +188,8 @@ class TestGuardRegistry:
         assert reg.guards[0].priority == 5
         assert reg.guards[1].priority == 20
 
-    def test_check_pre_first_verdict_wins(self):
+    def test_check_pre_block_wins_with_inject_prepended(self):
+        """Block verdict takes precedence; inject messages are prepended for context."""
         reg = GuardRegistry()
         g1 = ConcreteGuard(verdict=GuardVerdict.block("blocked by g1"))
         g1.priority = 10
@@ -198,7 +200,22 @@ class TestGuardRegistry:
         ctx = GuardContext(current_state=AgentState.EXECUTING)
         verdict = reg.check_pre(ctx)
         assert verdict.action == "block"
-        assert verdict.message == "blocked by g1"
+        # Inject message prepended to block message for full context
+        assert verdict.message == "injected by g2\n\nblocked by g1"
+
+    def test_check_pre_block_only_no_inject(self):
+        """Block verdict alone — no inject merging."""
+        reg = GuardRegistry()
+        g1 = ConcreteGuard(verdict=GuardVerdict.block("blocked"))
+        g1.priority = 10
+        g2 = ConcreteGuard(verdict=None)
+        g2.priority = 20
+        reg.register(g1)
+        reg.register(g2)
+        ctx = GuardContext(current_state=AgentState.EXECUTING)
+        verdict = reg.check_pre(ctx)
+        assert verdict.action == "block"
+        assert verdict.message == "blocked"
 
     def test_check_pre_returns_none_when_all_allow(self):
         reg = GuardRegistry()
@@ -246,6 +263,7 @@ class TestGuardContextToolEffects:
         class WriteBlockGuard(Guard):
             name = "write_blocker"
             priority = 1
+            activate_on_states = {AgentState.EXECUTING}
 
             def check_pre(self, ctx):
                 if ctx.tool_effects.is_write:

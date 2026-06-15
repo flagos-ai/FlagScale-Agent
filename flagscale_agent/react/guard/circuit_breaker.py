@@ -145,19 +145,24 @@ class CircuitBreakerGuard(Guard):
         pass
 
     def _classify_error(self, result: str, classify_fn=None) -> str | None:
-        """Classify error — use LLM when available, keyword fallback otherwise.
+        """Detect error and return a category for circuit grouping.
 
         Two-phase:
         1. Cheap trigger: check for error keywords
-        2. LLM confirm: classify_fn("is_error") to verify
+        2. LLM confirm: classify_fn("is_error") to eliminate false positives
+        
+        Returns tool-based category string or None if not an error.
         """
-        from flagscale_agent.react.guard.error_classifier import ErrorClassifierGuard
-
-        # Phase 1: Quick check — does it even look like an error?
-        if not ErrorClassifierGuard._cheap_error_trigger(result):
+        # Phase 1: Quick keyword gate
+        text_lower = result.lower()
+        if not any(ind in text_lower for ind in (
+            "error", "traceback", "exception", "failed", "fatal",
+            "denied", "not found", "cannot", "killed", "timeout",
+            "refused", "oom", "cuda",
+        )):
             return None
 
-        # Phase 2: Use LLM if available
+        # Phase 2: Use LLM if available to confirm
         if classify_fn:
             is_error, source = get_judge_result(
                 classify_fn, "is_error",
@@ -166,5 +171,18 @@ class CircuitBreakerGuard(Guard):
             if is_trusted(source) and not is_error:
                 return None  # LLM says not an error
 
-        # Fallback to keyword for category name
-        return ErrorClassifierGuard._classify_static(result)
+        # Use a broad category from the output keywords for circuit grouping
+        return self._infer_category(text_lower)
+
+    @staticmethod
+    def _infer_category(text_lower: str) -> str:
+        """Infer a coarse category from keywords — for circuit grouping only."""
+        if "permission" in text_lower or "denied" in text_lower:
+            return "permission"
+        if "oom" in text_lower or "out of memory" in text_lower:
+            return "resource"
+        if "timeout" in text_lower or "refused" in text_lower:
+            return "network"
+        if "no module" in text_lower or "not found" in text_lower:
+            return "environment"
+        return "general"
