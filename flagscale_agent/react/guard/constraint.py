@@ -136,4 +136,4 @@ class ConstraintGuard(Guard):
         return list(self._constraints)
 
     def reset_turn(self):
-        """No per-turn reset needed — violations accumulate across turns."""
+        """Violations accumulate across iterations (session-level)."""

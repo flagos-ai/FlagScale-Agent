@@ -338,7 +338,7 @@ class TrainingRuntimeGuard(Guard):
         return None
 
     def reset_turn(self):
-        """Heartbeat and multi-node state persist across turns."""
+        """Heartbeat and multi-node state are session-level."""
 
     @staticmethod
     def _is_read_only_shell_fast(cmd: str) -> bool:

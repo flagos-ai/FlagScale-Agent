@@ -103,8 +103,8 @@ class AgentKernel:
                 if self._interrupted:
                     break
 
-                # Reset guards for this iteration
-                d.guard_registry.reset_turn()
+                # Reset guards for this iteration (called once per LLM+tool loop)
+                d.guard_registry.reset_iteration()
                 d.judge.reset_turn()
 
                 schemas = d.get_schemas_fn()

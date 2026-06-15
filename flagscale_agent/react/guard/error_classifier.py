@@ -61,10 +61,13 @@ class ErrorClassifierGuard(Guard):
             return None
 
         # Use LLM to classify and get suggestion
-        category, suggestion = self._classify_with_llm(ctx, text)
+        category, suggestion, llm_said_no = self._classify_with_llm(ctx, text)
 
         if not category:
-            # LLM didn't think it's a real error, or classify_fn unavailable
+            if llm_said_no:
+                # LLM actively confirmed this is NOT an error — reset streak
+                self._on_success()
+            # Otherwise (no classify_fn or untrusted source): don't reset, don't fire
             return None
 
         # Track consecutive same-category errors for escalation
@@ -85,14 +88,15 @@ class ErrorClassifierGuard(Guard):
 
     def _classify_with_llm(
         self, ctx: GuardContext, text: str
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[str], bool]:
         """Ask LLM to determine if this is a real error.
 
-        Returns (category, suggestion) or (None, None) if not a real error.
-        Category is derived from tool_name since the LLM is_error check is binary.
+        Returns (category, suggestion, llm_said_no) where:
+        - category is set if LLM confirms an error
+        - llm_said_no is True only when LLM actively says "not an error"
         """
         if not ctx.classify_fn:
-            return None, None
+            return None, None, False
 
         # Truncate to avoid blowing up the classify prompt
         snippet = text[:1500] if len(text) > 1500 else text
@@ -105,16 +109,16 @@ class ErrorClassifierGuard(Guard):
         )
 
         if not is_trusted(source):
-            return None, None
+            return None, None, False
 
         # is_error returns yes/no style — if "no", skip
         result_str = result if isinstance(result, str) else str(result)
         if result_str.lower().startswith("n"):
-            return None, None
+            return None, None, True  # LLM actively said "not an error"
 
         # Use tool_name as the category for escalation tracking
         category = f"{ctx.tool_name}_error"
-        return category, None
+        return category, None, False
 
     def _build_message(self, category: str, suggestion: Optional[str]) -> str:
         """Build the injection message with escalation if needed."""

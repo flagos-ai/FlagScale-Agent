@@ -132,7 +132,6 @@ class ProgressGuard(Guard):
         return None
 
     def reset_turn(self):
-        # Do NOT reset _read_files or counters here — reset_turn is called per iteration.
-        # Progress tracking needs to accumulate across iterations within a turn.
+        # Progress tracking accumulates across iterations within a turn.
         # Counters are reset by productive tool calls in check_post.
         pass

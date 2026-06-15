@@ -353,6 +353,7 @@ class LoopDetectGuard(Guard):
             self._shell_cmd_history.pop()
 
     def reset_turn(self):
+        # Clear per-iteration dedup cache, but keep history for cross-iteration detection
         self._tool_call_cache.clear()
 
     @staticmethod

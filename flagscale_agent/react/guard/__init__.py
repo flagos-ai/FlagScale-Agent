@@ -135,9 +135,20 @@ class Guard(abc.ABC):
         """Called when a tool call was blocked externally (e.g., by another guard)."""
         pass
 
-    def reset_turn(self):
-        """Called at the start of each new iteration/turn."""
+    def reset_iteration(self):
+        """Called at the start of each iteration (LLM+tool loop) within a turn.
+
+        A "turn" is one user message → completion (may contain many iterations).
+        An "iteration" is one LLM call + one tool execution within that turn.
+
+        Most guards should NOT reset state here — they need to track patterns
+        across iterations (e.g., consecutive errors, read streaks).
+        Only reset per-iteration dedup caches or similar ephemeral state.
+        """
         pass
+
+    # Backward compat: subclasses may override either name
+    reset_turn = reset_iteration
 
     def set_shared_state(self, shared_state):
         """Optional: receive SharedState from GuardRegistry. Override to use."""
@@ -166,6 +177,32 @@ def _infer_category(verdict: GuardVerdict) -> str:
     return ""
 
 
+_OVERRIDE_HINT = (
+    "\n\n[To override: re-issue the same tool call with an added "
+    "\"_override_reason\" field in tool_args explaining why this action is justified.]"
+)
+
+
+def _maybe_add_override_hint(
+    verdict: GuardVerdict, blocking_guard: Guard | None, ctx: GuardContext
+) -> str:
+    """Append override instructions to a block message if the blocking guard is overridable.
+
+    Only appends when:
+    - The verdict is a "block"
+    - The blocking guard has overridable=True
+    - The LLM hasn't already provided an override_reason (avoids re-hinting on rejection)
+    """
+    if verdict.action != "block":
+        return verdict.message
+    if ctx.override_reason:
+        # Override was attempted but rejected — don't re-hint
+        return verdict.message
+    if blocking_guard and blocking_guard.overridable:
+        return verdict.message + _OVERRIDE_HINT
+    return verdict.message
+
+
 class GuardRegistry:
     """Manages all guards, runs them in priority order, deduplicates injects."""
 
@@ -191,6 +228,7 @@ class GuardRegistry:
         inject_messages = []
         inject_categories_seen: set = set()
         first_hard_verdict = None
+        first_hard_guard = None
         first_reason = ""
 
         for guard in self._guards:
@@ -215,6 +253,7 @@ class GuardRegistry:
                     continue
                 if first_hard_verdict is None:
                     first_hard_verdict = verdict
+                    first_hard_guard = guard
                 continue
 
             if verdict.action == "inject_msg":
@@ -250,10 +289,14 @@ class GuardRegistry:
                     guard.name, category or verdict.reason, ctx.turn_count
                 )
 
-        # If there's a hard verdict, prepend inject messages
+        # If there's a hard verdict, prepend inject messages and add override hint
         if first_hard_verdict:
             if inject_messages and first_hard_verdict.message:
                 first_hard_verdict.message = "\n\n".join(inject_messages) + "\n\n" + first_hard_verdict.message
+            # Add override hint if the blocking guard is overridable
+            first_hard_verdict.message = _maybe_add_override_hint(
+                first_hard_verdict, first_hard_guard, ctx
+            )
             return first_hard_verdict
 
         # Merge all inject messages into one verdict (deduplicated)
@@ -270,6 +313,7 @@ class GuardRegistry:
         inject_messages = []
         inject_categories_seen: set = set()
         first_hard_verdict = None
+        first_hard_guard = None
         first_reason = ""
 
         # v2: Update shared state with tool call info
@@ -298,6 +342,7 @@ class GuardRegistry:
                     continue
                 if first_hard_verdict is None:
                     first_hard_verdict = verdict
+                    first_hard_guard = guard
                 continue
 
             if verdict.action == "inject_msg":
@@ -332,6 +377,9 @@ class GuardRegistry:
         if first_hard_verdict:
             if inject_messages and first_hard_verdict.message:
                 first_hard_verdict.message = "\n\n".join(inject_messages) + "\n\n" + first_hard_verdict.message
+            first_hard_verdict.message = _maybe_add_override_hint(
+                first_hard_verdict, first_hard_guard, ctx
+            )
             return first_hard_verdict
 
         if inject_messages:
@@ -351,11 +399,20 @@ class GuardRegistry:
                     return verdict
         return None
 
-    def reset_turn(self):
-        """Reset all guards for a new turn."""
-        self._shared_state.new_turn()
+    def reset_iteration(self):
+        """Reset per-iteration state for all guards.
+
+        Called at the start of each iteration (LLM+tool loop) within a turn.
+        Guards that need to track state across iterations should keep their
+        reset_turn() as pass (default behavior).
+        """
+        self._shared_state.new_iteration()
         for guard in self._guards:
+            # Call reset_turn — subclasses override this name
             guard.reset_turn()
+
+    # Backward compat alias
+    reset_turn = reset_iteration
 
     @property
     def guards(self) -> list[Guard]:

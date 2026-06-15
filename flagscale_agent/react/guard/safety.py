@@ -137,4 +137,4 @@ class SafetyGuard(Guard):
         return None
 
     def reset_turn(self):
-        pass  # Safety/error state persists across turns
+        pass  # Safety/error state is session-level

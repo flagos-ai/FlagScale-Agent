@@ -160,7 +160,6 @@ class PlanGuard(Guard):
         return None
 
     def reset_turn(self):
-        # Do NOT reset _consecutive_reads here — reset_turn is called per iteration,
-        # and we need to track consecutive reads across iterations within a turn.
-        # _consecutive_reads is reset by productive tool calls in check_pre.
+        # _consecutive_reads tracks patterns across iterations within a turn.
+        # It is reset by productive tool calls in check_pre, not here.
         pass

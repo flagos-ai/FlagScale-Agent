@@ -231,7 +231,7 @@ class TestGuardRegistry:
         g2 = MagicMock(spec=Guard)
         g2.priority = 20
         reg._guards = [g1, g2]
-        reg.reset_turn()
+        reg.reset_iteration()
         g1.reset_turn.assert_called_once()
         g2.reset_turn.assert_called_once()
 

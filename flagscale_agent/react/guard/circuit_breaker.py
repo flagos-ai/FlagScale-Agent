@@ -141,7 +141,7 @@ class CircuitBreakerGuard(Guard):
         return None
 
     def reset_turn(self):
-        # Keep circuit state across turns (session-level)
+        # Circuit state is session-level, persists across iterations
         pass
 
     def _classify_error(self, result: str, classify_fn=None) -> str | None:

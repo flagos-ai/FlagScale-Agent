@@ -121,7 +121,7 @@ class BudgetGuard(Guard):
         self._total_tokens += input_tokens + output_tokens
 
     def reset_turn(self):
-        # Budget is session-level, never resets per turn
+        # Budget is session-level, never resets per iteration
         pass
 
     @property

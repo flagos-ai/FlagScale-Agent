@@ -193,8 +193,9 @@ class SharedState:
         self.read_stats: ReadStats = ReadStats()
         self.inject_tracker: InjectTracker = InjectTracker()
 
-        # Guard suppression: if one guard already warned about reads,
-        # suppress similar warnings from other guards in the same turn
+        # Guard suppression: if one guard already warned about reads this iteration,
+        # suppress similar warnings from other guards in the same iteration.
+        # (Reset in new_iteration(), so each iteration allows one new warning.)
         self._read_warning_issued_this_turn: bool = False
 
         # Override audit log: tracks all accepted overrides for transparency
@@ -251,10 +252,17 @@ class SharedState:
         self._read_warning_issued_this_turn = True
         return True
 
-    def new_turn(self):
-        """Reset per-turn state."""
+    def new_iteration(self):
+        """Reset per-iteration state.
+
+        Called at the start of each iteration (LLM+tool loop) within a turn.
+        Only resets flags that should allow re-firing within the same turn.
+        """
         self._read_warning_issued_this_turn = False
         self.inject_tracker.new_turn()
+
+    # Backward compat alias
+    new_turn = new_iteration
 
     def record_override(self, guard_name: str, reason: str):
         """Record an accepted override for audit purposes."""
