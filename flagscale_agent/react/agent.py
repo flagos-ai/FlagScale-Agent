@@ -71,6 +71,7 @@ from flagscale_agent.react.guard.error_classifier import ErrorClassifierGuard
 from flagscale_agent.react.guard.circuit_breaker import CircuitBreakerGuard
 from flagscale_agent.react.guard.budget import BudgetGuard
 from flagscale_agent.react.guard.env_compat import EnvCompatGuard
+from flagscale_agent.react.guard.output_quality import OutputQualityGuard
 from flagscale_agent.react.constraint.cache import ConstraintCache
 from flagscale_agent.react.prompt_builder import PromptBuilder
 from flagscale_agent.react.tool_executor import ToolExecutor, tool_display_summary
@@ -292,6 +293,7 @@ class WorkerAgent:
         ))
         guard_registry.register(LoopDetectGuard())
         guard_registry.register(ErrorClassifierGuard())
+        guard_registry.register(OutputQualityGuard())
         guard_registry.register(EnvCompatGuard())
 
         # Create ConstraintGuard (will be populated with Skill constraints later)
@@ -669,6 +671,7 @@ class WorkerAgent:
             self._auto_turn_count = 0
             self._inject_context(user_input)
             self._check_user_porting_confirmation(user_input)
+            self._detect_and_set_task_mode(user_input)
             self._reset_guard_escalation()
             self.history.append({"role": "user", "content": user_input})
             try:
@@ -901,6 +904,7 @@ class WorkerAgent:
         self._auto_turn_count = 0
         self._inject_context(user_input)
         self._check_user_porting_confirmation(user_input)
+        self._detect_and_set_task_mode(user_input)
         self.history.append({"role": "user", "content": user_input})
         try:
             self._react_loop()
@@ -1256,12 +1260,96 @@ class WorkerAgent:
 
     def _reset_guard_escalation(self):
         """Reset guard escalation state on new user input — prevents stale escalations."""
-        for guard in self.guard_registry.guards:
+        for guard in self._kernel.deps.guard_registry.guards:
             if hasattr(guard, 'reset_escalation'):
                 guard.reset_escalation()
             # Also reset loop detection history for fresh user intent
             if hasattr(guard, '_exact_repeat_count'):
                 guard._exact_repeat_count = {}
+
+    def _detect_and_set_task_mode(self, user_input: str):
+        """Auto-detect TaskMode from user input and set on SharedState.
+
+        Uses a scoring approach — each signal contributes points to a category,
+        and the highest-scoring category wins. This avoids false positives from
+        topic words that aren't the intent verb.
+
+        Intent verbs (what user wants agent to DO) score higher than topic nouns.
+        """
+        from flagscale_agent.react.guard.shared_state import TaskMode
+
+        shared_state = self._kernel.deps.guard_registry.shared_state
+        text = user_input.lower()
+
+        # Skip mode detection on very short inputs (confirmations)
+        # But allow short Chinese phrases (3 chars can be meaningful: "改了吧")
+        stripped = text.strip()
+        if len(stripped) <= 2 or stripped in ("ok", "好", ".", "继续", "go", "yes", "no"):
+            return
+
+        # ── Score-based detection ──
+        scores = {
+            TaskMode.PORTING: 0,
+            TaskMode.DEBUGGING: 0,
+            TaskMode.IMPLEMENTATION: 0,
+            TaskMode.ANALYSIS: 0,
+        }
+
+        # Porting (high-confidence signals, score 10 each)
+        for s in ("port ", "porting", "迁移", "移植", "适配模型",
+                  "convert model", "convert checkpoint", "转换模型", "转换权重",
+                  "from huggingface", "from hf", "从hf", "从huggingface",
+                  "to megatron", "到megatron"):
+            if s in text:
+                scores[TaskMode.PORTING] += 10
+
+        # Debugging intent verbs (score 5)
+        for s in ("debug", "调试", "出错了", "报错了", "crash", "崩溃",
+                  "doesn't work", "不work", "broken", "坏了"):
+            if s in text:
+                scores[TaskMode.DEBUGGING] += 5
+        # Debugging topic words (score 2 — weaker, could be in other contexts)
+        for s in ("error", "bug", "fail", "异常"):
+            if s in text:
+                scores[TaskMode.DEBUGGING] += 2
+
+        # Implementation intent verbs (score 5)
+        for s in ("实现", "implement", "create", "创建", "添加", "add ",
+                  "build", "构建", "configure", "配置",
+                  "setup", "set up", "搭建", "launch", "启动",
+                  "modify", "change", "update", "编辑",
+                  "都改了", "改了吧", "改一下", "改掉", "改成", "全改",
+                  "一次性", "全部改", "直接加", "直接改"):
+            if s in text:
+                scores[TaskMode.IMPLEMENTATION] += 5
+        # "修复" as implementation (user requesting a fix = implementation work)
+        for s in ("修复", "fix", "修改"):
+            if s in text:
+                scores[TaskMode.IMPLEMENTATION] += 3
+                scores[TaskMode.DEBUGGING] += 1  # slight debugging hint too
+        # Write-related
+        for s in ("write code", "写代码", "写一个", "写个"):
+            if s in text:
+                scores[TaskMode.IMPLEMENTATION] += 5
+
+        # Analysis intent verbs (score 5)
+        for s in ("分析", "analyze", "explain", "解释", "理解", "understand",
+                  "investigate", "research", "调研", "研究",
+                  "review", "compare", "对比", "summarize", "总结",
+                  "看看", "看一下", "看下", "了解", "explore",
+                  "overview", "诊断报告", "全面诊断", "整体看", "全面看",
+                  "how does", "how do", "what is", "what are"):
+            if s in text:
+                scores[TaskMode.ANALYSIS] += 5
+
+        # Find the winner
+        max_score = max(scores.values())
+        if max_score == 0:
+            return  # No signals detected, keep current mode
+
+        # Only change if there's a clear winner (or at least some signal)
+        winner = max(scores, key=scores.get)
+        shared_state.set_task_mode(winner)
 
     def _inject_context(self, user_input: str):
         memory_context = self._build_memory_context()

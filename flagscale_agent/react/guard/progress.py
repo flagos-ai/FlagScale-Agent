@@ -1,6 +1,7 @@
 """ProgressGuard — detects read-only stalls and lack of productive output.
 
-Uses tool_effects to determine read-only vs productive tools instead of hardcoded sets.
+v2: Uses SharedState for centralized read tracking and deduplication with LoopDetectGuard.
+Only fires when LoopDetect hasn't already warned about the same stall.
 """
 
 from __future__ import annotations
@@ -10,122 +11,122 @@ from flagscale_agent.react.state_machine import AgentState
 
 
 class ProgressGuard(Guard):
-    """Detects read-only stalls and nudges agent toward productive action.
+    """Monitors read-only tool patterns and prompts action.
 
-    Uses tool_effects.is_read_only to classify tools instead of hardcoded sets.
+    v2 changes:
+    - Uses SharedState.read_stats instead of private counters
+    - Checks SharedState.read_warning_issued before firing (avoids duplication)
+    - TaskMode-aware thresholds
     """
 
     name = "progress"
     priority = 30
     activate_on_states = {AgentState.EXECUTING}
 
-    # ── Thresholds ──
-    _STALE_THRESHOLD_NORMAL = 25
-    _STALE_THRESHOLD_PORTING = 40
-    _STALE_THRESHOLD_DEBUG = 30
-    _STALE_THRESHOLD_WORKER = 8  # Fix 5: Lower threshold for worker mode
-    _STALE_EXTRA_FOR_BLOCK = 8
-    _READS_HARD_CAP_NORMAL = 60
-    _READS_HARD_CAP_PORTING = 80
-    _READS_HARD_CAP_WORKER = 20  # Fix 5: Lower hard cap for worker mode
+    # Base thresholds (multiplied by TaskMode.read_tolerance)
+    _READ_ONLY_STREAK_WARN_BASE = 8    # Consecutive reads before warn
+    _READ_ONLY_STREAK_BLOCK_BASE = 14  # Consecutive reads before block
+    _REREAD_WARN_BASE = 3              # Re-reads of same file before warn
 
     def __init__(self):
-        self._consecutive_reads: int = 0
-        self._reads_since_last_new_file: int = 0
-        self._rereads_without_save: int = 0
-        self._read_files: set[str] = set()
-        self._progress_triggers: int = 0
-        self._progress_block_count: int = 0  # track repeated blocks for escalation
-        # Mode flags (set externally)
-        self.is_porting_mode: bool = False
-        self.is_worker_mode: bool = False  # Fix 5: Worker mode flag
-        self.consecutive_train_failures: int = 0
+        self._read_files: set = set()
+        self._reread_count: int = 0
+        self._shared_state = None
+        self._warned_this_session: bool = False
+
+    def set_shared_state(self, shared_state):
+        """Receive SharedState from GuardRegistry."""
+        self._shared_state = shared_state
+
+    @property
+    def _tolerance_multiplier(self) -> float:
+        """Get read tolerance from TaskMode."""
+        if self._shared_state:
+            return self._shared_state.task_mode.read_tolerance
+        return 1.0
+
+    @property
+    def _warn_threshold(self) -> int:
+        return max(5, int(self._READ_ONLY_STREAK_WARN_BASE * self._tolerance_multiplier))
+
+    @property
+    def _block_threshold(self) -> int:
+        return max(8, int(self._READ_ONLY_STREAK_BLOCK_BASE * self._tolerance_multiplier))
+
+    @property
+    def _reread_threshold(self) -> int:
+        return max(2, int(self._REREAD_WARN_BASE * self._tolerance_multiplier))
 
     def check_post(self, ctx: GuardContext) -> GuardVerdict | None:
-        # Reset on productive action (tool that writes)
-        is_productive = ctx.tool_effects.is_write or ctx.tool_name in (
-            "write_file", "edit_file", "memory_write",
-            "plan_create", "plan_update", "workspace_experiment",
-        )
-        # Shell: only productive if not read-only
-        if ctx.tool_name == "shell" and not ctx.tool_effects.is_read_only:
-            is_productive = True
-
-        if is_productive:
-            self._consecutive_reads = 0
-            self._reads_since_last_new_file = 0
-            self._rereads_without_save = 0
-            self._progress_triggers = 0
-            self._progress_block_count = 0
+        if not ctx.tool_name:
             return None
 
-        # Track read-only calls
-        if ctx.tool_effects.is_read_only:
-            self._consecutive_reads += 1
+        # If this is a productive (write) tool, reset state
+        if not ctx.tool_effects.is_read_only:
+            self._read_files.clear()
+            self._reread_count = 0
+            self._warned_this_session = False
+            return None
 
-            if ctx.tool_name == "read_file":
-                path = ctx.tool_args.get("path", "") or ctx.tool_args.get("file_path", "")
-                if path and path not in self._read_files:
-                    self._read_files.add(path)
-                    self._reads_since_last_new_file = 0
-                elif path:
-                    self._reads_since_last_new_file += 1
-                    self._rereads_without_save += 1
+        # v2: Check if LoopDetect or another guard already warned about reads this turn
+        if self._shared_state and self._shared_state.read_warning_issued_this_turn:
+            # Another guard already injected a read-stall warning; suppress ours.
+            return None
 
-        # Determine adaptive threshold
-        stale_threshold = self._STALE_THRESHOLD_NORMAL
-        if self.is_worker_mode:
-            stale_threshold = self._STALE_THRESHOLD_WORKER
-        elif self.is_porting_mode:
-            stale_threshold = self._STALE_THRESHOLD_PORTING
-        elif self.consecutive_train_failures >= 2:
-            stale_threshold = self._STALE_THRESHOLD_DEBUG
-
-        # Pattern 1: Re-reading without discovery
-        if self._reads_since_last_new_file >= stale_threshold:
-            self._progress_triggers += 1
-            if self._reads_since_last_new_file >= stale_threshold + self._STALE_EXTRA_FOR_BLOCK:
-                self._progress_block_count += 1
-                if self._progress_block_count >= 3:
-                    return GuardVerdict.escalate(
-                        f"[PROGRESS] You've been busy but not productive — "
-                        f"{self._reads_since_last_new_file} calls without new discoveries. "
-                        "This means you're missing something fundamental. "
-                        "State what you know, what you're looking for, and what's blocking you. "
-                        "Then ask the user for direction.",
-                        reason=f"progress_stall_persistent: {self._reads_since_last_new_file} reads",
+        # Track re-reads
+        if ctx.tool_name == "read_file":
+            path = ctx.tool_args.get("path", "")
+            if path and path in self._read_files:
+                self._reread_count += 1
+                if self._reread_count >= self._reread_threshold:
+                    if self._shared_state:
+                        self._shared_state.issue_read_warning()
+                    return GuardVerdict.inject(
+                        f"[Progress] You've re-read '{path.split('/')[-1]}' "
+                        f"{self._reread_count} times. Consider using grep/shell for "
+                        f"targeted lookups, or save findings to memory.",
+                        reason="re-read_same_file",
+                        category="read_stall",
                     )
-                return GuardVerdict.block(
-                    f"[PROGRESS] {self._reads_since_last_new_file} calls without "
-                    f"new files or output. You're stuck — acknowledge it.\n"
-                    "Ask yourself: am I missing information, or is my approach wrong? "
-                    "Create a plan (plan_create) to structure what you know, "
-                    "then continue with a specific hypothesis to test.",
-                    reason=f"extended staleness: {self._reads_since_last_new_file} reads",
-                )
             else:
-                return GuardVerdict.inject(
-                    "\n[PROGRESS] You're re-reading known files without learning anything new. "
-                    "What specific question are you trying to answer? "
-                    "If you've found what you need, move to action. "
-                    "If not, a memory_write of current findings can clarify your next move.",
-                    reason="re-reading known files",
-                )
+                self._read_files.add(path)
 
-        # Pattern 2: Long exploration without checkpoint
-        if self.is_worker_mode:
-            reads_hard_cap = self._READS_HARD_CAP_WORKER
-        elif self.is_porting_mode:
-            reads_hard_cap = self._READS_HARD_CAP_PORTING
+        # Use SharedState for centralized consecutive read count
+        consecutive_reads = 0
+        if self._shared_state:
+            consecutive_reads = self._shared_state.read_stats.consecutive_reads
         else:
-            reads_hard_cap = self._READS_HARD_CAP_NORMAL
-        if self._consecutive_reads >= reads_hard_cap and self._progress_triggers <= 1:
-            self._progress_triggers += 1
+            # Fallback: count from recent_tool_names
+            consecutive_reads = 0
+            for name in reversed(ctx.recent_tool_names):
+                if name in ("read_file", "shell"):
+                    consecutive_reads += 1
+                else:
+                    break
+
+        # Check thresholds
+        if consecutive_reads >= self._block_threshold:
+            if self._shared_state:
+                self._shared_state.issue_read_warning()
             return GuardVerdict.inject(
-                "\n[CHECKPOINT SUGGESTION] You've done extensive exploration. "
-                "Consider a memory_write to persist key findings — this protects "
-                "against context compaction loss.",
-                reason=f"extended exploration: {self._consecutive_reads} reads",
+                f"[Progress] {consecutive_reads}/{self._block_threshold} "
+                f"consecutive read-only calls. You have enough information to act. "
+                f"Ask yourself: do I have enough to move forward? "
+                f"If yes — write, build, or fix something. "
+                f"If no — what specific piece is missing?",
+                reason="read_only_stall_block",
+                category="read_stall",
+            )
+
+        if consecutive_reads >= self._warn_threshold and not self._warned_this_session:
+            self._warned_this_session = True
+            if self._shared_state:
+                self._shared_state.issue_read_warning()
+            return GuardVerdict.inject(
+                f"[Progress] {consecutive_reads}/{self._warn_threshold} "
+                f"consecutive read-only calls. Consider acting on what you've gathered.",
+                reason="read_only_stall_warn",
+                category="read_stall",
             )
 
         return None
