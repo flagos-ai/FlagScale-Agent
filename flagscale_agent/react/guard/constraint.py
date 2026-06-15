@@ -28,6 +28,7 @@ class ConstraintGuard(Guard):
     name = "constraint"
     priority = 25  # After safety (10), before progress (30)
     activate_on_states = {AgentState.EXECUTING, AgentState.PLANNING}
+    overridable = True
 
     def __init__(self, constraints: list[Constraint] | None = None):
         self._constraints: list[Constraint] = constraints or []

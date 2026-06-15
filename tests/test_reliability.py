@@ -285,14 +285,6 @@ class TestBudgetGuard:
         assert result.action == "inject_msg"
         assert "tool" in result.message.lower() or "Tool" in result.message
 
-    def test_usage_summary(self):
-        guard = BudgetGuard(max_tokens=1000, max_tool_calls=10)
-        guard.report_tokens(100, 50)
-        summary = guard.usage_summary
-        assert summary["total_tokens"] == 150
-        assert summary["max_tokens"] == 1000
-        assert summary["token_percent"] == 15.0
-
 
 # ── StepCheckpoint Tests ────────────────────────────────────────────────────
 

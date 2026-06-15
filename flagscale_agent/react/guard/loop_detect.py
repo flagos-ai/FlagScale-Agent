@@ -63,6 +63,7 @@ class LoopDetectGuard(Guard):
     name = "loop_detect"
     priority = 20
     activate_on_states = {AgentState.EXECUTING}
+    overridable = True
 
     _MAX_RECENT = 12
 

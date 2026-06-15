@@ -247,9 +247,8 @@ class TestClassifyTraceFast:
         judge.classify("is_read_only_shell", {"command": "ls"})
         assert judge.trace.source_of("is_read_only_shell") == SOURCE_FAST
 
-    def test_trace_any_from_fast(self):
+    def test_trace_source_of_fast(self):
         provider = MockProvider(responses=[])
         judge = Judge(provider)
         judge.classify("is_kill_command", {"command": "kill 123"})
-        assert judge.trace.any_from(SOURCE_FAST) is True
-        assert judge.trace.any_from(SOURCE_LLM) is False
+        assert judge.trace.source_of("is_kill_command") == SOURCE_FAST

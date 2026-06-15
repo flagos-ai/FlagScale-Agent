@@ -260,6 +260,8 @@ class AgentKernel:
             tool_effects = tool.effects
         except (KeyError, AttributeError):
             pass
+        # Extract override_reason from tool_args (LLM declares why a blocked call is justified)
+        override_reason = tool_args.pop("_override_reason", "") if tool_args else ""
         return GuardContext(
             tool_name=tool_name,
             tool_args=tool_args,
@@ -270,6 +272,7 @@ class AgentKernel:
             current_state=self.fsm.current_state,
             transitions_count=len(self.fsm.history),
             classify_fn=d.judge.classify,
+            override_reason=override_reason,
         )
 
     def _apply_verdict(self, verdict: GuardVerdict, pre: bool) -> bool:

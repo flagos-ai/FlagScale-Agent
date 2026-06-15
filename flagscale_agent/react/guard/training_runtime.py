@@ -63,6 +63,7 @@ class TrainingRuntimeGuard(Guard):
     name = "training_runtime"
     priority = 50
     activate_on_states = {AgentState.EXECUTING}
+    overridable = True
 
     # Thresholds
     _MONITOR_GATE_MAX_BLOCKS = 5

@@ -206,7 +206,7 @@ class TestPlanGuard:
 
     def test_blocks_after_threshold_when_complex(self):
         g = PlanGuard()
-        g.mark_complex_task()
+        g._complex_task_no_plan = True
         for i in range(7):
             ctx = _ctx("read_file", {"path": f"/tmp/f{i}.py"},
                        tool_effects=ToolEffect(reads=frozenset({"filesystem"})))
@@ -219,7 +219,7 @@ class TestPlanGuard:
 
     def test_resets_on_plan_create(self):
         g = PlanGuard()
-        g.mark_complex_task()
+        g._complex_task_no_plan = True
         g._pre_plan_tool_calls = 5
         g._consecutive_reads = 9
         g._block_count = 1
@@ -230,19 +230,6 @@ class TestPlanGuard:
         assert g._consecutive_reads == 0
         assert g._block_count == 0
 
-    def test_reset_plan_state_clears_consecutive_reads(self):
-        """reset_plan_state must also clear _consecutive_reads (bug fix)."""
-        g = PlanGuard()
-        g.mark_complex_task()
-        g._consecutive_reads = 11
-        g._pre_plan_tool_calls = 4
-        g._block_count = 2
-        g.reset_plan_state()
-        assert g._complex_task_no_plan is False
-        assert g._consecutive_reads == 0
-        assert g._pre_plan_tool_calls == 0
-        assert g._block_count == 0
-
     def test_does_not_block_when_plan_exists(self):
         """Regression: once a plan exists, PlanGuard must not block reads."""
         from unittest.mock import MagicMock
@@ -250,7 +237,7 @@ class TestPlanGuard:
         task_plan.get_active.return_value = {"title": "test", "steps": []}
 
         g = PlanGuard(task_plan=task_plan)
-        g.mark_complex_task()
+        g._complex_task_no_plan = True
         # Simulate many consecutive reads — should NOT block because plan exists
         for i in range(20):
             ctx = _ctx("read_file", {"path": f"/tmp/f{i}.py"},

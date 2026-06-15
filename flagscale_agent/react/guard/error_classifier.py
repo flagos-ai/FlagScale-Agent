@@ -315,15 +315,5 @@ class ErrorClassifierGuard(Guard):
         """Fallback suggestion for unknown categories."""
         return f"Unknown error ({category})"
 
-    @property
-    def error_history(self) -> list[str]:
-        """Expose error history for circuit breaker integration."""
-        return list(self._error_history)
-
-    @property
-    def last_category(self) -> str | None:
-        """Last classified error category."""
-        return self._last_category
-
     def reset_turn(self):
         pass

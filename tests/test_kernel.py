@@ -127,10 +127,6 @@ class TestGuardContext:
 
 
 class TestGuardVerdict:
-    def test_allow_factory(self):
-        v = GuardVerdict.allow()
-        assert v.action == "allow"
-
     def test_block_factory(self):
         v = GuardVerdict.block("stop!", reason="dangerous")
         assert v.action == "block"

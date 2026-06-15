@@ -639,105 +639,12 @@ def parallel_tool_hint(index, hint):
         _parallel_display.update_hint(index, hint)
 
 
-def parallel_extra_lines(count):
-    """Notify parallel display that external code printed extra lines below it."""
-    if _parallel_display and not _parallel_display._stop.is_set():
-        _parallel_display.add_extra_lines(count)
-
-
 def parallel_tools_finish():
     """Stop parallel display and do final redraw."""
     global _parallel_display
     if _parallel_display:
         _parallel_display.finish()
         _parallel_display = None
-
-
-# ── Poll mode display ─────────────────────────────────────────────────
-
-_poll_anim = None
-
-
-class _PollAnim:
-    """Animated inline display for poll mode checks."""
-    _FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-
-    def __init__(self):
-        self._stop = threading.Event()
-        self._thread = None
-        self._status = ""
-        self._lock = threading.Lock()
-
-    def set_status(self, text):
-        with self._lock:
-            self._status = text
-
-    def start(self):
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._animate, daemon=True)
-        self._thread.start()
-
-    def _animate(self):
-        i = 0
-        while not self._stop.is_set():
-            frame = self._FRAMES[i % len(self._FRAMES)]
-            with self._lock:
-                status = self._status
-            line = f"  {dim(frame)} {dim(status)}"
-            tw = _term_width()
-            with _stdout_lock:
-                sys.stdout.write(f"\r\033[K{_truncate_to_width(line, tw)}")
-                sys.stdout.flush()
-            i += 1
-            self._stop.wait(0.1)
-
-    def stop(self):
-        self._stop.set()
-        if self._thread:
-            self._thread.join(timeout=1)
-        with _stdout_lock:
-            sys.stdout.write("\r\033[K")
-            sys.stdout.flush()
-
-
-def poll_mode_start(command_summary, interval):
-    """Print poll mode activation banner."""
-    global _poll_anim
-    _stop_all_spinners()
-    _print()
-    _print(cyan(f"  🔄 Poll mode: re-running every {interval}s until interesting change"))
-    _print(dim(f"     cmd: {command_summary}"))
-    _print(dim(f"     Ctrl+C to exit poll mode"))
-    _poll_anim = _PollAnim()
-    _poll_anim.start()
-
-
-def poll_check(n, elapsed, changed=False, routine_change=False):
-    """Update poll status on the same line."""
-    global _poll_anim
-    if _poll_anim:
-        if routine_change:
-            _poll_anim.set_status(f"poll #{n} — routine change ({elapsed:.0f}s)")
-        else:
-            _poll_anim.set_status(f"poll #{n} — no change ({elapsed:.0f}s)")
-
-
-def poll_mode_end(reason, poll_count, total_elapsed, routine_changes=0):
-    """Print poll mode exit summary."""
-    global _poll_anim
-    if _poll_anim:
-        _poll_anim.stop()
-        _poll_anim = None
-    icon = green("✓") if reason == "changed" else yellow("⏱")
-    reasons = {
-        "changed": "interesting change detected",
-        "timeout": "max duration reached",
-        "interrupted": "interrupted by user",
-    }
-    reason_text = reasons.get(reason, reason)
-    extra = f", {routine_changes} routine changes absorbed" if routine_changes else ""
-    _print(f"  {icon} Poll ended: {reason_text} ({poll_count} checks, {total_elapsed:.0f}s{extra})")
-    _print()
 
 
 # ── Turn / session summary ──────────────────────────────────────────────
@@ -747,15 +654,10 @@ def warn(message):
     _print(f"  {yellow('⚠')} {yellow(message)}")
 
 
-def gate_triggered(name, description, reason, is_hard=True):
-    """Display structured gate trigger info to terminal."""
-    icon = "🚫" if is_hard else "⚠"
-    label = "blocked" if is_hard else "warning"
-    _print(f"  {icon} Gate {label}: {bold(name)}")
-    if description:
-        _print(f"     {dim(description)}")
-    if reason:
-        _print(f"     Reason: {dim(reason)}")
+def guard_overridden(guard_name, reason):
+    """Display when a guard block is overridden by LLM-provided reason."""
+    _print(f"  {yellow('⚡')} Guard override: {bold(guard_name)}")
+    _print(f"     {dim(reason)}")
 
 
 def turn_summary(turn_num, elapsed, input_tokens, output_tokens):
@@ -767,69 +669,9 @@ def turn_summary(turn_num, elapsed, input_tokens, output_tokens):
     _print()
 
 
-def session_summary(turns, elapsed, input_tokens, output_tokens):
-    _print()
-    parts = [f"Session: {turns} turns", f"{elapsed:.1f}s",
-             f"↑{_fmt_tokens(input_tokens)} ↓{_fmt_tokens(output_tokens)}"]
-    _print(dim(" | ".join(parts)))
-
-
 # ── File / session ──────────────────────────────────────────────────────
 
-def file_injected(path, chars):
-    _print(dim(f"  📎 {path} ({chars:,} chars)"))
-
-
-def session_saved(path):
-    _print(green(f"  ✓ Session saved: {path}"))
-
-
-def resume_found(session_id, last_msg, timestamp):
-    import datetime
-    ts = datetime.datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
-    _print(dim(f"  Resumable session: {session_id} ({ts})"))
-    if last_msg:
-        _print(dim(f"    Last: {last_msg[:80]}"))
-
-
-def session_resumed(session_id):
-    _print(green(f"  ✓ Resumed session: {session_id}"))
-
-
-def session_loaded(path, turns):
-    _print(green(f"  ✓ Session loaded: {path} ({turns} user turns)"))
-
-
-def session_list(sessions):
-    if not sessions:
-        _print(dim("  No saved sessions."))
-        return
-    import datetime
-    for s in sessions[:10]:
-        ts = datetime.datetime.fromtimestamp(s["timestamp"]).strftime("%Y-%m-%d %H:%M")
-        _print(dim(f"    {s['id']}  {ts}  ({s['turns']} turns)"))
-        _print(dim(f"      {s['path']}"))
-
-
 # ── Skill / plan ────────────────────────────────────────────────────────
-
-def plan_created(title, step_count):
-    _print(green(f"  📋 Plan created: {title} ({step_count} steps)"))
-
-
-def plan_step_updated(step_id, title, status):
-    icons = {"done": green("✓"), "doing": yellow("→"), "skipped": dim("-"), "blocked": red("!")}
-    icon = icons.get(status, " ")
-    _print(f"    [{icon}] Step {step_id}: {title}")
-
-
-def plan_completed(title):
-    _print(green(f"  📋 Plan completed: {title}"))
-
-
-def plan_abandoned(title):
-    _print(yellow(f"  📋 Plan abandoned: {title}"))
-
 
 def plan_summary(text):
     for line in text.split("\n"):
@@ -843,29 +685,6 @@ def plan_summary(text):
             _print(dim(line))
         else:
             _print(line)
-
-
-def complexity_hint():
-    _print(magenta("  📋 Complex task detected — suggesting plan creation."))
-
-
-# ── Autosave ────────────────────────────────────────────────────────────
-
-def autosave_found(turn_count, user_turns, last_user_msg, timestamp):
-    import datetime
-    ts = datetime.datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
-    _print(yellow("╭─ Unfinished session detected ──────────────────╮"))
-    _print(yellow(f"│  Time: {ts}"))
-    _print(yellow(f"│  {turn_count} turns, {user_turns} user messages"))
-    if last_user_msg:
-        preview = last_user_msg[:60] + ("..." if len(last_user_msg) > 60 else "")
-        _print(yellow(f"│  Last message: {preview}"))
-    _print(yellow("╰─────────────────────────────────────────────────╯"))
-
-
-def autosave_resumed(turn_count):
-    _print(green(f"  ✓ Resumed previous session ({turn_count} turns). You can continue."))
-    _print()
 
 
 def interrupted():

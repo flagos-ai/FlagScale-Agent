@@ -644,10 +644,6 @@ class ClassifyTrace:
         """Return the source for a category, or 'unavailable' if never called."""
         return self._entries.get(category, SOURCE_UNAVAILABLE)
 
-    def any_from(self, *sources: str) -> bool:
-        """True if any recorded call has one of the given sources."""
-        return any(s in sources for s in self._entries.values())
-
     def clear(self):
         self._entries.clear()
 

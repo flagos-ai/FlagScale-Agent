@@ -168,13 +168,3 @@ class CircuitBreakerGuard(Guard):
 
         # Fallback to keyword for category name
         return ErrorClassifierGuard._classify_static(result)
-
-    @property
-    def tripped_categories(self) -> list[str]:
-        """Return list of currently tripped (open) categories."""
-        return [cat for cat, state in self._circuit_state.items() if state == self.OPEN]
-
-    @property
-    def state_summary(self) -> dict[str, str]:
-        """Return current state of all tracked categories."""
-        return dict(self._circuit_state)

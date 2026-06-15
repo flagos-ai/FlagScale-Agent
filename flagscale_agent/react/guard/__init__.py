@@ -13,6 +13,7 @@ from __future__ import annotations
 import abc
 import re
 from dataclasses import dataclass, field
+from flagscale_agent.react import display
 from typing import Literal, Any
 
 from flagscale_agent.react.state_machine import AgentState
@@ -48,6 +49,9 @@ class GuardContext:
     experiment_diff_fn: Any = None
     current_experiment_name: str = ""
 
+    # Override reason: LLM declares why a potentially-blocked call is justified
+    override_reason: str = ""
+
     @property
     def phase_name(self) -> str:
         """Derive phase name from current state for backward compatibility."""
@@ -64,10 +68,6 @@ class GuardVerdict:
     metadata: dict = field(default_factory=dict)
     # v2: category tag for deduplication
     category: str = ""  # e.g. "read_stall", "loop", "plan_needed"
-
-    @classmethod
-    def allow(cls) -> GuardVerdict:
-        return cls(action="allow")
 
     @classmethod
     def block(cls, message: str, reason: str = "", category: str = "") -> GuardVerdict:
@@ -98,6 +98,11 @@ class Guard(abc.ABC):
     activate_on_states: set[AgentState] = set()
     activate_on_tools: set[str] | None = None  # None = all tools
 
+    # Override mechanism: if True, LLM can bypass this guard's block by providing
+    # a reason in tool_args["_override_reason"]. The guard's accept_override()
+    # method decides whether the reason is sufficient.
+    overridable: bool = False
+
     def should_activate(self, ctx: GuardContext) -> bool:
         """Check if this guard should run for the current context."""
         if ctx.current_state not in self.activate_on_states:
@@ -117,6 +122,14 @@ class Guard(abc.ABC):
     def check_strategic(self, ctx: GuardContext) -> GuardVerdict | None:
         """Strategic review check. Return redirect to change plan."""
         return None
+
+    def accept_override(self, reason: str, ctx: GuardContext) -> bool:
+        """Evaluate whether the LLM's override reason is sufficient to bypass a block.
+
+        Only called when overridable=True and the guard returned a block verdict.
+        Default: accept any non-empty reason. Override for stricter validation.
+        """
+        return bool(reason and reason.strip())
 
     def notify_blocked(self, ctx: GuardContext):
         """Called when a tool call was blocked externally (e.g., by another guard)."""
@@ -188,6 +201,18 @@ class GuardRegistry:
                 continue
 
             if verdict.action in ("block", "escalate", "force_compact", "redirect"):
+                # Override mechanism: if guard is overridable and LLM provided a reason,
+                # let the guard decide whether to accept
+                if (
+                    verdict.action == "block"
+                    and guard.overridable
+                    and ctx.override_reason
+                    and guard.accept_override(ctx.override_reason, ctx)
+                ):
+                    # Override accepted — skip this block, log it
+                    self._shared_state.record_override(guard.name, ctx.override_reason)
+                    display.guard_overridden(guard.name, ctx.override_reason)
+                    continue
                 if first_hard_verdict is None:
                     first_hard_verdict = verdict
                 continue
@@ -261,6 +286,16 @@ class GuardRegistry:
                 continue
 
             if verdict.action in ("block", "escalate", "force_compact", "redirect"):
+                # Override mechanism (same as check_pre)
+                if (
+                    verdict.action == "block"
+                    and guard.overridable
+                    and ctx.override_reason
+                    and guard.accept_override(ctx.override_reason, ctx)
+                ):
+                    self._shared_state.record_override(guard.name, ctx.override_reason)
+                    display.guard_overridden(guard.name, ctx.override_reason)
+                    continue
                 if first_hard_verdict is None:
                     first_hard_verdict = verdict
                 continue
@@ -321,15 +356,6 @@ class GuardRegistry:
         self._shared_state.new_turn()
         for guard in self._guards:
             guard.reset_turn()
-
-    def notify_all_blocked(self, ctx: GuardContext):
-        """Notify all guards that a tool call was blocked externally (e.g., by user deny).
-
-        Called by tool executor when a call is blocked after all guards passed check_pre.
-        """
-        for guard in self._guards:
-            if guard.should_activate(ctx):
-                guard.notify_blocked(ctx)
 
     @property
     def guards(self) -> list[Guard]:

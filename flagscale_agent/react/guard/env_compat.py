@@ -72,9 +72,5 @@ class EnvCompatGuard(Guard):
             reason="install_without_investigation"
         )
 
-    def mark_analysis_done(self):
-        """Manually mark investigation as complete."""
-        self._investigated = True
-
     def reset_turn(self):
         pass

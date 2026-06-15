@@ -24,6 +24,7 @@ class PlanGuard(Guard):
     name = "plan"
     priority = 35
     activate_on_states = {AgentState.EXECUTING, AgentState.PLANNING, AgentState.REVIEWING}
+    overridable = True
 
     # Base thresholds (multiplied by TaskMode.plan_required_threshold ratio)
     _PLAN_GATE_MAX_EXPLORATORY_BASE = 6
@@ -61,17 +62,6 @@ class PlanGuard(Guard):
     @property
     def _plan_gate_independent_block(self) -> int:
         return max(8, int(self._PLAN_GATE_INDEPENDENT_BLOCK_BASE * self._threshold_multiplier))
-
-    def mark_complex_task(self):
-        """Called externally (by ComplexityJudge) when a task needs a plan."""
-        self._complex_task_no_plan = True
-
-    def reset_plan_state(self):
-        """Called externally when a plan is created."""
-        self._complex_task_no_plan = False
-        self._pre_plan_tool_calls = 0
-        self._consecutive_reads = 0
-        self._block_count = 0
 
     def _has_active_plan(self) -> bool:
         """Check if a plan already exists (active or paused)."""
@@ -167,32 +157,6 @@ class PlanGuard(Guard):
             self._pre_plan_tool_calls = 0
             self._consecutive_reads = 0
             self._block_count = 0
-        return None
-
-    def check_plan_staleness(self, task_plan, turn_count: int) -> GuardVerdict | None:
-        """Check if plan's 'doing' step is stale (>8 turns without update)."""
-        plan = task_plan.get_active() if task_plan else None
-        if not plan:
-            return None
-
-        doing_steps = [s for s in plan.get("steps", []) if s.get("status") == "doing"]
-        if not doing_steps:
-            return None
-
-        step = doing_steps[0]
-        last_activity = step.get("_last_activity_turn", 0)
-        turns_stale = turn_count - last_activity if last_activity else 0
-
-        if turns_stale >= 8:
-            return GuardVerdict.inject(
-                f"\n[PLAN MAINTENANCE] Step {step['id']} "
-                f"('{step.get('title', '')[:40]}') has had no plan_update "
-                f"for {turns_stale} turns. "
-                f"If it's done, call plan_update(action='step_done'). "
-                f"If blocked, call plan_update(action='step_skip') and move on.",
-                reason=f"plan step stale: {turns_stale} turns",
-                category="plan_needed",
-            )
         return None
 
     def reset_turn(self):

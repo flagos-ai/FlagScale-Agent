@@ -140,22 +140,6 @@ class InjectTracker:
         self._history[key].append({"turn": turn, "effective": None})
         self._current_turn_categories.add(category)
 
-    def mark_effective(self, guard_name: str, category: str):
-        """Mark the last inject from this guard as effective (agent changed behavior)."""
-        key = (guard_name, category)
-        if key in self._history and self._history[key]:
-            self._history[key][-1]["effective"] = True
-
-    def mark_ineffective(self, guard_name: str, category: str):
-        """Mark the last inject from this guard as ineffective."""
-        key = (guard_name, category)
-        if key in self._history and self._history[key]:
-            self._history[key][-1]["effective"] = False
-
-    def is_category_already_injected(self, category: str) -> bool:
-        """Check if this category was already injected in the current turn."""
-        return category in self._current_turn_categories
-
     def effectiveness_rate(self, guard_name: str, category: str) -> float:
         """Get effectiveness rate for a guard+category. Returns 1.0 if no data."""
         key = (guard_name, category)
@@ -213,6 +197,9 @@ class SharedState:
         # suppress similar warnings from other guards in the same turn
         self._read_warning_issued_this_turn: bool = False
 
+        # Override audit log: tracks all accepted overrides for transparency
+        self._override_log: list[dict] = []
+
     def set_task_mode(self, mode: TaskMode):
         """Set the current task mode. Affects all guard thresholds."""
         self.task_mode = mode
@@ -268,3 +255,16 @@ class SharedState:
         """Reset per-turn state."""
         self._read_warning_issued_this_turn = False
         self.inject_tracker.new_turn()
+
+    def record_override(self, guard_name: str, reason: str):
+        """Record an accepted override for audit purposes."""
+        self._override_log.append({
+            "guard": guard_name,
+            "reason": reason,
+            "turn": self.read_stats.total_reads + self.read_stats._productive_count,
+        })
+
+    @property
+    def override_log(self) -> list[dict]:
+        """Read-only access to override history."""
+        return self._override_log

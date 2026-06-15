@@ -80,12 +80,6 @@ class TestHistoryManager:
         assert len(msgs) == 2
         assert msgs[0]["role"] == "system"
 
-    def test_full_log_preserved(self):
-        hm = HistoryManager(max_context_tokens=100000)
-        hm.append({"role": "system", "content": "sys"})
-        hm.append({"role": "user", "content": "hi"})
-        assert len(hm.full_log) == 2
-
     def test_truncation_on_budget(self):
         hm = HistoryManager(max_context_tokens=100)
         hm.append({"role": "system", "content": "sys"})

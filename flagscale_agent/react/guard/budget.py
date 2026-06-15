@@ -16,6 +16,7 @@ class BudgetGuard(Guard):
     name = "budget"
     priority = 5  # very high priority
     activate_on_states = {AgentState.EXECUTING}
+    overridable = True
 
     def __init__(self, max_tokens: int = 2_000_000, max_tool_calls: int = 500):
         self._max_tokens = max_tokens
@@ -27,6 +28,16 @@ class BudgetGuard(Guard):
         self._warned_tool_80: bool = False
         self._warned_tool_95: bool = False
         self._exhausted_block_count: int = 0  # track repeated blocks
+        self._override_used: bool = False  # only allow one override
+
+    def accept_override(self, reason: str, ctx: GuardContext) -> bool:
+        """Allow override only once — for a final wrap-up action."""
+        if self._override_used:
+            return False
+        if reason and reason.strip():
+            self._override_used = True
+            return True
+        return False
 
     def check_pre(self, ctx: GuardContext) -> GuardVerdict | None:
         # Check token budget
@@ -124,15 +135,3 @@ class BudgetGuard(Guard):
         if self._max_tool_calls <= 0:
             return 0.0
         return (self._total_tool_calls / self._max_tool_calls) * 100
-
-    @property
-    def usage_summary(self) -> dict:
-        """Return current budget usage summary."""
-        return {
-            "total_tokens": self._total_tokens,
-            "max_tokens": self._max_tokens,
-            "token_percent": round(self._token_percent, 1),
-            "total_tool_calls": self._total_tool_calls,
-            "max_tool_calls": self._max_tool_calls,
-            "tool_call_percent": round(self._tool_call_percent, 1),
-        }
