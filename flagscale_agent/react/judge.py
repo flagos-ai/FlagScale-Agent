@@ -130,6 +130,29 @@ Answer "mode_c" if Mode C / wrapper / 模式C / 包装.
 Answer "" (empty) if neither.
 Reply ONLY: {"decision": "mode_b"/"mode_c"/""}""",
 
+    "task_mode": """\
+Classify the user's intent into ONE task mode. This determines how aggressive
+the system should be about requiring plans and flagging reading loops.
+
+User input: {user_input}
+
+Modes:
+- "porting": migrating/converting a model between frameworks (HuggingFace→Megatron, checkpoint conversion, model adaptation)
+- "analysis": reading, understanding, investigating, comparing, reviewing code/logs/architecture. The user wants INFORMATION, not changes.
+- "debugging": fixing a specific error, crash, or unexpected behavior. The user has a broken state they want resolved.
+- "implementation": building, creating, modifying, configuring something new. The user wants CODE CHANGES or ARTIFACTS produced.
+- "keep": the input is a short confirmation (好/继续/OK/yes), a direction to proceed, or ambiguous — do NOT change the current mode.
+
+Key distinctions:
+- "分析一下训练loss" = analysis (wants understanding), NOT implementation
+- "修复这个OOM" = debugging (has a specific error), NOT implementation
+- "帮我把模型迁移到Megatron" = porting (framework migration)
+- "加一个新功能" = implementation (wants code produced)
+- "继续" / "好的" / "." = keep (no mode change)
+- "也直接加了吧" = implementation (requesting the agent to make changes)
+
+Reply ONLY: {"mode": "<one of: porting/analysis/debugging/implementation/keep>"}""",
+
     "checklist_rule_batch": """\
 You are a constraint checker. Below is a tool call and a list of constraints to evaluate.
 
@@ -661,8 +684,8 @@ class Judge:
 
         category: one of "is_error", "is_success", "is_dangerous", "is_read_only_shell",
                   "is_training_command", "is_kill_command", "is_training_failure",
-                  "is_zombie_gpu", "is_user_porting_confirm", "checklist_rule",
-                  "checklist_rule_batch", "route_intent"
+                  "is_zombie_gpu", "is_user_porting_confirm", "task_mode",
+                  "checklist_rule", "checklist_rule_batch", "route_intent"
 
         context: dict with relevant fields. LLM can request more in multi-round mode.
 
@@ -1151,6 +1174,12 @@ class Judge:
             if "mode_c" in text or "mode c" in text or "c" == text:
                 return "mode_c"
             return ""
+        if category == "task_mode":
+            mode = str(data.get("mode", "") if isinstance(data, dict) else "").lower().strip()
+            valid_modes = ("porting", "analysis", "debugging", "implementation", "keep")
+            if mode in valid_modes:
+                return mode
+            return "keep"  # safe default — don't change mode on parse failure
         if category == "checklist_rule_batch":
             # LLM may return a list directly or {"violations": [...]}
             if isinstance(data, list):

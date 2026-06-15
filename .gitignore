@@ -28,6 +28,7 @@ Thumbs.db
 # FlagScale Agent runtime
 .flagscale/sessions/
 .flagscale/input_history
+.flagscale/*
 
 # Logs
 *.log

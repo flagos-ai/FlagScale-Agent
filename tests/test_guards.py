@@ -275,7 +275,8 @@ class TestPlanGuard:
     def test_independent_warn_still_fires_without_plan(self):
         """Without active plan, independent-mode warn still triggers at threshold."""
         g = PlanGuard(task_plan=None)
-        g._consecutive_reads = g._PLAN_GATE_INDEPENDENT_WARN - 1
+        # Use the dynamic property that accounts for TaskMode multiplier
+        g._consecutive_reads = g._plan_gate_independent_warn - 1
         ctx = _ctx("read_file", {"path": "/tmp/warn.py"},
                    tool_effects=ToolEffect(reads=frozenset({"filesystem"})))
         result = g.check_pre(ctx)
