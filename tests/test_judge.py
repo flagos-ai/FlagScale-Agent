@@ -315,7 +315,8 @@ class TestClassifyPrompts:
         "checklist_rule", "checklist_rule_batch", "extract_constraints",
         "route_intent", "is_constraint_violated", "skill_suggest",
         "skill_suggest_by_context", "is_continuation", "is_warning_triggered",
-        "task_mode",
+        "task_mode", "training_error_category", "is_important_discovery",
+        "is_debug_residue",
     }
 
     def test_all_categories_present(self):

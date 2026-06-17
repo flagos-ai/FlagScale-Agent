@@ -154,15 +154,18 @@ class TestCircuitBreaker:
         guard.check_post(err_ctx)
 
         # Tripped — should block for cooldown_iters iterations
+        guard.reset_turn()  # iteration 1
         result = guard.check_pre(_make_ctx())
         assert result is not None
         assert result.action == "block"
 
+        guard.reset_turn()  # iteration 2
         result = guard.check_pre(_make_ctx())  # still in cooldown
         assert result is not None
         assert result.action == "block"
 
         # After cooldown (>2 iterations) → half_open, allowed
+        guard.reset_turn()  # iteration 3
         result = guard.check_pre(_make_ctx())
         assert result is None  # half-open probe allowed
 
@@ -174,7 +177,9 @@ class TestCircuitBreaker:
         guard.check_post(err_ctx)
 
         # Trip — first check_pre blocks (cooldown)
+        guard.reset_turn()  # iteration 1
         guard.check_pre(_make_ctx())  # blocked (iter 1, elapsed=1, not > 1)
+        guard.reset_turn()  # iteration 2
         guard.check_pre(_make_ctx())  # half-open (iter 2, elapsed=2, > 1)
 
         # Success in half-open → close
@@ -191,7 +196,9 @@ class TestCircuitBreaker:
         guard.check_post(err_ctx)
         guard.check_post(err_ctx)
 
+        guard.reset_turn()  # iteration 1
         guard.check_pre(_make_ctx())  # blocked (cooldown)
+        guard.reset_turn()  # iteration 2
         guard.check_pre(_make_ctx())  # half-open
 
         # Fail again in half-open

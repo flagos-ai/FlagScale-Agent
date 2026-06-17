@@ -53,8 +53,6 @@ class CircuitBreakerGuard(Guard):
         if not ctx.tool_name:
             return None
 
-        self._current_iteration += 1
-
         # Check if any circuit is open and would block this tool
         for category, state in self._circuit_state.items():
             if state == self.OPEN:
@@ -141,8 +139,8 @@ class CircuitBreakerGuard(Guard):
         return None
 
     def reset_turn(self):
-        # Circuit state is session-level, persists across iterations
-        pass
+        # Increment iteration counter once per iteration (not per tool call)
+        self._current_iteration += 1
 
     def _classify_error(self, result: str, classify_fn=None) -> str | None:
         """Detect error and return a category for circuit grouping.

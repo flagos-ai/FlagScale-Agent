@@ -72,6 +72,13 @@ from flagscale_agent.react.guard.circuit_breaker import CircuitBreakerGuard
 from flagscale_agent.react.guard.budget import BudgetGuard
 from flagscale_agent.react.guard.env_compat import EnvCompatGuard
 from flagscale_agent.react.guard.output_quality import OutputQualityGuard
+from flagscale_agent.react.guard.training_attempt import TrainingAttemptGuard
+from flagscale_agent.react.guard.experiment_tracking import ExperimentTrackingGuard
+from flagscale_agent.react.guard.output_dir_reuse import OutputDirReuseGuard
+from flagscale_agent.react.guard.megatron_path import MegatronPathGuard
+from flagscale_agent.react.guard.debug_discipline import DebugDisciplineGuard
+from flagscale_agent.react.guard.file_tool import FileToolGuard
+from flagscale_agent.react.guard.memory_discipline import MemoryDisciplineGuard
 from flagscale_agent.react.constraint.cache import ConstraintCache
 from flagscale_agent.react.prompt_builder import PromptBuilder
 from flagscale_agent.react.tool_executor import ToolExecutor, tool_display_summary
@@ -315,6 +322,18 @@ class WorkerAgent:
 
         if "is_training" in constraints or "is_inference" in constraints or not constraints:
             guard_registry.register(TrainingRuntimeGuard())
+            guard_registry.register(TrainingAttemptGuard())
+            guard_registry.register(ExperimentTrackingGuard())
+            guard_registry.register(OutputDirReuseGuard())
+            guard_registry.register(MegatronPathGuard())
+            guard_registry.register(DebugDisciplineGuard())
+            from flagscale_agent.react.guard.comprehension_gate import ComprehensionGateGuard
+            guard_registry.register(ComprehensionGateGuard())
+
+        # File tool guard (always active)
+        guard_registry.register(FileToolGuard())
+        # Memory discipline guard (always active)
+        guard_registry.register(MemoryDisciplineGuard())
 
         deps = KernelDeps(
             provider=self.provider,
@@ -1674,8 +1693,77 @@ class WorkerAgent:
 
         # Context pressure warning is handled by ContextPressureGuard — no duplicate check here
 
+        # Auto-memory-write: capture critical training state from monitor results
+        self._auto_memorize_training_state(tool_calls, results)
+
         self._tool_call_cache = {}
         print()
+
+    def _auto_memorize_training_state(self, tool_calls: list, results: list):
+        """Auto-write critical training state to memory after monitor/find_latest_log.
+        
+        This prevents the most common re-discovery pattern: agent finds log paths,
+        metrics rank, output_dir structure — then loses it all on context compaction.
+        
+        Only writes if the info is NEW (not already in memory).
+        """
+        import hashlib
+
+        for tc, result in zip(tool_calls, results):
+            if not isinstance(result, str) or not result:
+                continue
+            tool_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
+            tool_args = tc.get("input", {}) if isinstance(tc, dict) else getattr(tc, "input", {})
+
+            # Auto-memorize monitor output_dir + log discovery
+            if tool_name == "monitor" and "output_dir" in str(tool_args):
+                output_dir = tool_args.get("output_dir", "") if isinstance(tool_args, dict) else ""
+                if output_dir and "stdout.log" in result:
+                    # Extract the log path
+                    import re
+                    log_match = re.search(r"(/\S+/stdout\.log)", result)
+                    if log_match:
+                        log_path = log_match.group(1)
+                        # Derive a key from output_dir
+                        dir_hash = hashlib.md5(output_dir.encode()).hexdigest()[:6]
+                        key = f"auto_training_logpath_{dir_hash}"
+                        # Only write if not already stored
+                        existing = self.session_memory.get(key)
+                        if not existing:
+                            try:
+                                self.session_memory.put(
+                                    key=key,
+                                    entry_type="context",
+                                    content=(
+                                        f"Training log path for {output_dir}: {log_path}\n"
+                                        f"Use monitor(output_dir='{output_dir}') to check status."
+                                    ),
+                                    session_id=self._session_id,
+                                )
+                            except Exception:
+                                pass
+
+            # Auto-memorize training launch output_dir from shell commands
+            elif tool_name == "shell" and isinstance(tool_args, dict):
+                cmd = tool_args.get("command", "")
+                if re.search(r"run\.py.*action\s*=\s*run|torchrun", cmd):
+                    # Extract exp_dir from command
+                    exp_match = re.search(r"experiment\.exp_dir\s*=\s*(\S+)", cmd)
+                    if exp_match:
+                        exp_dir = exp_match.group(1).strip("'\"")
+                        key = f"auto_last_training_launch"
+                        try:
+                            self.session_memory.put(
+                                key=key,
+                                entry_type="context",
+                                content=(
+                                    f"Last training launch: output_dir={exp_dir}\n"
+                                    f"Command: {cmd[:200]}"
+                                ),
+                                session_id=self._session_id,
+                            )
+                        except Exception:
+                            pass
 
     def _inject_message(self, msg: str):
         self.history.append({"role": "user", "content": msg})
@@ -2012,8 +2100,39 @@ class WorkerAgent:
                 "content": "Training metrics observed: " + "; ".join(metrics_found[:5]),
             })
 
-        # Write extracted memories (max 3 per compaction to avoid noise)
-        for entry in extracted[:3]:
+        # Rule 4: Current hypothesis / root cause analysis (critical for continuity)
+        hypothesis_matches = re.findall(
+            r'HYPOTHESIS:\s*(.{20,300})', all_text, re.IGNORECASE
+        )
+        if hypothesis_matches:
+            latest = hypothesis_matches[-1][:250]
+            key = "auto_hypothesis_" + hashlib.md5(latest.encode()).hexdigest()[:6]
+            extracted.append({
+                "key": key,
+                "type": "context",
+                "content": f"Active hypothesis before compaction: {latest}",
+            })
+
+        # Rule 5: Current experiment/attempt status
+        experiment_matches = re.findall(
+            r"workspace_experiment.*?name['\"]?\s*[:=]\s*['\"]?(\w+)", all_text
+        )
+        if experiment_matches:
+            exp_name = experiment_matches[-1]
+            # Extract last attempt result if available
+            result_matches = re.findall(
+                r"result['\"]?\s*[:=]\s*['\"]([^'\"]{10,200})", all_text
+            )
+            result_info = f", last result: {result_matches[-1][:100]}" if result_matches else ""
+            key = f"auto_experiment_state_{exp_name}"
+            extracted.append({
+                "key": key,
+                "type": "context",
+                "content": f"Active experiment '{exp_name}'{result_info}",
+            })
+
+        # Write extracted memories (max 5 per compaction to avoid noise)
+        for entry in extracted[:5]:
             try:
                 # Check if similar key already exists
                 existing = self.session_memory.get(entry["key"])
@@ -2060,7 +2179,62 @@ class WorkerAgent:
         return response.get("content", "")
 
     def _score_messages_for_compaction(self, messages: list[dict]) -> list[int]:
-        return [5] * len(messages)
+        """Score messages for compaction priority. Higher = more important to keep.
+        
+        Priority tiers:
+        - 10: Messages with experiment state, hypothesis, active decisions
+        - 8: Messages with error diagnosis, root cause analysis
+        - 7: Messages with training metrics, checkpoint info
+        - 5: Normal messages (default)
+        - 3: Verbose tool output (long file reads, pip install logs)
+        - 2: Repeated monitoring checks with no new info
+        """
+        scores = []
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                parts = []
+                for block in content:
+                    if isinstance(block, dict):
+                        parts.append(block.get("content", "") or block.get("text", ""))
+                    elif isinstance(block, str):
+                        parts.append(block)
+                content = "\n".join(parts)
+            if not isinstance(content, str):
+                scores.append(5)
+                continue
+
+            score = 5  # default
+
+            # Boost: experiment state and decisions
+            if re.search(r'HYPOTHESIS:|ROOT CAUSE:|DECISION:', content, re.IGNORECASE):
+                score = max(score, 10)
+            elif re.search(r'workspace_experiment.*add_attempt|workspace_experiment.*create', content):
+                score = max(score, 10)
+
+            # Boost: error diagnosis and fixes
+            elif re.search(r'(?:root cause|diagnosed|the actual problem|fix(?:ed)? by)', content, re.IGNORECASE):
+                score = max(score, 8)
+            elif re.search(r'2-Strike|same category.*fail|strike.*block', content, re.IGNORECASE):
+                score = max(score, 8)
+
+            # Boost: training metrics and results
+            elif re.search(r'iteration\s+\d+.*loss|lm loss.*\d+\.\d+|throughput', content, re.IGNORECASE):
+                score = max(score, 7)
+
+            # Penalize: verbose tool output
+            elif len(content) > 3000 and re.search(
+                r'pip install|Collecting |Building wheel|Successfully installed', content):
+                score = min(score, 3)
+            elif len(content) > 5000 and msg.get("role") == "tool":
+                score = min(score, 3)
+
+            # Penalize: repeated "no new content" monitoring
+            elif re.search(r'No new content|Still running.*no new metrics', content, re.IGNORECASE):
+                score = min(score, 2)
+
+            scores.append(score)
+        return scores
 
     def _summarize_file_content(self, content: str, path: str) -> str:
         lines = content.splitlines()

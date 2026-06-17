@@ -105,7 +105,8 @@ class Guard(abc.ABC):
 
     def should_activate(self, ctx: GuardContext) -> bool:
         """Check if this guard should run for the current context."""
-        if ctx.current_state not in self.activate_on_states:
+        # Empty activate_on_states means "all states" (no filter)
+        if self.activate_on_states and ctx.current_state not in self.activate_on_states:
             return False
         if self.activate_on_tools and ctx.tool_name not in self.activate_on_tools:
             return False

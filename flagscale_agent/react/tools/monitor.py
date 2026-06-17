@@ -100,17 +100,48 @@ class MonitorTool(Tool):
         self._classify_fn = classify_fn
 
     def _is_real_error(self, lines: list, context: str = "") -> list:
-        """Filter error lines through LLM classify. Returns confirmed error lines."""
+        """Filter error lines — skip known harmless warnings, then LLM classify."""
         if not lines:
             return []
+
+        # Phase 1: Cheap pre-filter — remove known harmless warnings
+        filtered = [l for l in lines if not self._is_harmless_warning(l)]
+        if not filtered:
+            return []
+
+        # Phase 2: LLM classify (if available)
         if not self._classify_fn:
             return []
-        # Send all lines (up to 10) to classify("is_error") in one call
-        matched_text = "\n".join(lines[:10])
+        matched_text = "\n".join(filtered[:10])
         context_text = context or matched_text[:500]
         if self._classify_fn("is_error", matched_text, context_text):
-            return lines[:10]
+            return filtered[:10]
         return []
+
+    # Known harmless warning patterns — these should NEVER stop training monitoring
+    _HARMLESS_PATTERNS = [
+        re.compile(r"DeprecationWarning", re.I),
+        re.compile(r"FutureWarning", re.I),
+        re.compile(r"UserWarning", re.I),
+        re.compile(r"PendingDeprecationWarning", re.I),
+        re.compile(r"RequestsDependencyWarning", re.I),
+        re.compile(r"torch\.cuda\.amp.*deprecated", re.I),
+        re.compile(r"urllib3.*doesn't match", re.I),
+        re.compile(r"Setting\s+.*\s+threads", re.I),
+        re.compile(r"OMP_NUM_THREADS", re.I),
+        re.compile(r"TF_CPP_MIN_LOG_LEVEL", re.I),
+        re.compile(r"wandb.*version.*available", re.I),
+        re.compile(r"NOTE:\s+Redirects are currently not supported", re.I),
+        re.compile(r"warnings\.warn\(", re.I),
+        re.compile(r"^\s*$"),  # blank lines
+    ]
+
+    def _is_harmless_warning(self, line: str) -> bool:
+        """Check if a line is a known harmless warning."""
+        for pat in self._HARMLESS_PATTERNS:
+            if pat.search(line):
+                return True
+        return False
 
     def execute(self, **kwargs) -> str:
         file_path = kwargs.get("file", "")
@@ -158,6 +189,9 @@ class MonitorTool(Tool):
         if output_dir:
             discovered = self._discover_logs(output_dir)
             stderr_logs = discovered.get("stderr_logs", [])
+            # Report skipped timestamps if any
+            if discovered.get("info"):
+                events.append(discovered["info"])
             # Immediate stderr check: if stderr already has errors, return immediately
             # (handles case where training crashed before monitor started)
             for sp in stderr_logs:
@@ -408,8 +442,9 @@ class MonitorTool(Tool):
 
         Scans ALL hosts to collect all rank logs, then picks the rank with
         training metrics (last pipeline rank, which may be on any host).
+        Reports skipped timestamps for visibility.
         """
-        result = {"stdout_log": "", "stderr_logs": [], "error": ""}
+        result = {"stdout_log": "", "stderr_logs": [], "error": "", "info": ""}
         logs_dir = os.path.join(output_dir, "logs", "details")
         if not os.path.isdir(logs_dir):
             result["error"] = f"ERROR: No logs directory at {logs_dir}. Training may not have started."
@@ -423,7 +458,17 @@ class MonitorTool(Tool):
         # Collect rank dirs from ALL hosts (multi-node support)
         all_rank_dirs = []
         stderr_logs = []
+        skipped_timestamps = 0
         for host_dir in host_dirs:
+            # Count all timestamps to report skipped ones
+            try:
+                all_ts = sorted([d for d in os.listdir(host_dir)
+                               if os.path.isdir(os.path.join(host_dir, d))])
+            except OSError:
+                continue
+            if len(all_ts) > 1:
+                skipped_timestamps += len(all_ts) - 1
+
             ts_dir = _last_sorted_subdir(host_dir)
             if not ts_dir:
                 continue
@@ -441,6 +486,12 @@ class MonitorTool(Tool):
                 stderr_path = os.path.join(rank_dir, "stderr.log")
                 if os.path.isfile(stderr_path):
                     stderr_logs.append(stderr_path)
+
+        if skipped_timestamps > 0:
+            result["info"] = (
+                f"NOTE: Skipped {skipped_timestamps} older timestamp dir(s). "
+                f"Using latest run only. Total ranks found: {len(all_rank_dirs)}."
+            )
 
         if not all_rank_dirs:
             result["error"] = f"ERROR: No rank directories found under {logs_dir}."
@@ -483,10 +534,15 @@ class MonitorTool(Tool):
         return result
 
     def _scan_stderr_logs(self, stderr_logs, checked_sizes, elapsed):
-        """Scan all stderr.log files for new error content.
+        """Scan ALL stderr.log files for new error content.
 
+        Instead of returning on the first rank with errors, scans ALL ranks
+        and aggregates errors for a complete picture of the failure.
         Returns dict with 'event' and 'lines' if error found, else None.
         """
+        all_errors = {}  # rank → error_lines
+        any_activity = {}  # rank → line_count (non-error activity)
+
         for log_path in stderr_logs:
             try:
                 size = os.path.getsize(log_path)
@@ -502,31 +558,67 @@ class MonitorTool(Tool):
             try:
                 with open(log_path, "r", encoding="utf-8", errors="replace") as f:
                     f.seek(prev_size)
-                    new_content = f.read(8192)  # Read up to 8KB of new content
+                    new_content = f.read(8192)
             except Exception:
                 continue
 
             if not new_content.strip():
                 continue
 
+            rank = self._extract_rank_from_path(log_path)
+
             # Check for error patterns
             error_lines = self._is_real_error(
                 new_content.splitlines(), new_content[:500])
             if error_lines:
-                rank = self._extract_rank_from_path(log_path)
-                return {
-                    "event": f"[STDERR ERROR rank {rank} at {int(elapsed)}s: {error_lines[0][:80]}]",
-                    "lines": new_content.strip().splitlines()[-30:],
-                }
+                all_errors[rank] = error_lines
+            else:
+                # Track non-error activity (but don't report warnings/harmless output)
+                lines = new_content.strip().splitlines()
+                non_harmless = [l for l in lines if not self._is_harmless_warning(l)]
+                if len(non_harmless) > 5:
+                    any_activity[rank] = non_harmless[-10:]
 
-            # Even without regex match, non-trivial stderr content is suspicious
-            lines = new_content.strip().splitlines()
-            if len(lines) > 3:
-                rank = self._extract_rank_from_path(log_path)
-                return {
-                    "event": f"[STDERR activity rank {rank} at {int(elapsed)}s: {len(lines)} lines, possible error]",
-                    "lines": lines[-30:],
-                }
+        # Aggregate results
+        if all_errors:
+            # Group ranks by same error message (dedup)
+            error_groups = {}  # error_key → [ranks]
+            for rank, lines in all_errors.items():
+                key = lines[0][:100] if lines else ""
+                error_groups.setdefault(key, []).append(rank)
+
+            # Build aggregated report
+            report_lines = []
+            for error_key, ranks in error_groups.items():
+                if len(ranks) > 3:
+                    rank_str = f"ranks {','.join(str(r) for r in sorted(ranks)[:5])}... ({len(ranks)} total)"
+                else:
+                    rank_str = f"rank(s) {','.join(str(r) for r in sorted(ranks))}"
+                report_lines.append(f"  [{rank_str}]: {error_key}")
+
+            # Find potential root cause: rank with unique error
+            unique_ranks = [r for r, lines in all_errors.items()
+                          if lines[0][:100] not in [l[0][:100] for rr, l in all_errors.items() if rr != r]]
+
+            event = (
+                f"[STDERR ERRORS at {int(elapsed)}s across {len(all_errors)} rank(s)]"
+            )
+            detail_lines = []
+            for rank in sorted(all_errors.keys(), key=lambda x: str(x)):
+                detail_lines.extend(all_errors[rank][-5:])
+            
+            if unique_ranks:
+                event += f" — possible root cause on rank {unique_ranks[0]}"
+
+            return {
+                "event": event,
+                "lines": report_lines + ["", "Detail (last lines per rank):"] + detail_lines[-30:],
+            }
+
+        # Non-error activity: only report if substantial and not just warnings
+        if any_activity and len(any_activity) >= len(stderr_logs) // 2:
+            # Many ranks have activity but no errors — probably just verbose output
+            return None
 
         return None
 

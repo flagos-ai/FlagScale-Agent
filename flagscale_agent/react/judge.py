@@ -547,6 +547,71 @@ Current tool call:
 Reply ONLY: {{"real": true/false, "need_more": null}}
 (true = warning SHOULD fire, false = warning does NOT apply)"""
 
+# ── Guard-specific classify prompts ──────────────────────────────────────
+
+_CLASSIFY_PROMPTS["training_error_category"] = """\
+Classify this training error into exactly ONE category.
+
+Error text (truncated):
+{error_text}
+
+Categories:
+- shape: tensor size/dimension mismatch, broadcast failure, reshape error
+- attribute: AttributeError, missing attribute on object
+- import: ModuleNotFoundError, ImportError, missing module
+- numerical: NaN/Inf in loss or gradients, overflow/underflow
+- nccl: NCCL errors, timeout, process group failures, rank communication
+- oom: CUDA out of memory, allocation failure
+- config: wrong config key, missing YAML, Hydra errors
+- data: dataset loading failure, missing data files, wrong batch format
+- general: anything that doesn't fit above categories
+
+Reply ONLY: {{"category": "<one of the categories above>", "confidence": 0.0-1.0, "need_more": null}}"""
+
+_CLASSIFY_PROMPTS["is_important_discovery"] = """\
+Determine if this tool output contains important information that should be
+saved to memory for future sessions. Important = would be costly to rediscover.
+
+Tool: {tool_name}
+Output (truncated):
+{tool_output}
+
+Examples of important discoveries:
+- Log file paths, which rank outputs metrics
+- Working configuration values (parallelism, batch size)
+- Environment paths (conda prefix, CUDA_HOME, model weights)
+- Error patterns and their root causes (once diagnosed)
+- Performance numbers (throughput, iteration time)
+
+NOT important:
+- Verbose build logs, pip install output
+- File contents being read for immediate use
+- Intermediate debugging output
+
+Reply ONLY: {{"important": true/false, "key_info": "<one-line summary if important, else null>", "need_more": null}}"""
+
+_CLASSIFY_PROMPTS["is_debug_residue"] = """\
+Determine if this code line is debug/diagnostic code that should be removed
+before declaring the task complete.
+
+File: {filepath}
+Line {lineno}: {line_content}
+Surrounding context (3 lines before/after):
+{context}
+
+Debug residue includes:
+- Temporary print statements for debugging (not permanent logging)
+- pdb/breakpoint calls
+- Commented-out code with TODO/FIXME/TEMP markers
+- Variables only used for inspection
+
+NOT debug residue:
+- Permanent logging (logging.info, logger.debug in production code)
+- Assertions that validate correctness
+- Comments explaining why code exists
+
+Reply ONLY: {{"is_residue": true/false, "reason": "<brief explanation>", "need_more": null}}"""
+
 # ── JudgeBudget ──────────────────────────────────────────────────────────
 
 @dataclass
@@ -775,7 +840,7 @@ class Judge:
             return (result, SOURCE_LLM)
 
         self.budget.note_skipped("classify", category)
-        self._classify_cache[cache_key] = default
+        # Don't cache default values — they should be re-evaluated when budget replenishes
         self._trace.record(category, SOURCE_DEFAULT)
         return (default, SOURCE_DEFAULT)
 
