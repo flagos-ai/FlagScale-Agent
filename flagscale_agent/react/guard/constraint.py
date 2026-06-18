@@ -28,6 +28,7 @@ class ConstraintGuard(Guard):
     name = "constraint"
     priority = 25  # After safety (10), before progress (30)
     activate_on_states = {AgentState.EXECUTING, AgentState.PLANNING}
+    overridable = True
 
     def __init__(self, constraints: list[Constraint] | None = None):
         self._constraints: list[Constraint] = constraints or []
@@ -135,4 +136,4 @@ class ConstraintGuard(Guard):
         return list(self._constraints)
 
     def reset_turn(self):
-        """No per-turn reset needed — violations accumulate across turns."""
+        """Violations accumulate across iterations (session-level)."""

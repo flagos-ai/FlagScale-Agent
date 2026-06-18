@@ -4,12 +4,16 @@ Guards fire at three points:
 - pre: Before tool execution (can block)
 - post: After tool execution (can inject messages)
 - strategic: At review points (can redirect plan)
+
+v2: Added SharedState for cross-guard communication and inject deduplication.
 """
 
 from __future__ import annotations
 
 import abc
+import re
 from dataclasses import dataclass, field
+from flagscale_agent.react import display
 from typing import Literal, Any
 
 from flagscale_agent.react.state_machine import AgentState
@@ -45,6 +49,9 @@ class GuardContext:
     experiment_diff_fn: Any = None
     current_experiment_name: str = ""
 
+    # Override reason: LLM declares why a potentially-blocked call is justified
+    override_reason: str = ""
+
     @property
     def phase_name(self) -> str:
         """Derive phase name from current state for backward compatibility."""
@@ -59,140 +66,323 @@ class GuardVerdict:
     message: str = ""
     reason: str = ""
     metadata: dict = field(default_factory=dict)
+    # v2: category tag for deduplication
+    category: str = ""  # e.g. "read_stall", "loop", "plan_needed"
 
     @classmethod
-    def allow(cls) -> GuardVerdict:
-        return cls(action="allow")
+    def block(cls, message: str, reason: str = "", category: str = "") -> GuardVerdict:
+        return cls(action="block", message=message, reason=reason, category=category)
 
     @classmethod
-    def block(cls, message: str, reason: str = "") -> GuardVerdict:
-        return cls(action="block", message=message, reason=reason)
-
-    @classmethod
-    def inject(cls, message: str, reason: str = "") -> GuardVerdict:
-        return cls(action="inject_msg", message=message, reason=reason)
+    def inject(cls, message: str, reason: str = "", category: str = "") -> GuardVerdict:
+        return cls(action="inject_msg", message=message, reason=reason, category=category)
 
     @classmethod
     def compact(cls, reason: str = "") -> GuardVerdict:
         return cls(action="force_compact", reason=reason)
 
     @classmethod
-    def escalate(cls, message: str, reason: str = "") -> GuardVerdict:
-        return cls(action="escalate", message=message, reason=reason)
+    def escalate(cls, message: str, reason: str = "", category: str = "") -> GuardVerdict:
+        return cls(action="escalate", message=message, reason=reason, category=category)
 
     @classmethod
-    def redirect(cls, message: str, reason: str = "", metadata: dict | None = None) -> GuardVerdict:
+    def redirect(cls, message: str, reason: str = "", metadata: dict = None) -> GuardVerdict:
         return cls(action="redirect", message=message, reason=reason, metadata=metadata or {})
 
 
 class Guard(abc.ABC):
-    """A behavioral constraint with lifecycle hooks.
+    """Base class for all guards."""
 
-    Each Guard OWNS its state — no agent._xxx scatter.
-    """
-
-    # Subclass must override
-    name: str = "base"
-    priority: int = 50  # Lower = earlier in check order
-
-    # Activation conditions
-    activate_on_states: set[AgentState] = {AgentState.EXECUTING}
+    name: str = "unnamed"
+    priority: int = 50  # lower = higher priority
+    activate_on_states: set[AgentState] = set()
     activate_on_tools: set[str] | None = None  # None = all tools
 
+    # Override mechanism: if True, LLM can bypass this guard's block by providing
+    # a reason in tool_args["_override_reason"]. The guard's accept_override()
+    # method decides whether the reason is sufficient.
+    overridable: bool = False
+
     def should_activate(self, ctx: GuardContext) -> bool:
-        """Check if this guard should fire for the given context."""
-        if ctx.current_state not in self.activate_on_states:
+        """Check if this guard should run for the current context."""
+        # Empty activate_on_states means "all states" (no filter)
+        if self.activate_on_states and ctx.current_state not in self.activate_on_states:
             return False
-        if self.activate_on_tools is not None and ctx.tool_name not in self.activate_on_tools:
+        if self.activate_on_tools and ctx.tool_name not in self.activate_on_tools:
             return False
         return True
 
     def check_pre(self, ctx: GuardContext) -> GuardVerdict | None:
-        """Called BEFORE tool execution. Return verdict to act."""
+        """Pre-execution check. Return block/inject to prevent or warn."""
         return None
 
     def check_post(self, ctx: GuardContext) -> GuardVerdict | None:
-        """Called AFTER tool execution. Return verdict to act."""
+        """Post-execution check. Return inject to add context."""
         return None
 
     def check_strategic(self, ctx: GuardContext) -> GuardVerdict | None:
-        """Called at strategic review points (every N turns). Return verdict to redirect."""
+        """Strategic review check. Return redirect to change plan."""
         return None
 
-    def reset_turn(self):
-        """Called at the start of each turn. Override to reset per-turn state."""
+    def accept_override(self, reason: str, ctx: GuardContext) -> bool:
+        """Evaluate whether the LLM's override reason is sufficient to bypass a block.
+
+        Only called when overridable=True and the guard returned a block verdict.
+        Default: accept any non-empty reason. Override for stricter validation.
+        """
+        return bool(reason and reason.strip())
 
     def notify_blocked(self, ctx: GuardContext):
-        """Called when a tool call was blocked by another guard AFTER this guard's check_pre passed.
+        """Called when a tool call was blocked externally (e.g., by another guard)."""
+        pass
 
-        Override to undo any state changes made in check_pre (e.g., remove from history).
+    def reset_iteration(self):
+        """Called at the start of each iteration (LLM+tool loop) within a turn.
+
+        A "turn" is one user message → completion (may contain many iterations).
+        An "iteration" is one LLM call + one tool execution within that turn.
+
+        Most guards should NOT reset state here — they need to track patterns
+        across iterations (e.g., consecutive errors, read streaks).
+        Only reset per-iteration dedup caches or similar ephemeral state.
         """
+        pass
 
-    def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(name={self.name!r}, priority={self.priority})"
+    # Backward compat: subclasses may override either name
+    reset_turn = reset_iteration
+
+    def set_shared_state(self, shared_state):
+        """Optional: receive SharedState from GuardRegistry. Override to use."""
+        pass
+
+
+# Semantic categories for inject deduplication
+# Injects with the same category in the same turn are merged, not duplicated.
+_INJECT_CATEGORY_PATTERNS = {
+    "read_stall": re.compile(r"read.only|re.reading|gathering information|not acting", re.IGNORECASE),
+    "loop": re.compile(r"loop|repeated|same tool|same call", re.IGNORECASE),
+    "plan_needed": re.compile(r"plan|plan_create|organize", re.IGNORECASE),
+    "budget": re.compile(r"budget|token|exhausted", re.IGNORECASE),
+}
+
+
+def _infer_category(verdict: GuardVerdict) -> str:
+    """Infer the semantic category of an inject verdict for deduplication."""
+    if verdict.category:
+        return verdict.category
+    # Try to infer from message content
+    text = verdict.message + " " + verdict.reason
+    for cat, pattern in _INJECT_CATEGORY_PATTERNS.items():
+        if pattern.search(text):
+            return cat
+    return ""
+
+
+_OVERRIDE_HINT = (
+    "\n\n[To override: re-issue the same tool call with an added "
+    "\"_override_reason\" field in tool_args explaining why this action is justified.]"
+)
+
+
+def _maybe_add_override_hint(
+    verdict: GuardVerdict, blocking_guard: Guard | None, ctx: GuardContext
+) -> str:
+    """Append override instructions to a block message if the blocking guard is overridable.
+
+    Only appends when:
+    - The verdict is a "block"
+    - The blocking guard has overridable=True
+    - The LLM hasn't already provided an override_reason (avoids re-hinting on rejection)
+    """
+    if verdict.action != "block":
+        return verdict.message
+    if ctx.override_reason:
+        # Override was attempted but rejected — don't re-hint
+        return verdict.message
+    if blocking_guard and blocking_guard.overridable:
+        return verdict.message + _OVERRIDE_HINT
+    return verdict.message
 
 
 class GuardRegistry:
-    """Manages guard instances, sorted by priority."""
+    """Manages all guards, runs them in priority order, deduplicates injects."""
 
     def __init__(self):
         self._guards: list[Guard] = []
+        # v2: SharedState for cross-guard communication
+        from flagscale_agent.react.guard.shared_state import SharedState
+        self._shared_state = SharedState()
 
     def register(self, guard: Guard):
-        """Register a guard and maintain priority order."""
         self._guards.append(guard)
         self._guards.sort(key=lambda g: g.priority)
+        # Inject shared state into guards that support it
+        guard.set_shared_state(self._shared_state)
+
+    @property
+    def shared_state(self):
+        """Access the shared state for external use (e.g., agent setting TaskMode)."""
+        return self._shared_state
 
     def check_pre(self, ctx: GuardContext) -> GuardVerdict | None:
-        """Run all guards' pre-checks. First non-None verdict wins.
+        """Run all guards' pre-checks with inject deduplication."""
+        inject_messages = []
+        inject_categories_seen: set = set()
+        first_hard_verdict = None
+        first_hard_guard = None
+        first_reason = ""
 
-        If a guard blocks/escalates, notify all earlier guards that passed
-        so they can undo state changes (e.g., remove from history).
-        """
-        passed_guards: list[Guard] = []
         for guard in self._guards:
-            if guard.should_activate(ctx):
-                verdict = guard.check_pre(ctx)
-                if verdict is not None:
-                    # This guard blocked — notify all earlier guards that passed
-                    for earlier in passed_guards:
-                        earlier.notify_blocked(ctx)
-                    return verdict
-                passed_guards.append(guard)
+            if not guard.should_activate(ctx):
+                continue
+            verdict = guard.check_pre(ctx)
+            if verdict is None:
+                continue
+
+            if verdict.action in ("block", "escalate", "force_compact", "redirect"):
+                # Override mechanism: if guard is overridable and LLM provided a reason,
+                # let the guard decide whether to accept
+                if (
+                    verdict.action == "block"
+                    and guard.overridable
+                    and ctx.override_reason
+                    and guard.accept_override(ctx.override_reason, ctx)
+                ):
+                    # Override accepted — skip this block, log it
+                    self._shared_state.record_override(guard.name, ctx.override_reason)
+                    display.guard_overridden(guard.name, ctx.override_reason)
+                    continue
+                if first_hard_verdict is None:
+                    first_hard_verdict = verdict
+                    first_hard_guard = guard
+                continue
+
+            if verdict.action == "inject_msg":
+                # v2: Deduplicate by semantic category
+                category = _infer_category(verdict)
+                if category and category in inject_categories_seen:
+                    # Skip duplicate — a similar warning was already queued
+                    continue
+                if category:
+                    inject_categories_seen.add(category)
+
+                # v2: Check effectiveness — if this inject has been repeatedly
+                # ineffective, escalate instead of repeating
+                if category and self._shared_state.inject_tracker.should_suppress(
+                    guard.name, category
+                ):
+                    escalation_msg = self._shared_state.inject_tracker.get_escalation_message(
+                        guard.name, category
+                    )
+                    # Replace the inject with an escalation
+                    if first_hard_verdict is None:
+                        first_hard_verdict = GuardVerdict.escalate(
+                            escalation_msg, reason=f"ineffective_inject_{guard.name}"
+                        )
+                    continue
+
+                inject_messages.append(verdict.message)
+                if not first_reason:
+                    first_reason = verdict.reason
+
+                # Track in SharedState
+                self._shared_state.inject_tracker.record_inject(
+                    guard.name, category or verdict.reason, ctx.turn_count
+                )
+
+        # If there's a hard verdict, prepend inject messages and add override hint
+        if first_hard_verdict:
+            if inject_messages and first_hard_verdict.message:
+                first_hard_verdict.message = "\n\n".join(inject_messages) + "\n\n" + first_hard_verdict.message
+            # Add override hint if the blocking guard is overridable
+            first_hard_verdict.message = _maybe_add_override_hint(
+                first_hard_verdict, first_hard_guard, ctx
+            )
+            return first_hard_verdict
+
+        # Merge all inject messages into one verdict (deduplicated)
+        if inject_messages:
+            return GuardVerdict.inject(
+                "\n\n".join(inject_messages),
+                reason=first_reason or "multi_guard_inject"
+            )
+
         return None
 
     def check_post(self, ctx: GuardContext) -> GuardVerdict | None:
-        """Run all guards' post-checks.
+        """Run all guards' post-checks with inject deduplication."""
+        inject_messages = []
+        inject_categories_seen: set = set()
+        first_hard_verdict = None
+        first_hard_guard = None
+        first_reason = ""
 
-        Unlike check_pre, ALL guards run (to update internal state).
-        Collects all inject_msg verdicts and merges them.
-        For block/escalate/force_compact, returns the first (highest-priority) one.
-        """
-        inject_messages: list[str] = []
-        first_hard_verdict: GuardVerdict | None = None
-        first_reason: str | None = None
+        # v2: Update shared state with tool call info
+        self._shared_state.record_tool_call(
+            ctx.tool_name, ctx.tool_args,
+            is_read_only=ctx.tool_effects.is_read_only
+        )
 
         for guard in self._guards:
-            if guard.should_activate(ctx):
-                verdict = guard.check_post(ctx)
-                if verdict is None:
-                    continue
-                if verdict.action == "inject_msg":
-                    if verdict.message:
-                        inject_messages.append(verdict.message)
-                    if first_reason is None:
-                        first_reason = verdict.reason
-                elif first_hard_verdict is None:
-                    first_hard_verdict = verdict
+            if not guard.should_activate(ctx):
+                continue
+            verdict = guard.check_post(ctx)
+            if verdict is None:
+                continue
 
-        # Hard verdicts (block/escalate/force_compact) take priority
-        if first_hard_verdict is not None:
-            # Prepend any inject messages to the hard verdict
+            if verdict.action in ("block", "escalate", "force_compact", "redirect"):
+                # Override mechanism (same as check_pre)
+                if (
+                    verdict.action == "block"
+                    and guard.overridable
+                    and ctx.override_reason
+                    and guard.accept_override(ctx.override_reason, ctx)
+                ):
+                    self._shared_state.record_override(guard.name, ctx.override_reason)
+                    display.guard_overridden(guard.name, ctx.override_reason)
+                    continue
+                if first_hard_verdict is None:
+                    first_hard_verdict = verdict
+                    first_hard_guard = guard
+                continue
+
+            if verdict.action == "inject_msg":
+                # v2: Deduplicate by semantic category
+                category = _infer_category(verdict)
+                if category and category in inject_categories_seen:
+                    continue
+                if category:
+                    inject_categories_seen.add(category)
+
+                # v2: Check effectiveness — suppress repeatedly ineffective injects
+                if category and self._shared_state.inject_tracker.should_suppress(
+                    guard.name, category
+                ):
+                    escalation_msg = self._shared_state.inject_tracker.get_escalation_message(
+                        guard.name, category
+                    )
+                    if first_hard_verdict is None:
+                        first_hard_verdict = GuardVerdict.escalate(
+                            escalation_msg, reason=f"ineffective_inject_{guard.name}"
+                        )
+                    continue
+
+                inject_messages.append(verdict.message)
+                if not first_reason:
+                    first_reason = verdict.reason
+
+                self._shared_state.inject_tracker.record_inject(
+                    guard.name, category or verdict.reason, ctx.turn_count
+                )
+
+        if first_hard_verdict:
             if inject_messages and first_hard_verdict.message:
                 first_hard_verdict.message = "\n\n".join(inject_messages) + "\n\n" + first_hard_verdict.message
+            first_hard_verdict.message = _maybe_add_override_hint(
+                first_hard_verdict, first_hard_guard, ctx
+            )
             return first_hard_verdict
 
-        # Merge all inject messages into one verdict
         if inject_messages:
             return GuardVerdict.inject(
                 "\n\n".join(inject_messages),
@@ -210,19 +400,20 @@ class GuardRegistry:
                     return verdict
         return None
 
-    def reset_turn(self):
-        """Reset all guards for a new turn."""
+    def reset_iteration(self):
+        """Reset per-iteration state for all guards.
+
+        Called at the start of each iteration (LLM+tool loop) within a turn.
+        Guards that need to track state across iterations should keep their
+        reset_turn() as pass (default behavior).
+        """
+        self._shared_state.new_iteration()
         for guard in self._guards:
+            # Call reset_turn — subclasses override this name
             guard.reset_turn()
 
-    def notify_all_blocked(self, ctx: GuardContext):
-        """Notify all guards that a tool call was blocked externally (e.g., by user deny).
-
-        Called by tool executor when a call is blocked after all guards passed check_pre.
-        """
-        for guard in self._guards:
-            if guard.should_activate(ctx):
-                guard.notify_blocked(ctx)
+    # Backward compat alias
+    reset_turn = reset_iteration
 
     @property
     def guards(self) -> list[Guard]:

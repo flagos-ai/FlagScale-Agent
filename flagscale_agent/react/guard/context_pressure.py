@@ -90,6 +90,6 @@ class ContextPressureGuard(Guard):
         return candidates
 
     def reset_turn(self):
-        # Do NOT reset warned flags here — reset_turn is called per iteration.
-        # Context pressure warnings should fire at most once per session threshold crossing.
+        # Context pressure warnings fire at most once per session threshold crossing.
+        # Do NOT reset warned flags — they are session-level.
         pass

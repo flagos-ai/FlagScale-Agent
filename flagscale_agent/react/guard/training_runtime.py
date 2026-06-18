@@ -26,8 +26,31 @@ _LAUNCH_TRIGGER_PATTERNS = (
     r"\btrain\.py\b",
     r"\bpretrain\.py\b",
     r"\bpretrain\s",
+    # FlagScale launcher patterns (run.py with Hydra config)
+    r"\brun\.py\b.*\baction\s*=\s*run\b",
+    r"\brun\.py\b.*--config",
+    # conda run wrapping any training command
+    r"\bconda\s+run\b.*\brun\.py\b",
+    r"\bconda\s+run\b.*\btorchrun\b",
+    r"\bconda\s+run\b.*\bflagscale\b",
 )
 _LAUNCH_TRIGGER_RE = re.compile("|".join(_LAUNCH_TRIGGER_PATTERNS), re.IGNORECASE)
+
+# Patterns that indicate training failure in monitor() output
+_MONITOR_FAILURE_PATTERNS = (
+    r"TRAINING CRASHED",
+    r"Process\s+died",
+    r"Traceback\s+\(most\s+recent",
+    r"RuntimeError:",
+    r"NCCL\s+error",
+    r"Out\s+of\s+memory",
+    r"CUDA\s+error",
+    r"AttributeError:",
+    r"ModuleNotFoundError:",
+    r"all\s+\d+\s+rank.*stderr.*error",
+    r"exit\s+code\s+[1-9]",
+)
+_MONITOR_FAILURE_RE = re.compile("|".join(_MONITOR_FAILURE_PATTERNS), re.IGNORECASE)
 
 
 # Auto-restart config templates
@@ -63,6 +86,7 @@ class TrainingRuntimeGuard(Guard):
     name = "training_runtime"
     priority = 50
     activate_on_states = {AgentState.EXECUTING}
+    overridable = True
 
     # Thresholds
     _MONITOR_GATE_MAX_BLOCKS = 5
@@ -89,11 +113,6 @@ class TrainingRuntimeGuard(Guard):
     def check_pre(self, ctx: GuardContext) -> GuardVerdict | None:
         if not ctx.tool_name:
             return None
-
-        # Heartbeat: track turns since last monitor
-        if self._training_started:
-            self._turns_since_last_monitor += 1
-            self._turns_since_last_gpu_check += 1
 
         # Monitor enforcement
         if self._awaiting_monitor:
@@ -255,67 +274,80 @@ class TrainingRuntimeGuard(Guard):
                             reason="kill-retry loop",
                         )
 
-        # Track training failures
-        if self._training_started and ctx.tool_result and ctx.tool_name == "shell":
-            if classify and classify("is_training_failure", {
-                "command": ctx.tool_args.get("command", ""),
-                "result": ctx.tool_result,
-            }, default=False):
-                self._consecutive_train_failures += 1
-                self._last_train_failure_reasons.append(ctx.tool_result[-300:])
-                self._source_reads_since_last_failure = 0
+        # Track training failures (from shell OR monitor results)
+        _failure_detected = False
+        _failure_result = ""
+        
+        if self._training_started and ctx.tool_result:
+            if ctx.tool_name == "shell":
+                if classify and classify("is_training_failure", {
+                    "command": ctx.tool_args.get("command", ""),
+                    "result": ctx.tool_result,
+                }, default=False):
+                    _failure_detected = True
+                    _failure_result = ctx.tool_result
+            elif ctx.tool_name in ("monitor", "find_latest_log", "parse_training_metrics"):
+                # Check monitor/log tool output for failure patterns
+                if _MONITOR_FAILURE_RE.search(ctx.tool_result):
+                    _failure_detected = True
+                    _failure_result = ctx.tool_result
 
-                failure_lower = ctx.tool_result.lower()
-                strategy = _AUTO_RESTART_STRATEGIES["default"]
-                if "oom" in failure_lower or "out of memory" in failure_lower:
-                    strategy = _AUTO_RESTART_STRATEGIES["oom"]
-                elif "nccl" in failure_lower:
-                    strategy = _AUTO_RESTART_STRATEGIES["nccl"]
-                elif "cuda" in failure_lower:
-                    strategy = _AUTO_RESTART_STRATEGIES["cuda"]
+        if _failure_detected:
+            self._consecutive_train_failures += 1
+            self._last_train_failure_reasons.append(_failure_result[-300:])
+            self._source_reads_since_last_failure = 0
 
-                strategy_lines = "\n".join(f"  - {k}: {desc}" for k, desc, _ in strategy)
-                restart_msg = (
-                    f"\n[AUTO-RESTART STRATEGY] Detected failure category, "
-                    f"suggested config modifications before next attempt:\n"
-                    f"{strategy_lines}\n"
-                    "After applying fixes, call add_attempt() with new config, "
-                    "then relaunch training."
+            failure_lower = _failure_result.lower()
+            strategy = _AUTO_RESTART_STRATEGIES["default"]
+            if "oom" in failure_lower or "out of memory" in failure_lower:
+                strategy = _AUTO_RESTART_STRATEGIES["oom"]
+            elif "nccl" in failure_lower:
+                strategy = _AUTO_RESTART_STRATEGIES["nccl"]
+            elif "cuda" in failure_lower:
+                strategy = _AUTO_RESTART_STRATEGIES["cuda"]
+
+            strategy_lines = "\n".join(f"  - {k}: {desc}" for k, desc, _ in strategy)
+            restart_msg = (
+                f"\n[AUTO-RESTART STRATEGY] Detected failure category, "
+                f"suggested config modifications before next attempt:\n"
+                f"{strategy_lines}\n"
+                "After applying fixes, call add_attempt() with new config, "
+                "then relaunch training."
+            )
+
+            compare_msg = ""
+            if ctx.current_experiment_name and ctx.experiment_diff_fn:
+                try:
+                    diff_result = ctx.experiment_diff_fn(ctx.current_experiment_name)
+                    if diff_result.get("diffs"):
+                        compare_msg = (
+                            f"\n\n[AUTO-COMPARE] Config diffs between last two attempts "
+                            f"of '{ctx.current_experiment_name}':\n"
+                            f"{diff_result['summary']}\n"
+                            "Review which config change likely caused this failure."
+                        )
+                except Exception:
+                    pass
+
+            if self._consecutive_train_failures >= 3:
+                return GuardVerdict.escalate(
+                    f"[TrainingRuntime] {self._consecutive_train_failures} "
+                    "consecutive training failures. The current configuration "
+                    "will not succeed without changes. Diagnose root cause "
+                    f"before retrying.{restart_msg}{compare_msg}",
+                    reason="consecutive training failures",
                 )
-
-                compare_msg = ""
-                if ctx.current_experiment_name and ctx.experiment_diff_fn:
-                    try:
-                        diff_result = ctx.experiment_diff_fn(ctx.current_experiment_name)
-                        if diff_result.get("diffs"):
-                            compare_msg = (
-                                f"\n\n[AUTO-COMPARE] Config diffs between last two attempts "
-                                f"of '{ctx.current_experiment_name}':\n"
-                                f"{diff_result['summary']}\n"
-                                "Review which config change likely caused this failure."
-                            )
-                    except Exception:
-                        pass
-
-                if self._consecutive_train_failures >= 3:
-                    return GuardVerdict.escalate(
-                        f"[TrainingRuntime] {self._consecutive_train_failures} "
-                        "consecutive training failures. The current configuration "
-                        "will not succeed without changes. Diagnose root cause "
-                        f"before retrying.{restart_msg}{compare_msg}",
-                        reason="consecutive training failures",
-                    )
-                elif compare_msg:
-                    return GuardVerdict.inject(
-                        compare_msg.strip() + restart_msg,
-                        reason="config diff and restart strategy after failure",
-                    )
-            else:
-                # Track source code reading
-                if ctx.tool_name == "read_file" and self._consecutive_train_failures > 0:
-                    path = ctx.tool_args.get("path", "") or ctx.tool_args.get("file_path", "")
-                    if path and path.endswith(".py"):
-                        self._source_reads_since_last_failure += 1
+            elif compare_msg:
+                return GuardVerdict.inject(
+                    compare_msg.strip() + restart_msg,
+                    reason="config diff and restart strategy after failure",
+                )
+        else:
+            # Track source code reading (not a failure)
+            if self._training_started and ctx.tool_name == "read_file" and self._consecutive_train_failures > 0:
+                path = ctx.tool_args.get("path", "") or ctx.tool_args.get("file_path", "")
+                if path and path.endswith(".py"):
+                    self._source_reads_since_last_failure += 1
 
         # GPU zombie detection
         if ctx.tool_name == "shell" and ctx.tool_result:
@@ -337,7 +369,10 @@ class TrainingRuntimeGuard(Guard):
         return None
 
     def reset_turn(self):
-        """Heartbeat and multi-node state persist across turns."""
+        """Increment heartbeat counters once per iteration (not per tool call)."""
+        if self._training_started:
+            self._turns_since_last_monitor += 1
+            self._turns_since_last_gpu_check += 1
 
     @staticmethod
     def _is_read_only_shell_fast(cmd: str) -> bool:

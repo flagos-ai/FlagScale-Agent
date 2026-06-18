@@ -103,8 +103,8 @@ class AgentKernel:
                 if self._interrupted:
                     break
 
-                # Reset guards for this iteration
-                d.guard_registry.reset_turn()
+                # Reset guards for this iteration (called once per LLM+tool loop)
+                d.guard_registry.reset_iteration()
                 d.judge.reset_turn()
 
                 schemas = d.get_schemas_fn()
@@ -196,7 +196,45 @@ class AgentKernel:
                 # ── Execute tools ──
                 try:
                     tool_calls = response["tool_calls"]
-                    results = d.execute_tools_fn(tool_calls)
+
+                    # ── Per-tool pre-guard checks ──
+                    # Give guards a chance to block individual tool calls before execution
+                    blocked_indices = set()
+                    for i, tc in enumerate(tool_calls):
+                        ctx = self._build_ctx(
+                            tool_name=tc["name"],
+                            tool_args=tc.get("arguments", {}),
+                            tool_result=None,
+                        )
+                        verdict = d.guard_registry.check_pre(ctx)
+                        if verdict is not None:
+                            blocked = self._apply_verdict(verdict, pre=True)
+                            if blocked:
+                                blocked_indices.add(i)
+
+                    # Execute tools (skip blocked ones)
+                    if blocked_indices:
+                        blocked_msg = (
+                            "[BLOCKED BY GUARD] This tool call was prevented. "
+                            "See the injected message above for instructions."
+                        )
+                        if len(blocked_indices) == len(tool_calls):
+                            # All blocked
+                            results = [blocked_msg] * len(tool_calls)
+                        else:
+                            # Partial block: execute non-blocked, merge results
+                            exec_calls = [tc for i, tc in enumerate(tool_calls) if i not in blocked_indices]
+                            exec_results = d.execute_tools_fn(exec_calls)
+                            results = []
+                            exec_idx = 0
+                            for i in range(len(tool_calls)):
+                                if i in blocked_indices:
+                                    results.append(blocked_msg)
+                                else:
+                                    results.append(exec_results[exec_idx])
+                                    exec_idx += 1
+                    else:
+                        results = d.execute_tools_fn(tool_calls)
                 except KeyboardInterrupt:
                     d.display.interrupted()
                     self._interrupted = True
@@ -260,6 +298,12 @@ class AgentKernel:
             tool_effects = tool.effects
         except (KeyError, AttributeError):
             pass
+        # Extract override_reason from tool_args (LLM declares why a blocked call is justified)
+        # Use .get() + conditional del to avoid mutating the original dict unexpectedly
+        override_reason = ""
+        if tool_args and "_override_reason" in tool_args:
+            override_reason = tool_args["_override_reason"]
+            tool_args = {k: v for k, v in tool_args.items() if k != "_override_reason"}
         return GuardContext(
             tool_name=tool_name,
             tool_args=tool_args,
@@ -270,6 +314,7 @@ class AgentKernel:
             current_state=self.fsm.current_state,
             transitions_count=len(self.fsm.history),
             classify_fn=d.judge.classify,
+            override_reason=override_reason,
         )
 
     def _apply_verdict(self, verdict: GuardVerdict, pre: bool) -> bool:

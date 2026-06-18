@@ -110,31 +110,37 @@ class TestSafetyGuard:
 class TestProgressGuard:
     def test_tracks_reads(self):
         g = ProgressGuard()
+        # Without SharedState, ProgressGuard uses ctx.recent_tool_names fallback
         for i in range(5):
             ctx = _ctx("read_file", {"path": f"/tmp/file_{i}.py"}, "content",
                        tool_effects=ToolEffect(reads=frozenset({"filesystem"})))
+            ctx.recent_tool_names = ["read_file"] * (i + 1)
             g.check_post(ctx)
-        assert g._consecutive_reads == 5
+        # Track unique files read
+        assert len(g._read_files) == 5
 
     def test_resets_on_productive_tool(self):
         g = ProgressGuard()
-        g._consecutive_reads = 10
+        g._read_files = {"/tmp/a.py", "/tmp/b.py"}
+        g._reread_count = 3
         ctx = _ctx("write_file", {"path": "/tmp/test.py", "content": "x=1"},
                    "File written",
                    tool_effects=ToolEffect(writes=frozenset({"filesystem"})))
         g.check_post(ctx)
-        assert g._consecutive_reads == 0
+        assert len(g._read_files) == 0
+        assert g._reread_count == 0
 
     def test_stale_threshold_triggers_inject(self):
         g = ProgressGuard()
-        # Pre-populate: file already seen, so re-reads count
+        # Pre-populate: file already seen, so re-reads trigger
         g._read_files.add("/tmp/same.py")
-        g._reads_since_last_new_file = 25
-        g._progress_triggers = 0
-        g._consecutive_reads = 25
-        ctx = _ctx("read_file", {"path": "/tmp/same.py"}, "content",
-                   tool_effects=ToolEffect(reads=frozenset({"filesystem"})))
-        result = g.check_post(ctx)
+        # Need to re-read enough times to hit threshold
+        for i in range(4):
+            ctx = _ctx("read_file", {"path": "/tmp/same.py"}, "content",
+                       tool_effects=ToolEffect(reads=frozenset({"filesystem"})))
+            ctx.recent_tool_names = ["read_file"] * (i + 6)  # simulate streak
+            result = g.check_post(ctx)
+        # After multiple re-reads, should trigger inject
         assert result is not None
         assert result.action == "inject_msg"
 
@@ -200,7 +206,7 @@ class TestPlanGuard:
 
     def test_blocks_after_threshold_when_complex(self):
         g = PlanGuard()
-        g.mark_complex_task()
+        g._complex_task_no_plan = True
         for i in range(7):
             ctx = _ctx("read_file", {"path": f"/tmp/f{i}.py"},
                        tool_effects=ToolEffect(reads=frozenset({"filesystem"})))
@@ -213,7 +219,7 @@ class TestPlanGuard:
 
     def test_resets_on_plan_create(self):
         g = PlanGuard()
-        g.mark_complex_task()
+        g._complex_task_no_plan = True
         g._pre_plan_tool_calls = 5
         g._consecutive_reads = 9
         g._block_count = 1
@@ -224,19 +230,6 @@ class TestPlanGuard:
         assert g._consecutive_reads == 0
         assert g._block_count == 0
 
-    def test_reset_plan_state_clears_consecutive_reads(self):
-        """reset_plan_state must also clear _consecutive_reads (bug fix)."""
-        g = PlanGuard()
-        g.mark_complex_task()
-        g._consecutive_reads = 11
-        g._pre_plan_tool_calls = 4
-        g._block_count = 2
-        g.reset_plan_state()
-        assert g._complex_task_no_plan is False
-        assert g._consecutive_reads == 0
-        assert g._pre_plan_tool_calls == 0
-        assert g._block_count == 0
-
     def test_does_not_block_when_plan_exists(self):
         """Regression: once a plan exists, PlanGuard must not block reads."""
         from unittest.mock import MagicMock
@@ -244,7 +237,7 @@ class TestPlanGuard:
         task_plan.get_active.return_value = {"title": "test", "steps": []}
 
         g = PlanGuard(task_plan=task_plan)
-        g.mark_complex_task()
+        g._complex_task_no_plan = True
         # Simulate many consecutive reads — should NOT block because plan exists
         for i in range(20):
             ctx = _ctx("read_file", {"path": f"/tmp/f{i}.py"},
@@ -269,7 +262,8 @@ class TestPlanGuard:
     def test_independent_warn_still_fires_without_plan(self):
         """Without active plan, independent-mode warn still triggers at threshold."""
         g = PlanGuard(task_plan=None)
-        g._consecutive_reads = g._PLAN_GATE_INDEPENDENT_WARN - 1
+        # Use the dynamic property that accounts for TaskMode multiplier
+        g._consecutive_reads = g._plan_gate_independent_warn - 1
         ctx = _ctx("read_file", {"path": "/tmp/warn.py"},
                    tool_effects=ToolEffect(reads=frozenset({"filesystem"})))
         result = g.check_pre(ctx)

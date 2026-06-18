@@ -50,6 +50,7 @@ class ExperimentGuard(Guard):
     name = "experiment_lifecycle"
     priority = 45  # Run before PlanUpdateGuard
     activate_on_states = {AgentState.EXECUTING}
+    overridable = True
 
     def __init__(self, experiment_manager):
         self._experiment_manager = experiment_manager

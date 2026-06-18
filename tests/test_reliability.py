@@ -14,86 +14,111 @@ from flagscale_agent.react.plan import TaskPlan, StepCheckpoint
 from flagscale_agent.react.state_machine import AgentState
 
 
-def _make_ctx(tool_result: str = "", tool_name: str = "shell") -> GuardContext:
+def _make_ctx(tool_result: str = "", tool_name: str = "shell",
+              classify_fn=None) -> GuardContext:
     return GuardContext(
         tool_name=tool_name,
         tool_args={},
         tool_result=tool_result,
         current_state=AgentState.EXECUTING,
+        classify_fn=classify_fn,
     )
 
 
 # ── ErrorClassifierGuard Tests ──────────────────────────────────────────────
 
 
+def _mock_classify_error(category="env_missing"):
+    """Create a classify_fn that returns 'yes' for is_error and a category."""
+    def classify(cat, context, **kwargs):
+        if cat == "is_error":
+            return "yes", "fast"
+        return category, "fast"
+    return classify
+
+
+def _mock_classify_no_error():
+    """Classify_fn that returns 'no' for is_error."""
+    def classify(cat, context, **kwargs):
+        return "no", "fast"
+    return classify
+
+
 class TestErrorClassifier:
     def test_no_error_returns_none(self):
+        """Non-error output should not trigger (keyword gate)."""
         guard = ErrorClassifierGuard()
         ctx = _make_ctx("Success: file written to /tmp/out.txt")
         assert guard.check_post(ctx) is None
 
-    def test_classifies_env_missing(self):
+    def test_keyword_gate_triggers_on_error_text(self):
+        """Error keywords should pass the gate and call classify_fn."""
         guard = ErrorClassifierGuard()
-        ctx = _make_ctx("Error: ModuleNotFoundError: No module named 'torch'")
+        classify_fn = _mock_classify_error("env_missing")
+        ctx = _make_ctx(
+            "Error: ModuleNotFoundError: No module named 'torch'",
+            classify_fn=classify_fn,
+        )
         result = guard.check_post(ctx)
-        # First occurrence: no inject yet
-        assert result is None
-        assert guard._last_category == "env_missing"
-
-    def test_classifies_permission(self):
-        guard = ErrorClassifierGuard()
-        ctx = _make_ctx("Error: Permission denied: '/etc/shadow'")
-        guard.check_post(ctx)
-        assert guard._last_category == "permission"
-
-    def test_classifies_resource(self):
-        guard = ErrorClassifierGuard()
-        ctx = _make_ctx("RuntimeError: CUDA out of memory. Tried to allocate 2.00 GiB")
-        guard.check_post(ctx)
-        assert guard._last_category == "resource"
-
-    def test_classifies_network(self):
-        guard = ErrorClassifierGuard()
-        ctx = _make_ctx("Error: Connection refused to localhost:8080")
-        guard.check_post(ctx)
-        assert guard._last_category == "network"
-
-    def test_classifies_config(self):
-        guard = ErrorClassifierGuard()
-        ctx = _make_ctx("Error: KeyError: 'learning_rate' not found in config")
-        guard.check_post(ctx)
-        assert guard._last_category == "config"
-
-    def test_suggest_after_2_consecutive(self):
-        guard = ErrorClassifierGuard()
-        ctx = _make_ctx("Error: ModuleNotFoundError: No module named 'foo'")
-        guard.check_post(ctx)
-        result = guard.check_post(ctx)
+        # First occurrence: inject with category based on tool_name
         assert result is not None
         assert result.action == "inject_msg"
-        assert "env_missing" in result.reason or "Environment" in result.message
+        assert "shell_error" in result.reason
 
-    def test_escalate_after_3_consecutive(self):
+    def test_no_classify_fn_returns_none(self):
+        """Without classify_fn, guard can't classify — returns None."""
         guard = ErrorClassifierGuard()
-        ctx = _make_ctx("Error: Permission denied: '/root/secret'")
+        ctx = _make_ctx("Error: something failed", classify_fn=None)
+        assert guard.check_post(ctx) is None
+
+    def test_llm_says_not_error_returns_none(self):
+        """If LLM says it's not an error, guard passes."""
+        guard = ErrorClassifierGuard()
+        classify_fn = _mock_classify_no_error()
+        ctx = _make_ctx("Error in log: this is expected", classify_fn=classify_fn)
+        assert guard.check_post(ctx) is None
+
+    def test_escalation_on_consecutive_same_errors(self):
+        """2+ consecutive same-category errors trigger escalation messages."""
+        guard = ErrorClassifierGuard()
+        classify_fn = _mock_classify_error("permission")
+        ctx = _make_ctx("Error: Permission denied", classify_fn=classify_fn)
+
+        r1 = guard.check_post(ctx)
+        assert r1 is not None  # first hit
+        assert guard._consecutive_same == 1
+
+        r2 = guard.check_post(ctx)
+        assert r2 is not None
+        assert "repeated" in r2.message.lower() or "consider" in r2.message.lower()
+
+    def test_strong_escalation_at_threshold(self):
+        """3+ consecutive same-category errors trigger strong warning."""
+        guard = ErrorClassifierGuard()
+        classify_fn = _mock_classify_error("network")
+        ctx = _make_ctx("Error: Connection refused", classify_fn=classify_fn)
+
         guard.check_post(ctx)
         guard.check_post(ctx)
-        result = guard.check_post(ctx)
-        assert result is not None
-        assert result.action == "inject_msg"
-        assert "different approach" in result.message.lower() or "STOP" in result.message
+        r3 = guard.check_post(ctx)
+        assert r3 is not None
+        assert "stop" in r3.message.lower() or "root cause" in r3.message.lower()
 
     def test_success_resets_streak(self):
+        """Non-error output resets the consecutive counter."""
         guard = ErrorClassifierGuard()
-        err_ctx = _make_ctx("Error: ModuleNotFoundError: No module named 'x'")
+        classify_fn = _mock_classify_error("resource")
+        err_ctx = _make_ctx("Error: CUDA out of memory", classify_fn=classify_fn)
         guard.check_post(err_ctx)
+        assert guard._consecutive_same == 1
 
         ok_ctx = _make_ctx("File written successfully.")
         guard.check_post(ok_ctx)
+        assert guard._consecutive_same == 0
 
-        # After reset, one more error should not trigger suggestion
-        result = guard.check_post(err_ctx)
-        assert result is None
+        # After reset, hitting same error starts from 1 again
+        guard.check_post(err_ctx)
+        assert guard._consecutive_same == 1
 
 
 # ── CircuitBreakerGuard Tests ───────────────────────────────────────────────
@@ -129,15 +154,18 @@ class TestCircuitBreaker:
         guard.check_post(err_ctx)
 
         # Tripped — should block for cooldown_iters iterations
+        guard.reset_turn()  # iteration 1
         result = guard.check_pre(_make_ctx())
         assert result is not None
         assert result.action == "block"
 
+        guard.reset_turn()  # iteration 2
         result = guard.check_pre(_make_ctx())  # still in cooldown
         assert result is not None
         assert result.action == "block"
 
         # After cooldown (>2 iterations) → half_open, allowed
+        guard.reset_turn()  # iteration 3
         result = guard.check_pre(_make_ctx())
         assert result is None  # half-open probe allowed
 
@@ -149,7 +177,9 @@ class TestCircuitBreaker:
         guard.check_post(err_ctx)
 
         # Trip — first check_pre blocks (cooldown)
+        guard.reset_turn()  # iteration 1
         guard.check_pre(_make_ctx())  # blocked (iter 1, elapsed=1, not > 1)
+        guard.reset_turn()  # iteration 2
         guard.check_pre(_make_ctx())  # half-open (iter 2, elapsed=2, > 1)
 
         # Success in half-open → close
@@ -166,7 +196,9 @@ class TestCircuitBreaker:
         guard.check_post(err_ctx)
         guard.check_post(err_ctx)
 
+        guard.reset_turn()  # iteration 1
         guard.check_pre(_make_ctx())  # blocked (cooldown)
+        guard.reset_turn()  # iteration 2
         guard.check_pre(_make_ctx())  # half-open
 
         # Fail again in half-open
@@ -284,14 +316,6 @@ class TestBudgetGuard:
         assert result is not None
         assert result.action == "inject_msg"
         assert "tool" in result.message.lower() or "Tool" in result.message
-
-    def test_usage_summary(self):
-        guard = BudgetGuard(max_tokens=1000, max_tool_calls=10)
-        guard.report_tokens(100, 50)
-        summary = guard.usage_summary
-        assert summary["total_tokens"] == 150
-        assert summary["max_tokens"] == 1000
-        assert summary["token_percent"] == 15.0
 
 
 # ── StepCheckpoint Tests ────────────────────────────────────────────────────

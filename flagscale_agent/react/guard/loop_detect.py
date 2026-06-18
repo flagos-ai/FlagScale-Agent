@@ -3,6 +3,12 @@
 Uses two-phase detection:
 1. Cheap trigger: counters/ratios/patterns exceed thresholds
 2. Precise judgment: classify_fn("is_stuck_in_loop") confirms before escalation
+
+v2 improvements:
+- SharedState integration for TaskMode-aware thresholds
+- Continuation-read exemption (same file, different line ranges)
+- Argument diversity check in same_tool_dominance
+- Read-warning suppression when another guard already warned
 """
 
 from __future__ import annotations
@@ -48,60 +54,77 @@ class LoopDetectGuard(Guard):
     2. Semantic: read-only tools dominate recent history with no writes
     3. Retry pattern: kill→launch cycles without diagnostic steps between them
 
-    All detections use two-phase: cheap trigger → LLM confirmation before escalation.
+    v2: Integrates with SharedState for:
+    - TaskMode-aware thresholds (analysis mode is more tolerant)
+    - Continuation-read exemption (reading same file at different offsets)
+    - Read-warning deduplication (only one guard warns about reads per turn)
     """
 
     name = "loop_detect"
     priority = 20
     activate_on_states = {AgentState.EXECUTING}
+    overridable = True
 
     _MAX_RECENT = 12
-    _LOOP_THRESHOLD = 3
 
-    # Semantic loop detection parameters
+    # Detection 1: Exact match
+    _LOOP_THRESHOLD = 3  # same (tool, args) N times in recent history
+
+    # Detection 1B: Same tool dominance (base thresholds, multiplied by TaskMode)
+    _SAME_TOOL_DOMINANCE_BASE = 8  # same tool_name N times in window
+    _SAME_TOOL_WINDOW = 12
+
+    # Detection 2: Semantic read-only ratio (base thresholds)
     _SEMANTIC_WINDOW = 12
-    _SEMANTIC_READ_RATIO = 0.80  # 80% read-only triggers warning
-    _SEMANTIC_COOLDOWN = 5  # turns before semantic warning can re-trigger
+    _SEMANTIC_READ_RATIO_BASE = 0.85  # adjusted by TaskMode
+    _SEMANTIC_COOLDOWN = 4
 
-    # Retry pattern detection parameters
-    _RETRY_WINDOW = 8
-    _RETRY_KILL_THRESHOLD = 2  # 2 kill+launch cycles = retry loop
+    # Detection 3: Retry pattern
+    _RETRY_WINDOW = 10
 
     def __init__(self):
-        self._recent_tool_calls: list[tuple[str, str]] = []
-        self._tool_call_cache: dict[tuple[str, str], str] = {}
-        # Track full tool name history for semantic detection
+        self._recent_tool_calls: list[tuple[str, str]] = []  # (tool_name, key_args)
         self._tool_name_history: list[str] = []
-        # Track shell commands for retry pattern detection
         self._shell_cmd_history: list[str] = []
-        self._retry_warned: bool = False
-        # Semantic warning state: cooldown-based, not once-only
-        self._semantic_warned: bool = False
-        self._semantic_warn_count: int = 0  # total times warned
-        # Monotonic counter for cooldown (not tied to capped list length)
         self._total_tool_calls: int = 0
-        self._semantic_warn_at: int = 0  # _total_tool_calls value when last warned
-        # Exact-match loop escalation
+        self._tool_call_cache: dict = {}  # for per-turn dedup
+
+        # Detection 1 state
         self._exact_loop_inject_count: int = 0
+
+        # Detection 2 state
+        self._semantic_warned: bool = False
+        self._semantic_warn_at: int = 0
+        self._semantic_warn_count: int = 0
+
+        # SharedState reference (set by GuardRegistry)
+        self._shared_state = None
+
+    def set_shared_state(self, shared_state):
+        """Called by GuardRegistry to inject shared state."""
+        self._shared_state = shared_state
+
+    @property
+    def _task_mode_multiplier(self) -> float:
+        """Get loop sensitivity multiplier from TaskMode."""
+        if self._shared_state:
+            return self._shared_state.task_mode.loop_sensitivity
+        return 1.0
 
     def check_pre(self, ctx: GuardContext) -> GuardVerdict | None:
         if not ctx.tool_name:
             return None
 
+        self._total_tool_calls += 1
         key_args = self._extract_key_args(ctx.tool_args)
         entry = (ctx.tool_name, key_args)
 
+        # Track history
         self._recent_tool_calls.append(entry)
         if len(self._recent_tool_calls) > self._MAX_RECENT:
             self._recent_tool_calls = self._recent_tool_calls[-self._MAX_RECENT:]
-
-        # Track tool names for semantic detection
         self._tool_name_history.append(ctx.tool_name)
-        self._total_tool_calls += 1
-        if len(self._tool_name_history) > self._SEMANTIC_WINDOW:
-            self._tool_name_history = self._tool_name_history[-self._SEMANTIC_WINDOW:]
 
-        # Track shell commands for retry pattern detection
         if ctx.tool_name == "shell":
             cmd = ctx.tool_args.get("command", "").lower()
             self._shell_cmd_history.append(cmd)
@@ -114,73 +137,67 @@ class LoopDetectGuard(Guard):
             if t == entry
         )
         if recent_same >= self._LOOP_THRESHOLD:
-            # Exact-match loops are unambiguous — skip LLM confirmation
-            self._exact_loop_inject_count += 1
-            # Escalate after 3 repeated warnings — abort the entire batch
-            if self._exact_loop_inject_count >= 3:
-                return GuardVerdict.escalate(
-                    f"[LoopDetect] Same tool call repeated {recent_same} times across "
-                    f"{self._exact_loop_inject_count} warnings. "
-                    "You're in a loop. The approach isn't working — repeating it won't help. "
-                    "Diagnose why it's failing and propose a different strategy.",
-                    reason=f"exact_loop_persistent: {ctx.tool_name}",
-                )
-            return GuardVerdict.inject(
-                f"[LoopDetect] Same tool call repeated {recent_same} times. "
-                "Each attempt gave the same result. "
-                "Why? What's different about what you need vs what you're getting? "
-                "Answer that before trying again.",
-                reason=f"looping on {ctx.tool_name}",
-            )
-
-        # ── Detection 1.5: Same-tool dominance (same tool, different args) ──
-        # Catches: agent calling pip install with slightly different args each time
-        if len(self._tool_name_history) >= self._SEMANTIC_WINDOW:
-            window = self._tool_name_history[-self._SEMANTIC_WINDOW:]
-            same_tool_count = sum(1 for t in window if t == ctx.tool_name)
-            # If this tool dominates the window (>= 75%) and it's not a read-only tool
-            # (read-only is handled by Detection 2), warn about repetitive behavior
-            if (same_tool_count >= self._SEMANTIC_WINDOW * 0.75
-                    and ctx.tool_name not in _READ_ONLY_TOOL_NAMES):
-                # For shell: check arg diversity — different ls/find/cat/nvidia-smi
-                # commands are legitimate exploration, not a loop
-                if ctx.tool_name == "shell":
-                    recent_shell_entries = [
-                        args for name, args in self._recent_tool_calls[-self._SEMANTIC_WINDOW:]
-                        if name == "shell"
-                    ]
-                    unique_shell = len(set(recent_shell_entries))
-                    # High diversity (>50% unique commands) = exploration, not loop
-                    if unique_shell > len(recent_shell_entries) * 0.5:
-                        return None
-
-                # Phase 2: LLM confirmation
-                if not self._confirm_loop_with_llm(ctx, "same_tool_dominance",
-                        f"'{ctx.tool_name}' called {same_tool_count}/{self._SEMANTIC_WINDOW} times"):
-                    return None  # LLM says not a loop
-
+            # Continuation-read exemption: reading same file at different offsets is not a loop
+            if self._is_continuation_read(ctx.tool_name, ctx.tool_args):
+                pass  # Exempt — this is sequential reading
+            else:
                 self._exact_loop_inject_count += 1
                 if self._exact_loop_inject_count >= 3:
                     return GuardVerdict.escalate(
-                        f"[LoopDetect] '{ctx.tool_name}' called {same_tool_count}/{self._SEMANTIC_WINDOW} "
-                        f"times with varying args. You're trying variations but not getting different outcomes. "
-                        "The tool itself isn't the problem — your expectation or approach is. "
-                        "Step back: what are you actually trying to achieve?",
-                        reason=f"same_tool_dominance_persistent: {ctx.tool_name}",
+                        f"[LoopDetect] Same tool call repeated {recent_same} times across "
+                        f"{self._exact_loop_inject_count} warnings. "
+                        "You're in a loop. The approach isn't working — repeating it won't help. "
+                        "Diagnose why it's failing and propose a different strategy.",
+                        reason=f"exact_loop_persistent: {ctx.tool_name}",
                     )
                 return GuardVerdict.inject(
-                    f"[LoopDetect] '{ctx.tool_name}' called {same_tool_count}/{self._SEMANTIC_WINDOW} times. "
-                    f"You're tweaking arguments but the outcome isn't changing. "
-                    f"Before calling it again, verify what the last attempt actually did.",
-                    reason=f"same_tool_dominance: {ctx.tool_name}",
+                    f"[LoopDetect] Same tool call repeated {recent_same} times. "
+                    "Each attempt gave the same result. "
+                    "Why? What's different about what you need vs what you're getting? "
+                    "Answer that before trying again.",
+                    reason=f"looping on {ctx.tool_name}",
                 )
+
+        # ── Detection 1B: Same tool dominance (with argument diversity check) ──
+        if len(self._tool_name_history) >= self._SAME_TOOL_WINDOW:
+            window = self._tool_name_history[-self._SAME_TOOL_WINDOW:]
+            same_tool_count = sum(1 for t in window if t == ctx.tool_name)
+            # Apply TaskMode multiplier to threshold
+            adjusted_threshold = int(self._SAME_TOOL_DOMINANCE_BASE * self._task_mode_multiplier)
+
+            if same_tool_count >= adjusted_threshold:
+                # NEW: Check argument diversity before triggering
+                # If the agent is calling the same tool with DIFFERENT arguments,
+                # it's exploring (not looping)
+                recent_same_tool = [
+                    args for name, args in self._recent_tool_calls[-self._SAME_TOOL_WINDOW:]
+                    if name == ctx.tool_name
+                ]
+                arg_diversity = len(set(recent_same_tool)) / max(len(recent_same_tool), 1)
+
+                # High diversity (>50% unique args) = legitimate exploration
+                if arg_diversity > 0.50:
+                    pass  # Not a loop — different targets each time
+                else:
+                    # Check SharedState: has another guard already warned about reads?
+                    if self._shared_state and not self._shared_state.issue_read_warning():
+                        pass  # Suppress — another guard already warned
+                    else:
+                        return GuardVerdict.inject(
+                            f"[LoopDetect] '{ctx.tool_name}' called {same_tool_count}/{self._SAME_TOOL_WINDOW} "
+                            f"times with low argument diversity ({arg_diversity:.0%}). "
+                            f"You're tweaking arguments but the outcome isn't changing. "
+                            f"Before calling it again, verify what the last attempt actually did.",
+                            reason=f"same_tool_dominance: {ctx.tool_name}",
+                        )
 
         # ── Detection 2: Semantic loop (read-only dominance) ──
         if len(self._tool_name_history) >= self._SEMANTIC_WINDOW:
             window = self._tool_name_history[-self._SEMANTIC_WINDOW:]
             read_count = sum(1 for t in window if t in _READ_ONLY_TOOL_NAMES)
-            # Count productive shells in the window by checking _recent_tool_calls
             recent_entries = self._recent_tool_calls[-self._SEMANTIC_WINDOW:]
+
+            # Count productive shells in the window
             productive_shells_in_window = sum(
                 1 for name, args in recent_entries
                 if name == "shell" and not self._is_read_only_shell_args(args)
@@ -191,218 +208,152 @@ class LoopDetectGuard(Guard):
                 if name == "shell" and self._is_read_only_shell_args(args)
             )
             effective_read_count = read_count + read_only_shells
-            # Check for truly productive tools (shell excluded — handled separately)
+
+            # Check for productive tools
             has_productive = any(
                 t in ("write_file", "edit_file", "plan_create",
                       "plan_update", "workspace_experiment", "memory_write")
                 for t in window
             )
-            # Also count productive shells in window
             if productive_shells_in_window > 0:
                 has_productive = True
+
+            # Apply TaskMode to ratio threshold
+            adjusted_ratio = min(0.95, self._SEMANTIC_READ_RATIO_BASE + (self._task_mode_multiplier - 1.0) * 0.1)
+
             ratio = effective_read_count / len(window)
-            if ratio >= self._SEMANTIC_READ_RATIO and not has_productive:
-                # Diversity check: if the recent calls are all DIFFERENT targets,
-                # the agent is exploring (not looping). Only trigger if low diversity.
-                unique_entries = set(recent_entries)
-                diversity = len(unique_entries) / len(recent_entries) if recent_entries else 1.0
-                # High diversity (>60% unique) = legitimate exploration, don't trigger
-                if diversity > 0.60:
-                    pass  # Not a loop — agent is reading different things
+            if ratio >= adjusted_ratio and not has_productive:
+                # Diversity check using SharedState if available
+                if self._shared_state:
+                    diversity = self._shared_state.read_stats.diversity
                 else:
-                    # Cooldown: allow re-triggering after N calls since last warn
+                    unique_entries = set(recent_entries)
+                    diversity = len(unique_entries) / len(recent_entries) if recent_entries else 1.0
+
+                # High diversity = legitimate exploration
+                # Also exempt if continuation-heavy (reading long files sequentially)
+                is_continuation = (
+                    self._shared_state and self._shared_state.read_stats.is_continuation_heavy
+                )
+                if diversity > 0.60 or is_continuation:
+                    pass  # Not a loop
+                else:
+                    # Cooldown
                     calls_since_warn = self._total_tool_calls - self._semantic_warn_at
                     if not self._semantic_warned or calls_since_warn >= self._SEMANTIC_COOLDOWN:
-                        # Phase 2: LLM confirmation
-                        if not self._confirm_loop_with_llm(ctx, "semantic_read_only",
-                                f"{effective_read_count}/{len(window)} read-only, diversity={diversity:.2f}"):
-                            pass  # LLM says not a loop — skip
+                        # Check SharedState: suppress if another guard already warned
+                        if self._shared_state and not self._shared_state.issue_read_warning():
+                            pass  # Suppress
                         else:
                             self._semantic_warned = True
                             self._semantic_warn_at = self._total_tool_calls
                             self._semantic_warn_count += 1
 
-                            # Escalate on 2nd+ trigger — abort entire batch
                             if self._semantic_warn_count >= 2:
                                 return GuardVerdict.escalate(
                                     f"[LoopDetect] You've been reading without acting for "
-                                    f"{self._semantic_warn_count} consecutive windows. "
-                                    "Forward progress isn't just gathering information — "
-                                    "it's moving toward the goal. "
-                                    "State what you've learned and what decision you need to make. "
-                                    "Then either act or ask the user for direction.",
-                                    reason="semantic_loop_persistent",
+                                    f"{effective_read_count}/{len(window)} calls (diversity={diversity:.2f}). "
+                                    "State your findings so far and what's blocking you from acting.",
+                                    reason=f"semantic_read_persistent: {effective_read_count}/{len(window)}",
                                 )
 
                             return GuardVerdict.inject(
-                                f"[LoopDetect] {effective_read_count}/{len(window)} recent calls are read-only. "
+                                f"[LoopDetect] {effective_read_count}/{len(window)} read-only calls "
+                                f"(diversity={diversity:.2f}). "
                                 "You're gathering information but not acting on it. "
                                 "Ask yourself: do I have enough to move forward? "
                                 "If yes — write, build, or fix something. "
                                 "If no — what specific piece is missing?",
-                                reason=f"semantic loop: {effective_read_count}/{len(window)} read-only",
+                                reason=f"semantic_read_only: {effective_read_count}/{len(window)}",
                             )
 
-        # ── Detection 3: Retry pattern (kill→launch cycles) ──
-        if ctx.tool_name == "shell" and not self._retry_warned:
-            verdict = self._check_retry_pattern(ctx)
-            if verdict:
-                return verdict
+        # ── Detection 3: Retry pattern (kill→launch without diagnosis) ──
+        verdict = self._check_retry_pattern(ctx)
+        if verdict:
+            return verdict
 
         return None
 
-    def _confirm_loop_with_llm(self, ctx: GuardContext, detection_type: str,
-                                evidence: str) -> bool:
-        """Phase 2: Ask LLM if this is actually a loop.
+    def _is_continuation_read(self, tool_name: str, args: dict) -> bool:
+        """Check if this is a continuation read (same file, different line range).
 
-        Returns True if confirmed as loop, False if overridden (not a loop).
+        Sequential reads of the same file (start_line > 1) are normal behavior
+        when reading long files, not a loop.
         """
-        print(display.dim(f"  🔍 [loop_detect] triggered: {detection_type}"))
-
-        if not ctx.classify_fn:
-            # Conservative: no LLM = assume loop
-            print(display.yellow(f"     ⚠  [loop_detect] no judge — assuming loop"))
-            return True
-
-        # Build context from recent history
-        recent_history = []
-        for name, args in self._recent_tool_calls[-6:]:
-            recent_history.append(f"{name}({args[:60]})")
-
-        result, source = get_judge_result(
-            ctx.classify_fn, "is_stuck_in_loop",
-            {
-                "detection_type": detection_type,
-                "evidence": evidence,
-                "recent_tool_history": "; ".join(recent_history),
-            },
-            default=True
-        )
-        if is_trusted(source) and not result:
-            print(display.dim(f"     ✓  [loop_detect] override: not a loop (legitimate exploration)"))
-            return False  # LLM says not a loop
-        print(display.yellow(f"     ⚠  [loop_detect] confirmed: agent is looping"))
-        return True
-
-    def _is_productive_shell(self, cmd: str) -> bool:
-        """Check if a shell command is productive (modifies state).
-
-        Read-only commands (ls, find, cat, etc.) are not productive.
-        Commands that install, build, write, or modify state are productive.
-        """
-        cmd_stripped = cmd.strip().lower()
-        if not cmd_stripped:
+        if tool_name != "read_file":
             return False
-        if any(cmd_stripped.startswith(p) for p in _READ_ONLY_SHELL_PREFIXES):
+
+        path = args.get("path", "")
+        start_line = args.get("start_line")
+
+        # Only counts as continuation if start_line > 1 (not re-reading from beginning)
+        if not start_line or start_line <= 1:
             return False
-        return True
 
-    def _is_read_only_shell_args(self, key_args: str) -> bool:
-        """Check if a shell's key_args string represents a read-only command.
+        # Check if we recently read the same file at a different offset
+        for prev_name, prev_args_str in reversed(self._recent_tool_calls[:-1]):
+            if prev_name != "read_file":
+                continue
+            if f"path={path}" in prev_args_str:
+                return True  # Same file was recently read — this is a continuation
 
-        key_args format from _extract_key_args: "command=ls /foo|other=bar"
-        Extract the command value and check against read-only prefixes.
-        """
-        # Extract command value from key_args format
-        cmd = ""
-        for part in key_args.split("|"):
-            if part.startswith("command="):
-                cmd = part[len("command="):].strip().lower()
-                break
-        if not cmd:
-            return True  # no command = treat as read-only
-        return any(cmd.startswith(p) for p in _READ_ONLY_SHELL_PREFIXES)
+        return False
 
     def _check_retry_pattern(self, ctx: GuardContext) -> GuardVerdict | None:
-        """Detect kill→launch retry loops without diagnostic steps."""
-        if len(self._shell_cmd_history) < 4:
+        """Detect kill→launch cycles without diagnostic steps."""
+        if ctx.tool_name != "shell":
             return None
 
-        window = self._shell_cmd_history[-self._RETRY_WINDOW:]
-        kill_count = sum(1 for cmd in window if any(k in cmd for k in ("kill", "pkill", "killall")))
+        cmd = ctx.tool_args.get("command", "").lower()
+        recent = self._shell_cmd_history[-self._RETRY_WINDOW:]
+        if len(recent) < 4:
+            return None
+
+        kill_count = sum(1 for c in recent if any(p in c for p in ("kill", "pkill", "killall")))
         launch_count = sum(
-            1 for cmd in window
-            if any(k in cmd for k in ("torchrun", "deepspeed", "flagscale", "train.py", "pretrain"))
+            1 for c in recent
+            if any(p in c for p in ("torchrun", "python -m torch.distributed",
+                                     "deepspeed", "flagscale", "train.py", "pretrain"))
+        )
+        diag_count = sum(
+            1 for c in recent
+            if any(p in c for p in ("grep", "cat", "tail", "nvidia-smi", "ps ",
+                                     "dmesg", "journalctl"))
         )
 
-        # Detect: 2+ kills AND 2+ launches in the window = retry loop
-        if kill_count >= self._RETRY_KILL_THRESHOLD and launch_count >= self._RETRY_KILL_THRESHOLD:
-            # Check if there were diagnostic steps (read_file, grep, etc.) between cycles
-            recent_tools = self._tool_name_history[-self._RETRY_WINDOW:]
-            diagnostic_count = sum(
-                1 for t in recent_tools
-                if t in ("read_file", "grep", "find_latest_log")
+        if kill_count >= 2 and launch_count >= 2 and diag_count == 0:
+            return GuardVerdict.inject(
+                "[LoopDetect] Kill→relaunch cycle detected without diagnostics. "
+                "Before retrying, diagnose what went wrong: check logs, GPU state, "
+                "or error output from the previous run.",
+                reason="retry_without_diagnosis",
             )
-            if diagnostic_count < 2:
-                # Phase 2: LLM confirmation for retry pattern
-                if not self._confirm_loop_with_llm(ctx, "retry_pattern",
-                        f"{kill_count} kills + {launch_count} launches without diagnostics"):
-                    return None
-
-                self._retry_warned = True
-                return GuardVerdict.inject(
-                    f"[LoopDetect] RETRY LOOP DETECTED: {kill_count} kills + {launch_count} launches "
-                    "in recent history without diagnostic steps between them.\n\n"
-                    "STOP the kill→restart cycle. Instead:\n"
-                    "1. Read the error log/output from the LAST failed attempt\n"
-                    "2. Form a hypothesis about WHY it's failing\n"
-                    "3. Verify the hypothesis (read source code, check versions, etc.)\n"
-                    "4. Fix the root cause BEFORE relaunching\n\n"
-                    "Common causes: wrong config path, missing env var, version mismatch, "
-                    "port conflict, wandb/network issue.",
-                    reason=f"retry_loop: {kill_count} kills + {launch_count} launches",
-                )
 
         return None
 
-    def check_post(self, ctx: GuardContext) -> GuardVerdict | None:
-        if ctx.tool_name:
-            # Cache result for dedup detection
-            key_args = self._extract_key_args(ctx.tool_args)
-            if ctx.tool_result:
-                self._tool_call_cache[(ctx.tool_name, key_args)] = ctx.tool_result
-            # Reset semantic warning after a truly productive action
-            is_productive = ctx.tool_name in (
-                "write_file", "edit_file",
-                "plan_create", "plan_update", "memory_write",
-            )
-            # Shell is only productive if it modifies state
-            if ctx.tool_name == "shell":
-                cmd = ctx.tool_args.get("command", "").lower()
-                is_productive = self._is_productive_shell(cmd)
-            if is_productive:
-                self._semantic_warned = False
-                self._semantic_warn_count = 0
-                self._exact_loop_inject_count = 0
-            # Reset retry warning after diagnostic action
-            if ctx.tool_name in ("read_file", "grep", "find_latest_log"):
-                self._retry_warned = False
-        return None
+    @staticmethod
+    def _is_read_only_shell_args(args_str: str) -> bool:
+        """Check if shell args string indicates a read-only command."""
+        # args_str is the key_args string like "command=ls /some/dir"
+        cmd_part = args_str.replace("command=", "", 1).strip().lower()
+        return any(cmd_part.startswith(prefix.lower()) for prefix in _READ_ONLY_SHELL_PREFIXES)
 
     def notify_blocked(self, ctx: GuardContext):
-        """Remove the last entry from history when a call is blocked by another guard.
-
-        This prevents cascading failures where:
-        1. LoopDetect passes and adds entry to history
-        2. Another guard (e.g., ConstraintGuard) blocks the call
-        3. Agent retries → LoopDetect sees "repeated" call → escalates
-        """
+        """Undo tracking when a tool call is externally blocked."""
         if not ctx.tool_name:
             return
         key_args = self._extract_key_args(ctx.tool_args)
         entry = (ctx.tool_name, key_args)
-        # Remove from recent_tool_calls (last occurrence)
         if self._recent_tool_calls and self._recent_tool_calls[-1] == entry:
             self._recent_tool_calls.pop()
-        # Remove from tool_name_history
         if self._tool_name_history and self._tool_name_history[-1] == ctx.tool_name:
             self._tool_name_history.pop()
             self._total_tool_calls = max(0, self._total_tool_calls - 1)
-        # Remove from shell_cmd_history
         if ctx.tool_name == "shell" and self._shell_cmd_history:
             self._shell_cmd_history.pop()
 
     def reset_turn(self):
+        # Clear per-iteration dedup cache, but keep history for cross-iteration detection
         self._tool_call_cache.clear()
 
     @staticmethod
