@@ -114,18 +114,57 @@ class TestSessionMemory:
 
 
 class TestMemoryTools:
-    def test_memory_write_tool_session_scope(self, tmp_path):
-        global_mem = SessionMemory(str(tmp_path / "global"), ttl_days=7)
-        session_mem = SessionMemory(str(tmp_path / "session"), ttl_days=365)
+    def test_memory_write_tool_default_scope_by_type(self, tmp_path):
+        global_dir = str(tmp_path / "global")
+        session_dir = str(tmp_path / "session")
+        global_mem = SessionMemory(global_dir, ttl_days=7)
+        session_mem = SessionMemory(session_dir, ttl_days=365)
         tool = MemoryWriteTool(global_mem, session_mem, "sess1")
-        # Default scope = session
-        result = tool.execute(key="test_key", type="finding", content="test content")
-        assert "Memorized" in result
+
+        # finding → global by default
+        result = tool.execute(key="test_finding", type="finding", content="test content")
         assert "[finding]" in result
+        assert "[global]" in result
+        assert os.path.isfile(os.path.join(global_dir, "test_finding.yaml"))
+        assert not os.path.isfile(os.path.join(session_dir, "test_finding.yaml"))
+
+        # decision → session by default
+        result = tool.execute(key="test_decision", type="decision", content="use TP=4")
+        assert "[decision]" in result
         assert "[session]" in result
-        # Should be in session_mem, not global_mem
-        assert session_mem.get("test_key") is not None
-        assert global_mem.get("test_key") is None
+        assert os.path.isfile(os.path.join(session_dir, "test_decision.yaml"))
+        assert not os.path.isfile(os.path.join(global_dir, "test_decision.yaml"))
+
+        # context → session by default
+        result = tool.execute(key="test_context", type="context", content="path is /foo")
+        assert "[session]" in result
+        assert os.path.isfile(os.path.join(session_dir, "test_context.yaml"))
+        assert not os.path.isfile(os.path.join(global_dir, "test_context.yaml"))
+
+        # todo → session by default
+        result = tool.execute(key="test_todo", type="todo", content="run benchmark")
+        assert "[session]" in result
+        assert os.path.isfile(os.path.join(session_dir, "test_todo.yaml"))
+        assert not os.path.isfile(os.path.join(global_dir, "test_todo.yaml"))
+
+    def test_memory_write_tool_explicit_scope_overrides_default(self, tmp_path):
+        global_dir = str(tmp_path / "global")
+        session_dir = str(tmp_path / "session")
+        global_mem = SessionMemory(global_dir, ttl_days=7)
+        session_mem = SessionMemory(session_dir, ttl_days=365)
+        tool = MemoryWriteTool(global_mem, session_mem, "sess1")
+
+        # finding forced to session (overrides global default)
+        result = tool.execute(key="forced_session", type="finding", content="local fact", scope="session")
+        assert "[session]" in result
+        assert os.path.isfile(os.path.join(session_dir, "forced_session.yaml"))
+        assert not os.path.isfile(os.path.join(global_dir, "forced_session.yaml"))
+
+        # decision forced to global (overrides session default)
+        result = tool.execute(key="forced_global", type="decision", content="arch choice", scope="global")
+        assert "[global]" in result
+        assert os.path.isfile(os.path.join(global_dir, "forced_global.yaml"))
+        assert not os.path.isfile(os.path.join(session_dir, "forced_global.yaml"))
 
     def test_memory_write_tool_global_scope(self, tmp_path):
         global_mem = SessionMemory(str(tmp_path / "global"), ttl_days=7)

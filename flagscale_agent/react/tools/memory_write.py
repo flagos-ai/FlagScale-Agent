@@ -17,13 +17,10 @@ class MemoryWriteTool(Tool):
         "use 'supersedes' to list the old key(s) to delete.\n"
         "Do NOT use memory for: experiment records (use workspace_experiment), "
         "current session state (use workspace_current), or information easily re-read from files/configs.\n\n"
-        "SCOPE: scope='session' (default) — stored in current session directory, "
-        "only visible to this session. Use for workspace/container-specific context "
-        "(paths, env state, in-progress decisions).\n"
-        "scope='global' — stored in shared agent_memory, visible across ALL sessions. "
-        "Use for reusable knowledge: env quirks, hard-won workarounds, version incompatibilities. "
-        "Rule of thumb: if another session on a different container would benefit -> global; "
-        "if it's specific to this workspace/task run -> session."
+        "SCOPE: Default scope is determined by type — "
+        "finding → global (objective facts worth sharing across sessions); "
+        "decision/todo/context → session (current-session state, not reusable). "
+        "Override with explicit scope='session' or scope='global' when the default is wrong."
     )
     parameters = {
         "type": "object",
@@ -54,8 +51,9 @@ class MemoryWriteTool(Tool):
                 "type": "string",
                 "enum": ["session", "global"],
                 "description": (
-                    "'session' (default): current session only, workspace-specific. "
-                    "'global': shared across all sessions, for reusable knowledge."
+                    "Override the default scope. Default is type-driven: "
+                    "finding → global, decision/todo/context → session. "
+                    "Only set this when the default is wrong for your use case."
                 ),
             },
         },
@@ -82,7 +80,11 @@ class MemoryWriteTool(Tool):
         mem_type = kwargs["type"]
         content = kwargs["content"]
         supersedes = kwargs.get("supersedes", [])
-        scope = kwargs.get("scope", "session")
+        # Default scope by type: finding → global (reusable knowledge);
+        # decision/todo/context → session (current-session state).
+        # Can be overridden by explicit scope param.
+        default_scope = "global" if mem_type == "finding" else "session"
+        scope = kwargs.get("scope", default_scope)
         task = self._get_current_task()
 
         from flagscale_agent.react.memory import SessionMemory
