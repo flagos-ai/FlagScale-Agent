@@ -242,6 +242,7 @@ class _Spinner:
 
 
 _active_spinner = None
+_poll_anim = None
 
 
 def _stop_all_spinners():
