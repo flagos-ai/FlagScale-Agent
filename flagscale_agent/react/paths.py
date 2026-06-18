@@ -47,8 +47,18 @@ def get_sessions_root() -> str:
 
 
 def get_memory_dir() -> str:
-    """Get agent memory directory (.flagscale/agent_memory)."""
+    """Get global agent memory directory (.flagscale/agent_memory)."""
     return os.path.join(get_dot_flagscale_root(), "agent_memory")
+
+
+def get_session_memory_dir(session_id: str) -> str:
+    """Get per-session memory directory (.flagscale/sessions/{session_id}/memory).
+
+    Session memory is isolated per session and never mixed with global memory.
+    It is NOT auto-cleaned — sessions accumulate memory that can serve as raw
+    material for skill improvement.
+    """
+    return os.path.join(get_sessions_root(), session_id, "memory")
 
 
 def get_input_history_file() -> str:

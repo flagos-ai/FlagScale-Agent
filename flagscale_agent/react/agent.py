@@ -180,6 +180,11 @@ class WorkerAgent:
         memory_dir = get_memory_dir()
         self.session_memory = _session_memory or SessionMemory(memory_dir, config.memory_ttl_days)
 
+        # Per-session memory — isolated to this session directory
+        from flagscale_agent.react.paths import get_session_memory_dir
+        session_memory_dir = get_session_memory_dir(self._session_id)
+        self.local_memory = SessionMemory(session_memory_dir, ttl_days=365)
+
         plan_dir = os.path.join(session_dir, "plans")
         self.task_plan = _task_plan or TaskPlan(plan_dir)
 
@@ -195,6 +200,7 @@ class WorkerAgent:
         self.session_memory._llm_fn = lambda prompt: self.provider.chat(
             [{"role": "user", "content": prompt}], tools=[]
         ).get("content", "")
+        self.local_memory._llm_fn = self.session_memory._llm_fn
 
         self.history = HistoryManager(max_context_tokens=config.max_context_tokens)
         self.history.set_summarizer(self._summarize_for_compaction)
@@ -208,9 +214,9 @@ class WorkerAgent:
             self._register_tools()
         if not _experiment_manager:
             self._load_plugin_tools()
-        self.tool_registry.register(MemoryWriteTool(self.session_memory, self._session_id, task_plan=self.task_plan))
-        self.tool_registry.register(MemoryReadTool(self.session_memory))
-        self.tool_registry.register(MemoryListTool(self.session_memory))
+        self.tool_registry.register(MemoryWriteTool(self.session_memory, self.local_memory, self._session_id, task_plan=self.task_plan))
+        self.tool_registry.register(MemoryReadTool(self.session_memory, self.local_memory))
+        self.tool_registry.register(MemoryListTool(self.session_memory, self.local_memory))
         self.tool_registry.register(PlanCreateTool(self.task_plan, self._session_id))
         self.tool_registry.register(PlanUpdateTool(self.task_plan))
         self.tool_registry.register(PlanStatusTool(self.task_plan))
@@ -1241,24 +1247,35 @@ class WorkerAgent:
     # ── Context injection ───────────────────────────────────────────────────
 
     def _build_memory_context(self) -> str:
-        entries = self.session_memory.list_entries()
-        if not entries:
+        # Collect session-local entries (higher priority — workspace-specific context)
+        local_entries = self.local_memory.list_entries()
+        for e in local_entries:
+            e["_scope_label"] = "session"
+
+        # Collect global entries
+        global_entries = self.session_memory.list_entries()
+        for e in global_entries:
+            e["_scope_label"] = "global"
+
+        all_entries = local_entries + global_entries
+        if not all_entries:
             return ""
-        
+
         # Get current task context
         active_plan = self.task_plan.get_active()
         current_task = active_plan.get("title", "") if active_plan else ""
-        
+
         # Prioritize: 1) task-related + high-prio, 2) task-related, 3) high-prio, 4) recent
+        # Within each bucket, session entries come before global (already ordered above)
         task_related_high = []
         task_related = []
         high_prio = []
         normal = []
-        
-        for e in entries:
+
+        for e in all_entries:
             is_high = e.get("priority") == "high"
             is_task_related = current_task and e.get("task") == current_task
-            
+
             if is_task_related and is_high:
                 task_related_high.append(e)
             elif is_task_related:
@@ -1267,17 +1284,17 @@ class WorkerAgent:
                 high_prio.append(e)
             else:
                 normal.append(e)
-        
-        # Combine: task-related first, then high-prio, then recent normal
+
         ordered = task_related_high + task_related + high_prio + normal
         selected = ordered[:15]  # Show up to 15 entries, 500 chars each
-        
+
         lines = ["<context-memory>"]
         for e in selected:
             key = e.get("key", "")
             mem_type = e.get("type", "")
             content = e.get("content", "")
-            lines.append(f"<entry key=\"{key}\" type=\"{mem_type}\">{content[:500]}</entry>")
+            scope_label = e.get("_scope_label", "global")
+            lines.append(f'<entry key="{key}" type="{mem_type}" scope="{scope_label}">{content[:500]}</entry>')
         lines.append("</context-memory>")
         return "\n".join(lines)
 
@@ -1731,12 +1748,12 @@ class WorkerAgent:
                         dir_hash = hashlib.md5(output_dir.encode()).hexdigest()[:6]
                         key = f"auto_training_logpath_{dir_hash}"
                         # Only write if not already stored
-                        existing = self.session_memory.get(key)
+                        existing = self.local_memory.get(key)
                         if not existing:
                             try:
-                                self.session_memory.put(
+                                self.local_memory.put(
                                     key=key,
-                                    entry_type="context",
+                                    mem_type="context",
                                     content=(
                                         f"Training log path for {output_dir}: {log_path}\n"
                                         f"Use monitor(output_dir='{output_dir}') to check status."
@@ -1756,9 +1773,9 @@ class WorkerAgent:
                         exp_dir = exp_match.group(1).strip("'\"")
                         key = f"auto_last_training_launch"
                         try:
-                            self.session_memory.put(
+                            self.local_memory.put(
                                 key=key,
-                                entry_type="context",
+                                mem_type="context",
                                 content=(
                                     f"Last training launch: output_dir={exp_dir}\n"
                                     f"Command: {cmd[:200]}"
@@ -2137,16 +2154,16 @@ class WorkerAgent:
         # Write extracted memories (max 5 per compaction to avoid noise)
         for entry in extracted[:5]:
             try:
-                # Check if similar key already exists
-                existing = self.session_memory.get(entry["key"])
+                # Check if similar key already exists (check both stores)
+                existing = self.local_memory.get(entry["key"]) or self.session_memory.get(entry["key"])
                 if existing:
                     continue  # Don't overwrite existing entries
-                
+
                 # Check if similar content already exists (avoid near-duplicates)
-                all_entries = self.session_memory.list_entries()
+                all_entries = self.local_memory.list_entries() + self.session_memory.list_entries()
                 new_words = set(re.findall(r'\w+', entry["content"].lower()))
                 new_words = {w for w in new_words if len(w) > 2}
-                
+
                 is_duplicate = False
                 for e in all_entries:
                     if e.get("type") != entry["type"]:
@@ -2160,11 +2177,12 @@ class WorkerAgent:
                     if smaller > 0 and overlap / smaller >= 0.70:
                         is_duplicate = True
                         break
-                
+
                 if is_duplicate:
                     continue
-                
-                self.session_memory.put(
+
+                # Auto-extracted memories are session-scoped (compaction context)
+                self.local_memory.put(
                     key=entry["key"],
                     mem_type=entry["type"],
                     content=entry["content"],
