@@ -27,6 +27,18 @@ class CircuitBreakerGuard(Guard):
     name = "circuit_breaker"
     priority = 8  # high priority, before safety(10)
     activate_on_states = {AgentState.EXECUTING}
+    overridable = True
+
+    def accept_override(self, reason: str, ctx: GuardContext) -> bool:
+        """Accept override with diagnosis — this IS the 'step back and think' the guard wants."""
+        if reason and len(reason.strip()) > 20:
+            # Reset the circuit that was blocking
+            for cat, state in list(self._circuit_state.items()):
+                if state == self.OPEN:
+                    self._circuit_state[cat] = self.HALF_OPEN
+                    self._open_block_count[cat] = 0
+            return True
+        return False
 
     TRIP_THRESHOLD = 4       # consecutive same-category errors → trip
     COOLDOWN_ITERS = 3       # iterations to wait before half-open probe

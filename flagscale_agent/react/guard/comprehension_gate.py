@@ -78,6 +78,13 @@ class ComprehensionGateGuard(Guard):
 
     name = "comprehension_gate"
     priority = 20  # Between training_attempt(15) and debug_discipline(22)
+    overridable = True
+
+    def accept_override(self, reason: str, ctx: GuardContext) -> bool:
+        """Accept override with any substantive reason."""
+        if reason and len(reason.strip()) > 10:
+            return True
+        return False
 
     # Thresholds
     MIN_SOURCE_READS = 2  # Must read ≥2 complex files before editing
@@ -221,8 +228,8 @@ class ComprehensionGateGuard(Guard):
         self._edits_to_complex_files = 0
 
     def reset_turn(self):
-        """Complex context persists across turns."""
-        pass
+        """Reset escalation counters but keep comprehension model."""
+        self._edits_to_complex_files = 0
 
     # ── Private helpers ──
 

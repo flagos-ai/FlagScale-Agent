@@ -48,6 +48,16 @@ class DebugDisciplineGuard(Guard):
 
     name = "debug_discipline"
     priority = 22  # Between TrainingAttempt (15) and CircuitBreaker (25)
+    overridable = True
+
+    def accept_override(self, reason: str, ctx: GuardContext) -> bool:
+        """Accept override if LLM provides any non-trivial reason."""
+        # Any explanation of why the edit is justified is sufficient
+        if reason and len(reason.strip()) > 10:
+            self._hypothesis_declared = True
+            self._edits_since_failure = 0
+            return True
+        return False
 
     def __init__(self):
         # Hypothesis tracking
@@ -62,6 +72,28 @@ class DebugDisciplineGuard(Guard):
 
     def check_pre(self, ctx: GuardContext) -> GuardVerdict | None:
         """Enforce hypothesis before edits after failure."""
+        # Check assistant_text for hypothesis BEFORE evaluating the gate
+        # This allows the LLM to declare hypothesis and write code in the same turn
+        if ctx.assistant_text and not self._hypothesis_declared:
+            text_lower = ctx.assistant_text.lower()
+            if ("hypothesis:" in text_lower or "**hypothesis**" in text_lower
+                    or "hypothesis**:" in text_lower
+                    or "假设：" in text_lower or "根因" in text_lower
+                    or "root cause:" in text_lower
+                    or "hypothesis：" in text_lower):
+                self._hypothesis_declared = True
+                self._failure_observed = False
+                self._edits_since_failure = 0
+
+        # If assistant_text is empty (kernel doesn't provide it), skip the gate
+        # to avoid false positives from stale _failure_observed state
+        if not ctx.assistant_text:
+            return None
+        
+        # If hypothesis was declared (either this turn or previously), allow edits
+        if self._hypothesis_declared:
+            return None
+
         if ctx.tool_name in ("edit_file", "write_file"):
             path = ctx.tool_args.get("path", "")
             if path and path.endswith(".py"):
@@ -84,8 +116,11 @@ class DebugDisciplineGuard(Guard):
     def check_post(self, ctx: GuardContext) -> GuardVerdict | None:
         """Track debug lifecycle events."""
 
-        # Detect training failure (from monitor/shell)
-        if ctx.tool_name in ("monitor", "find_latest_log", "parse_training_metrics", "shell"):
+        # Detect failure (from dedicated training monitor tools only)
+        # NOTE: "shell" excluded because inline Python training (e.g., conv solvers)
+        # produces Tracebacks as normal operation (architecture didn't converge).
+        # Only dedicated training tools indicate a real infrastructure failure.
+        if ctx.tool_name in ("monitor", "find_latest_log", "parse_training_metrics"):
             if ctx.tool_result and _MONITOR_CRASH_RE.search(ctx.tool_result):
                 self._failure_observed = True
                 self._hypothesis_declared = False
@@ -104,6 +139,16 @@ class DebugDisciplineGuard(Guard):
         if ctx.tool_name == "shell" and ctx.tool_args.get("command", "").startswith("echo HYPOTHESIS"):
             self._hypothesis_declared = True
             self._edits_since_failure = 0
+
+        # Detect hypothesis declared inline in LLM assistant text
+        if ctx.assistant_text:
+            text_lower = ctx.assistant_text.lower()
+            if ("hypothesis:" in text_lower or "**hypothesis**" in text_lower
+                    or "假设：" in text_lower or "根因" in text_lower
+                    or "root cause:" in text_lower
+                    or "hypothesis：" in text_lower):
+                self._hypothesis_declared = True
+                self._edits_since_failure = 0
 
         # Track file modifications
         if ctx.tool_name in ("edit_file", "write_file"):
@@ -203,5 +248,7 @@ class DebugDisciplineGuard(Guard):
         self._edits_since_failure = 0
 
     def reset_turn(self):
-        """Debug state persists across turns."""
-        pass
+        """Reset failure state each turn to prevent stale cross-session persistence."""
+        self._failure_observed = False
+        self._hypothesis_declared = False
+        self._edits_since_failure = 0

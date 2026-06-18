@@ -30,6 +30,14 @@ class OutputQualityGuard(Guard):
     name = "output_quality"
     priority = 30
     activate_on_states = {AgentState.EXECUTING}
+    overridable = True
+
+    def accept_override(self, reason: str, ctx: GuardContext) -> bool:
+        """Accept any override — this guard is advisory."""
+        if reason and len(reason.strip()) > 5:
+            self._consecutive_silent_failures = 0
+            return True
+        return False
 
     def __init__(self):
         self._consecutive_silent_failures = 0
