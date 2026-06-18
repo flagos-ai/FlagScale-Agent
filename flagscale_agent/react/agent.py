@@ -1720,7 +1720,6 @@ class WorkerAgent:
                 output_dir = tool_args.get("output_dir", "") if isinstance(tool_args, dict) else ""
                 if output_dir and "stdout.log" in result:
                     # Extract the log path
-                    import re
                     log_match = re.search(r"(/\S+/stdout\.log)", result)
                     if log_match:
                         log_path = log_match.group(1)
