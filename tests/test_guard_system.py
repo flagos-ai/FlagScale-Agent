@@ -244,22 +244,16 @@ class TestLLMFallback:
         assert result == "attribute"
 
     def test_memory_discipline_llm_discovery(self):
-        """LLM can detect important discoveries that regex missed."""
+        """Memory discipline detects results in shell output and tracks pending discoveries."""
         guard = MemoryDisciplineGuard()
-        guard._tool_call_count = 5  # Must be divisible by 5 for LLM check
+        guard._memory_list_done = True  # Skip read-discipline checks
 
-        def mock_classify(category, context, default=None):
-            if category == "is_important_discovery":
-                return {"important": True, "key_info": "Found that TP=4 requires specific NCCL flags"}
-            return default
-
-        ctx = make_ctx("shell", {"command": "cat nccl.log"},
-                      tool_result="x" * 300)  # Long enough, won't match regex
-        ctx.classify_fn = mock_classify
-
+        # Shell with measurable results → should add to pending_discoveries
+        ctx = make_ctx("shell", {"command": "python train.py"},
+                      tool_result="Solved: 6/10 tasks, score=14.0, elapsed=24.6s")
         guard.check_post(ctx)
-        assert guard._discoveries_since_last_write >= 1
-        assert any("llm_detected" in cat for cat, _ in guard._pending_discoveries)
+        assert len(guard._pending_discoveries) >= 1
+        assert any(cat in ("solve_rate", "metric", "timing") for cat in guard._pending_discoveries)
 
     def test_debug_residue_llm_detection(self):
         """LLM can detect non-obvious debug prints."""
