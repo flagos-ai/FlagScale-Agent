@@ -37,6 +37,9 @@ class GuardContext:
     recent_tool_history: list[dict] = field(default_factory=list)  # [{tool, args_summary, result_summary}]
     context_pressure: float = 0.0
 
+    # LLM response text (for guards that need to scan assistant replies)
+    assistant_text: str = ""
+
     # State machine context
     current_state: AgentState = AgentState.IDLE
     transitions_count: int = 0

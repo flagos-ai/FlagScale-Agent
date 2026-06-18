@@ -287,6 +287,22 @@ class AgentKernel:
 
     # ── Internal helpers ─────────────────────────────────────────────────────
 
+    def _get_last_assistant_text(self) -> str:
+        """Extract text from last assistant message in history."""
+        d = self.deps
+        if not d.history:
+            return ""
+        for msg in reversed(d.history.messages):
+            if msg.get("role") == "assistant":
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    return content
+                if isinstance(content, list):
+                    texts = [b.get("text", "") for b in content
+                             if isinstance(b, dict) and b.get("type") == "text"]
+                    return "".join(texts)
+        return ""
+
     def _build_ctx(self, tool_name: str, tool_args: dict, tool_result: str | None) -> GuardContext:
         d = self.deps
         history = d.history
@@ -304,6 +320,8 @@ class AgentKernel:
         if tool_args and "_override_reason" in tool_args:
             override_reason = tool_args["_override_reason"]
             tool_args = {k: v for k, v in tool_args.items() if k != "_override_reason"}
+        # Get last assistant text for guards that need to scan LLM responses
+        assistant_text = self._get_last_assistant_text()
         return GuardContext(
             tool_name=tool_name,
             tool_args=tool_args,
@@ -315,6 +333,7 @@ class AgentKernel:
             transitions_count=len(self.fsm.history),
             classify_fn=d.judge.classify,
             override_reason=override_reason,
+            assistant_text=assistant_text,
         )
 
     def _apply_verdict(self, verdict: GuardVerdict, pre: bool) -> bool:

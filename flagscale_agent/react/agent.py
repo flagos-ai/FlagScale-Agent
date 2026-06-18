@@ -570,6 +570,7 @@ class WorkerAgent:
             experiment_compare_fn=self._experiment_manager.compare if self._experiment_manager else None,
             experiment_diff_fn=self._experiment_manager.diff_last_attempts if self._experiment_manager else None,
             current_experiment_name=self._experiment_manager.get_current_experiment() if self._experiment_manager else "",
+            assistant_text=self._get_last_assistant_text(),
         )
 
     # ── Health judge (delegates to unified Judge) ───────────────────────────

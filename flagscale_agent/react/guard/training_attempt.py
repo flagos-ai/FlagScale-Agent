@@ -126,6 +126,13 @@ class TrainingAttemptGuard(Guard):
 
     name = "training_attempt"
     priority = 15  # Higher priority than CircuitBreaker (25) and TrainingRuntime (20)
+    overridable = True
+
+    def accept_override(self, reason: str, ctx: GuardContext) -> bool:
+        """Accept override with a substantive root cause explanation."""
+        if reason and len(reason.strip()) > 20:
+            return True
+        return False
 
     STRIKE_THRESHOLD = 2  # 2 same-category failures → block
     SOURCE_READ_REQUIREMENT = 3  # Must read 3+ source files to unblock

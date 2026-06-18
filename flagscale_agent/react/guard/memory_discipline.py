@@ -23,7 +23,8 @@ _RESULT_PATTERNS = [
     (re.compile(r"(?:solved|passed|failed)\s*[=:]?\s*\d+\s*/\s*\d+", re.I), "solve_rate"),
     (re.compile(r"(?:time|elapsed|duration)\s*[=:]\s*[\d.]+\s*(?:s|sec|min|ms)", re.I), "timing"),
     (re.compile(r"(?:params|parameters)\s*[=:]\s*[\d,]+", re.I), "params"),
-    (re.compile(r"(?:Error|FAILED|Traceback|Exception|TIMEOUT|TERMINATED)", re.I), "error"),
+    # Only match actual crashes, not any output containing the word "Error"
+    (re.compile(r"(?:Traceback \(most recent|TERMINATED|TIMEOUT|FATAL ERROR)", re.I), "error"),
     (re.compile(r"(?:iteration|step|epoch)\s*[=:]\s*\d+", re.I), "training"),
 ]
 
@@ -33,6 +34,16 @@ class MemoryDisciplineGuard(Guard):
 
     name = "memory_discipline"
     priority = 30
+    overridable = True
+
+    def accept_override(self, reason: str, ctx: GuardContext) -> bool:
+        """Accept override if LLM provides any non-trivial reason."""
+        if reason and len(reason.strip()) > 10:
+            self._read_reminders = 0
+            self._write_reminders = 0
+            self._shells_since_write = 0
+            return True
+        return False
 
     def __init__(self):
         self._tool_call_count = 0
@@ -110,6 +121,10 @@ class MemoryDisciplineGuard(Guard):
         if not ctx.tool_name or not ctx.tool_result:
             return None
 
+        # Check if LLM acknowledged/dismissed the reminder in its response
+        if ctx.assistant_text:
+            self.acknowledge_from_text(ctx.assistant_text)
+
         if ctx.tool_name == "shell":
             self._shells_since_write += 1
 
@@ -131,8 +146,9 @@ class MemoryDisciplineGuard(Guard):
             self._pending_discoveries.append(cat)
 
         # Error detected -> immediate reminder (highest priority)
+        # But max 2 consecutive error reminders before backing off
         if "error" in found_categories:
-            if self._write_reminders < 8:
+            if self._write_reminders < 2:
                 self._write_reminders += 1
                 return GuardVerdict.inject(
                     "[MemoryDiscipline] Error/failure detected. Record it:\n"
@@ -143,7 +159,7 @@ class MemoryDisciplineGuard(Guard):
                 )
 
         # Accumulation: 3+ discoveries without write
-        if len(self._pending_discoveries) >= 3 and self._write_reminders < 8:
+        if len(self._pending_discoveries) >= 3 and self._write_reminders < 4:
             cats = list(set(self._pending_discoveries[-4:]))
             self._write_reminders += 1
             msg = (
@@ -152,15 +168,19 @@ class MemoryDisciplineGuard(Guard):
                 f"  → memory_write(key=..., type='finding', content=...)\n"
                 f"  Include: exact numbers, what worked/failed, config details."
             )
-            if self._write_reminders >= 5:
-                return GuardVerdict.block(
-                    msg + "\n  BLOCKED: Too many unrecorded findings. Write memory now.",
-                    reason="accumulate_write_block",
+            if self._write_reminders >= 4:
+                # Final reminder, then back off — don't block forever
+                self._pending_discoveries.clear()
+                self._write_reminders = 0
+                return GuardVerdict.inject(
+                    msg + "\n  FINAL REMINDER: Will stop asking after this.",
+                    reason="final_accumulate_write",
+                    category="memory_write_reminder",
                 )
             return GuardVerdict.inject(msg, reason="accumulate_write", category="memory_write_reminder")
 
         # Periodic: many shells without any write
-        if self._shells_since_write >= 5 and self._write_reminders < 8:
+        if self._shells_since_write >= 5 and self._write_reminders < 4:
             if self._pending_discoveries:
                 self._write_reminders += 1
                 return GuardVerdict.inject(
@@ -172,6 +192,32 @@ class MemoryDisciplineGuard(Guard):
 
         return None
 
+    def acknowledge_from_text(self, assistant_text: str):
+        """Detect if LLM acknowledged the reminder in its response text.
+        
+        If LLM explains why it's not writing memory (e.g. "this is not an error",
+        "normal output"), treat as acknowledged and reduce pressure.
+        """
+        if not assistant_text:
+            return
+        text_lower = assistant_text.lower()
+        dismiss_patterns = [
+            "这不是error", "这不是错误", "not an error", "not a failure",
+            "normal output", "正常输出", "不是error", "isn't an error",
+            "这是正常", "this is expected",
+        ]
+        if any(p in text_lower for p in dismiss_patterns):
+            # LLM explicitly says it's not a real error — clear pending
+            self._pending_discoveries.clear()
+            self._write_reminders = 0
+
     def reset_turn(self):
-        """Memory state persists across turns — no reset."""
-        pass
+        """Reset escalation counters to prevent cross-session dead loops.
+
+        Knowledge state (_memory_list_done, _plan_status_done) persists,
+        but reminder/block counters reset each turn.
+        """
+        self._read_reminders = 0
+        self._write_reminders = 0
+        self._shells_since_write = 0
+        self._pending_discoveries.clear()
