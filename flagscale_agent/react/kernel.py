@@ -419,17 +419,79 @@ class AgentKernel:
                 pass
 
     def _should_auto_continue_plan(self) -> bool:
-        """Check if there's an active plan with pending steps."""
+        """Check if there's an active plan with pending steps.
+        
+        Also checks if the assistant's last response is asking the user a question
+        (waiting for user input). If so, do NOT auto-continue — let the user respond.
+        """
         task_plan = getattr(self.deps, "task_plan", None)
         if task_plan is None:
             return False
         active = task_plan.get_active()
         if not active:
             return False
-        return any(
+        has_pending = any(
             s.get("status") not in ("done", "skipped")
             for s in active.get("steps", [])
         )
+        if not has_pending:
+            return False
+        
+        # Check if assistant is waiting for user input (asking a question)
+        last_text = self._get_last_assistant_text()
+        if last_text and self._is_asking_user(last_text):
+            return False
+        
+        return True
+
+    def _get_last_assistant_text(self) -> str:
+        """Get the text content of the last assistant message."""
+        d = self.deps
+        for msg in reversed(d.history.get_messages()):
+            if msg.get("role") == "assistant":
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    return content
+                if isinstance(content, list):
+                    texts = [b.get("text", "") for b in content 
+                             if isinstance(b, dict) and b.get("type") == "text"]
+                    return "".join(texts)
+        return ""
+
+    def _is_asking_user(self, text: str) -> bool:
+        """Detect if the assistant text is asking the user a question / waiting for input.
+        
+        Heuristic: check if the last meaningful line ends with a question mark or
+        contains explicit "waiting for user" patterns.
+        """
+        # Get the last few non-empty lines
+        lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
+        if not lines:
+            return False
+        
+        last_line = lines[-1]
+        
+        # Explicit signal
+        if "[NEED_USER_INPUT]" in text:
+            return True
+        
+        # Ends with question mark (supports Chinese and English)
+        if last_line.endswith("?") or last_line.endswith("？"):
+            return True
+        
+        # Common patterns for asking user (Chinese + English)
+        asking_patterns = [
+            "你选", "你觉得", "你希望", "你要", "要我",
+            "which do you", "what do you", "do you want", "shall i",
+            "should i", "would you", "let me know", "your choice",
+            "选哪个", "怎么处理", "如何处理",
+        ]
+        last_lower = last_line.lower()
+        for pattern in asking_patterns:
+            if pattern in last_lower:
+                return True
+        
+        return False
 
     def _generate_continuation(self) -> str:
         task_plan = getattr(self.deps, "task_plan", None)

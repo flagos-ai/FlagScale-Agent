@@ -442,7 +442,11 @@ def tool_start(name, args_summary=""):
     if args_summary:
         label += f" {args_summary}"
     tw = _term_width()
-    _print(_truncate_to_width(dim(label), tw), end="", flush=True)
+    # For shell commands, don't truncate — show full command
+    if name == "shell":
+        _print(dim(label), end="", flush=True)
+    else:
+        _print(_truncate_to_width(dim(label), tw), end="", flush=True)
     if name == "shell":
         _active_spinner = _Spinner()
         _print()
