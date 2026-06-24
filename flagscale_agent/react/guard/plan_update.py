@@ -53,10 +53,8 @@ class PlanUpdateGuard(Guard):
                 step_id = doing_steps[0].get("id")
                 return GuardVerdict.inject(
                     message=(
-                        f"⚠️ PLAN UPDATE REQUIRED: You have a plan with active step {step_id}, "
-                        f"but haven't updated it in {turns_elapsed} turns. "
-                        f"Call plan_update(action='step_done', step_id={step_id}) if you completed it, "
-                        f"or plan_update(action='step_skip', step_id={step_id}, reason=...) if blocked."
+                        f"[PlanUpdate] Active step {step_id} not updated in {turns_elapsed} turns. "
+                        f"Mark it done or skipped."
                     ),
                     reason="plan_not_updated"
                 )

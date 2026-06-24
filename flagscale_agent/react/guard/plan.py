@@ -100,18 +100,13 @@ class PlanGuard(Guard):
                 if self._block_count >= 3:
                     return GuardVerdict.escalate(
                         f"[PLAN GATE] Complex task blocked {self._block_count} times "
-                        f"without plan creation. You MUST call plan_create NOW or "
-                        f"ask the user for guidance.",
+                        f"without plan creation. Create a plan or ask the user for guidance.",
                         reason="complex task no plan persistent",
                         category="plan_needed",
                     )
                 return GuardVerdict.block(
-                    f"[PLAN GATE — TOOL NOT EXECUTED] This task was flagged "
-                    f"as complex. You've used {self._pre_plan_tool_calls} exploratory "
-                    f"calls (limit: {self._plan_gate_max_exploratory}) without creating "
-                    f"a plan.\n"
-                    f"This tool call was BLOCKED. You MUST call plan_create NOW.\n"
-                    f"Use what you've gathered so far to create a concrete step-by-step plan.",
+                    f"[PLAN GATE] BLOCKED: {self._pre_plan_tool_calls} exploratory calls without a plan. "
+                    f"Create a plan based on what you've gathered so far.",
                     reason="complex task no plan exceeded",
                     category="plan_needed",
                 )
@@ -122,16 +117,13 @@ class PlanGuard(Guard):
             if self._block_count >= 3:
                 return GuardVerdict.escalate(
                     f"[PLAN GATE] Blocked {self._block_count} times without plan creation. "
-                    f"You MUST call plan_create NOW or ask the user for guidance.",
+                    f"Create a plan or ask the user for guidance.",
                     reason="independent plan threshold persistent",
                     category="plan_needed",
                 )
             return GuardVerdict.block(
-                f"[PLAN GATE — TOOL NOT EXECUTED] You've made "
-                f"{self._consecutive_reads} consecutive exploratory calls "
-                f"without creating a plan.\n"
-                f"This tool call was BLOCKED. You MUST call plan_create NOW "
-                f"to organize your approach.",
+                f"[PLAN GATE] BLOCKED: {self._consecutive_reads} consecutive exploratory calls "
+                f"without a plan. Create a plan to organize your approach.",
                 reason="independent plan threshold exceeded",
                 category="plan_needed",
             )

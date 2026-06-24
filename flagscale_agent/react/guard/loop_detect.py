@@ -142,6 +142,14 @@ class LoopDetectGuard(Guard):
                 pass  # Exempt — this is sequential reading
             else:
                 self._exact_loop_inject_count += 1
+                if self._exact_loop_inject_count >= 5:
+                    # Hard block — warnings were ignored, prevent infinite loops
+                    return GuardVerdict.block(
+                        f"[LoopDetect] BLOCKED: Same tool call repeated {recent_same} times across "
+                        f"{self._exact_loop_inject_count} warnings. This call is blocked. "
+                        "You already have this data. Produce output with what you have.",
+                        reason=f"exact_loop_blocked: {ctx.tool_name}",
+                    )
                 if self._exact_loop_inject_count >= 3:
                     return GuardVerdict.escalate(
                         f"[LoopDetect] Same tool call repeated {recent_same} times across "
@@ -152,9 +160,9 @@ class LoopDetectGuard(Guard):
                     )
                 return GuardVerdict.inject(
                     f"[LoopDetect] Same tool call repeated {recent_same} times. "
-                    "Each attempt gave the same result. "
-                    "Why? What's different about what you need vs what you're getting? "
-                    "Answer that before trying again.",
+                    "The tool is working correctly — you already have the data from previous calls. "
+                    "Do NOT switch to an alternative tool to get the same data. "
+                    "Instead, act on the information you already have.",
                     reason=f"looping on {ctx.tool_name}",
                 )
 
@@ -186,8 +194,8 @@ class LoopDetectGuard(Guard):
                         return GuardVerdict.inject(
                             f"[LoopDetect] '{ctx.tool_name}' called {same_tool_count}/{self._SAME_TOOL_WINDOW} "
                             f"times with low argument diversity ({arg_diversity:.0%}). "
-                            f"You're tweaking arguments but the outcome isn't changing. "
-                            f"Before calling it again, verify what the last attempt actually did.",
+                            f"The tool is working fine — your calls succeeded. "
+                            f"You have enough information. Act on it instead of reading more.",
                             reason=f"same_tool_dominance: {ctx.tool_name}",
                         )
 
@@ -249,6 +257,15 @@ class LoopDetectGuard(Guard):
                             self._semantic_warn_at = self._total_tool_calls
                             self._semantic_warn_count += 1
 
+                            if self._semantic_warn_count >= 3:
+                                # Hard block — persistent read-only loops
+                                return GuardVerdict.block(
+                                    f"[LoopDetect] BLOCKED: {effective_read_count}/{len(window)} calls are read-only "
+                                    f"after {self._semantic_warn_count} warnings. "
+                                    "Produce output with the information you have. This call is blocked.",
+                                    reason=f"semantic_read_blocked: {effective_read_count}/{len(window)}",
+                                )
+
                             if self._semantic_warn_count >= 2:
                                 return GuardVerdict.escalate(
                                     f"[LoopDetect] You've been reading without acting for "
@@ -258,12 +275,11 @@ class LoopDetectGuard(Guard):
                                 )
 
                             return GuardVerdict.inject(
-                                f"[LoopDetect] {effective_read_count}/{len(window)} read-only calls "
+                                f"[LoopDetect] {effective_read_count}/{len(window)} recent calls are read-only "
                                 f"(diversity={diversity:.2f}). "
-                                "You're gathering information but not acting on it. "
-                                "Ask yourself: do I have enough to move forward? "
-                                "If yes — write, build, or fix something. "
-                                "If no — what specific piece is missing?",
+                                "All reads succeeded — you have the data. "
+                                "Time to act: write code, edit a file, or produce output. "
+                                "Do NOT re-read the same information with a different tool.",
                                 reason=f"semantic_read_only: {effective_read_count}/{len(window)}",
                             )
 

@@ -55,12 +55,8 @@ class MegatronPathGuard(Guard):
             if edited_abs not in self._warned_paths:
                 self._warned_paths.add(edited_abs)
                 return GuardVerdict.inject(
-                    f"[MegatronPath] WARNING: You're editing:\n"
-                    f"  {edited_abs}\n"
-                    f"But the active megatron (via Python import) is at:\n"
-                    f"  {active_root}\n\n"
-                    f"Changes to the wrong copy won't take effect at runtime. "
-                    f"Edit the file under '{active_root}' instead.",
+                    f"[MegatronPath] Wrong megatron copy: editing {edited_abs} "
+                    f"but runtime uses {active_root}. Edit the correct copy.",
                     reason="wrong_megatron_path",
                 )
 
