@@ -384,7 +384,7 @@ class ToolExecutor:
                     f"  ⛔ Blocked [{tc['name']}]: {cmd_preview}"
                 ))
                 print(display.yellow(
-                    f"     Correction: {verdict.message[:200]}"
+                    f"     Correction: {verdict.message[:500]}"
                 ))
                 # Do NOT break — continue checking remaining tools in the batch
             elif verdict and verdict.action == "escalate":
@@ -398,7 +398,7 @@ class ToolExecutor:
                     f"  ⛔ ESCALATION [{tc['name']}]: {cmd_preview}"
                 ))
                 print(display.yellow(
-                    f"     {verdict.message[:200]}"
+                    f"     {verdict.message[:500]}"
                 ))
                 # Inject the escalation message so the LLM sees it
                 agent._kernel.deps.inject_message_fn(verdict.message)
@@ -408,7 +408,7 @@ class ToolExecutor:
                 # so the LLM sees it and can change behavior
                 agent._kernel.deps.inject_message_fn(verdict.message)
                 print(display.yellow(
-                    f"  ⚠ [{tc['name']}]: {verdict.message[:200]}"
+                    f"  ⚠ [{tc['name']}]: {verdict.message[:500]}"
                 ))
 
         # Pre-confirm shell commands

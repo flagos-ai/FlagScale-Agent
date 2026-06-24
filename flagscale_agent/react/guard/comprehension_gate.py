@@ -125,12 +125,9 @@ class ComprehensionGateGuard(Guard):
                     f"[ComprehensionGate] You're editing complex infra code "
                     f"({self._short_path(path)}) but have only read "
                     f"{len(self._complex_files_read)}/{self.MIN_SOURCE_READS} "
-                    f"related source files.\n\n"
-                    f"Before modifying pipeline/parallelism code, read the full "
-                    f"execution flow first. You need to understand:\n"
-                    f"  - What happens at each timestep on each rank\n"
-                    f"  - Which P2P operations pair with which\n"
-                    f"  - What invariants must hold\n\n"
+                    f"related source files. "
+                    f"Read more of the execution flow before modifying — you need to understand "
+                    f"what happens at each timestep on each rank and which P2P operations pair together.\n"
                     f"Files read so far: {list(self._complex_files_read)[:5]}",
                     reason="insufficient_source_reading",
                     category="comprehension",
@@ -140,17 +137,13 @@ class ComprehensionGateGuard(Guard):
             if not self._comprehension_model_written:
                 return GuardVerdict.inject(
                     f"[ComprehensionGate] You're editing complex infra code "
-                    f"({self._short_path(path)}) without a documented comprehension model.\n\n"
-                    f"Before modifying, write to memory a model containing:\n"
-                    f"  1. TIMELINE: Per-rank, per-step sequence of operations\n"
-                    f"     (e.g., Rank 0 Step 0: fwd(chunk=master, mb=0) → send_next)\n"
-                    f"  2. INVARIANTS: Rules that must always hold\n"
-                    f"     (e.g., every send_next on rank i has matching recv_prev on rank i+1)\n"
-                    f"  3. IMPACT PREDICTION: What your edit changes in the timeline\n\n"
-                    f"Why: If you can't draw the timeline, you don't understand the system.\n"
-                    f"Three blind trials cost more time than one informed modification.\n\n"
+                    f"({self._short_path(path)}) without a documented comprehension model. "
+                    f"Write a model to memory BEFORE modifying, containing: "
+                    f"(1) TIMELINE: per-rank, per-step sequence of operations, "
+                    f"(2) INVARIANTS: rules that must always hold, "
+                    f"(3) IMPACT PREDICTION: what your edit changes in the timeline. "
                     f"Use memory_write(key='comprehension_<feature>', type='finding', "
-                    f"content='TIMELINE: ...\\nINVARIANTS: ...') to record your model.",
+                    f"content='TIMELINE: ...\\nINVARIANTS: ...').",
                     reason="no_comprehension_model",
                     category="comprehension",
                 )
@@ -159,12 +152,9 @@ class ComprehensionGateGuard(Guard):
             if self._failure_in_complex_code and not self._impact_declared:
                 return GuardVerdict.inject(
                     f"[ComprehensionGate] Previous attempt failed in complex code. "
-                    f"Before editing again, declare:\n"
-                    f"  IMPACT: What will this change affect?\n"
-                    f"  - Which ranks are affected?\n"
-                    f"  - Which timeline steps change?\n"
-                    f"  - Which invariants need re-verification?\n\n"
-                    f"Verify against your comprehension model before proceeding.",
+                    f"Before editing again, state in your response: "
+                    f"which ranks are affected, which timeline steps change, "
+                    f"and which invariants need re-verification.",
                     reason="impact_not_declared",
                     category="comprehension",
                 )
@@ -261,22 +251,20 @@ class ComprehensionGateGuard(Guard):
         if not self._comprehension_model_written:
             return GuardVerdict.inject(
                 "[ComprehensionGate] Failure detected in complex infra code, "
-                "but you have no comprehension model. Before debugging:\n"
-                "  1. Read the relevant source files end-to-end\n"
-                "  2. Build a timeline + invariants model\n"
-                "  3. Identify which invariant was violated\n\n"
-                "Without a model, you'll resort to blind trial-and-error.",
+                "but you have no comprehension model. "
+                "Based on what you've already read, write a comprehension model to memory "
+                "containing: (1) per-rank timeline of operations, "
+                "(2) invariants that must hold, (3) which invariant this failure likely violates. "
+                "Use memory_write with key='comprehension_<feature>'.",
                 reason="failure_without_model",
                 category="comprehension",
             )
         # Has model, suggest checking against it
         return GuardVerdict.inject(
             f"[ComprehensionGate] Failure in complex infra code. "
-            f"Check your comprehension model (memory key: '{self._model_memory_key}'):\n"
-            f"  - Does the timeline predict this failure point?\n"
-            f"  - Which invariant was violated?\n"
-            f"  - Does the model need updating with new information?\n\n"
-            f"Update the model if it doesn't cover this case, then fix based on the model.",
+            f"Check your comprehension model (memory key: '{self._model_memory_key}') — "
+            f"does the timeline predict this failure? Which invariant was violated? "
+            f"Update the model if needed, then fix based on the updated model.",
             reason="failure_check_model",
             category="comprehension",
         )
