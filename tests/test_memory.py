@@ -391,13 +391,14 @@ class TestMemoryListToolScope:
         tool = MemoryListTool(global_mem, session_mem)
         return global_mem, session_mem, tool
 
-    def test_default_scope_is_session(self, tmp_path):
+    def test_default_scope_is_all(self, tmp_path):
+        """Default scope is 'all': both session and global entries are returned."""
         global_mem, session_mem, tool = self._make_tools(tmp_path)
         global_mem.put("g1", "finding", "global entry", "s1")
         session_mem.put("s1_key", "finding", "session entry", "s1")
         result = tool.execute()
         assert "session entry" in result
-        assert "global entry" not in result
+        assert "global entry" in result
 
     def test_scope_global_shows_only_global(self, tmp_path):
         global_mem, session_mem, tool = self._make_tools(tmp_path)

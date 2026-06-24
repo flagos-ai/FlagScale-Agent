@@ -12,8 +12,8 @@ class MemoryListTool(Tool):
         "List and search memory entries. Use to browse what you've memorized, "
         "find entries by type or keyword, or check what's stored for a specific task. "
         "Returns entries sorted by relevance (type priority, then recency). "
-        "Default scope='session' shows only current session memory. "
-        "Use scope='global' for shared cross-session memory, or scope='all' for both."
+        "Default scope='all' shows both session and global memory, with session entries first. "
+        "Use scope='session' for current session only, or scope='global' for shared cross-session memory."
     )
     parameters = {
         "type": "object",
@@ -39,9 +39,9 @@ class MemoryListTool(Tool):
                 "type": "string",
                 "enum": ["session", "global", "all"],
                 "description": (
-                    "'session' (default): list only current session memory. "
-                    "'global': list only global shared memory. "
-                    "'all': list both, session entries shown first."
+                    "'all' (default): list both session and global memory, session entries shown first. "
+                    "'session': list only current session memory. "
+                    "'global': list only global shared memory."
                 ),
             },
         },
@@ -71,7 +71,7 @@ class MemoryListTool(Tool):
         keyword = (kwargs.get("keyword") or "").lower()
         task_filter = kwargs.get("task_filter", "")
         limit = kwargs.get("limit", 20)
-        scope = kwargs.get("scope", "session")
+        scope = kwargs.get("scope", "all")
 
         session_entries = []
         global_entries = []

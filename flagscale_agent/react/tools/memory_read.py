@@ -9,7 +9,9 @@ class MemoryReadTool(Tool):
     description = (
         "Read a specific memory entry by key. "
         "Use when you know a memory exists and want to retrieve its details. "
-        "Searches session memory first, then global memory."
+        "Searches session memory first, then global memory. "
+        "If both session and global have the same key, the session entry takes precedence and the global entry is not returned. "
+        "To explicitly read the global version, pass scope='global'."
     )
     parameters = {
         "type": "object",
