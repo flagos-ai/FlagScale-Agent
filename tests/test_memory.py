@@ -114,24 +114,101 @@ class TestSessionMemory:
 
 
 class TestMemoryTools:
-    def test_memory_write_tool(self, memory):
-        tool = MemoryWriteTool(memory, "sess1")
-        result = tool.execute(key="test", type="finding", content="test content")
-        assert "Memorized" in result
-        assert "[finding]" in result
-        entry = memory.get("test")
-        assert entry is not None
-        assert entry["content"] == "test content"
+    def test_memory_write_tool_default_scope_by_type(self, tmp_path):
+        global_dir = str(tmp_path / "global")
+        session_dir = str(tmp_path / "session")
+        global_mem = SessionMemory(global_dir, ttl_days=7)
+        session_mem = SessionMemory(session_dir, ttl_days=365)
+        tool = MemoryWriteTool(global_mem, session_mem, "sess1")
 
-    def test_memory_read_tool_hit(self, memory):
-        memory.put("test", "decision", "use TP=4", "s1")
-        tool = MemoryReadTool(memory)
-        result = tool.execute(key="test")
+        # finding → global by default
+        result = tool.execute(key="test_finding", type="finding", content="test content")
+        assert "[finding]" in result
+        assert "[global]" in result
+        assert os.path.isfile(os.path.join(global_dir, "test_finding.yaml"))
+        assert not os.path.isfile(os.path.join(session_dir, "test_finding.yaml"))
+
+        # decision → session by default
+        result = tool.execute(key="test_decision", type="decision", content="use TP=4")
+        assert "[decision]" in result
+        assert "[session]" in result
+        assert os.path.isfile(os.path.join(session_dir, "test_decision.yaml"))
+        assert not os.path.isfile(os.path.join(global_dir, "test_decision.yaml"))
+
+        # context → session by default
+        result = tool.execute(key="test_context", type="context", content="path is /foo")
+        assert "[session]" in result
+        assert os.path.isfile(os.path.join(session_dir, "test_context.yaml"))
+        assert not os.path.isfile(os.path.join(global_dir, "test_context.yaml"))
+
+        # todo → session by default
+        result = tool.execute(key="test_todo", type="todo", content="run benchmark")
+        assert "[session]" in result
+        assert os.path.isfile(os.path.join(session_dir, "test_todo.yaml"))
+        assert not os.path.isfile(os.path.join(global_dir, "test_todo.yaml"))
+
+    def test_memory_write_tool_explicit_scope_overrides_default(self, tmp_path):
+        global_dir = str(tmp_path / "global")
+        session_dir = str(tmp_path / "session")
+        global_mem = SessionMemory(global_dir, ttl_days=7)
+        session_mem = SessionMemory(session_dir, ttl_days=365)
+        tool = MemoryWriteTool(global_mem, session_mem, "sess1")
+
+        # finding forced to session (overrides global default)
+        result = tool.execute(key="forced_session", type="finding", content="local fact", scope="session")
+        assert "[session]" in result
+        assert os.path.isfile(os.path.join(session_dir, "forced_session.yaml"))
+        assert not os.path.isfile(os.path.join(global_dir, "forced_session.yaml"))
+
+        # decision forced to global (overrides session default)
+        result = tool.execute(key="forced_global", type="decision", content="arch choice", scope="global")
+        assert "[global]" in result
+        assert os.path.isfile(os.path.join(global_dir, "forced_global.yaml"))
+        assert not os.path.isfile(os.path.join(session_dir, "forced_global.yaml"))
+
+    def test_memory_write_tool_global_scope(self, tmp_path):
+        global_mem = SessionMemory(str(tmp_path / "global"), ttl_days=7)
+        session_mem = SessionMemory(str(tmp_path / "session"), ttl_days=365)
+        tool = MemoryWriteTool(global_mem, session_mem, "sess1")
+        result = tool.execute(key="global_key", type="finding", content="global content", scope="global")
+        assert "[global]" in result
+        assert global_mem.get("global_key") is not None
+        assert session_mem.get("global_key") is None
+
+    def test_memory_read_tool_session_first(self, tmp_path):
+        global_mem = SessionMemory(str(tmp_path / "global"), ttl_days=7)
+        session_mem = SessionMemory(str(tmp_path / "session"), ttl_days=365)
+        global_mem.put("shared_key", "decision", "global version", "s1")
+        session_mem.put("shared_key", "decision", "session version", "s1")
+        tool = MemoryReadTool(global_mem, session_mem)
+        result = tool.execute(key="shared_key")
+        # session takes priority
+        assert "session version" in result
+        assert "[session]" in result
+
+    def test_memory_read_tool_falls_back_to_global(self, tmp_path):
+        global_mem = SessionMemory(str(tmp_path / "global"), ttl_days=7)
+        session_mem = SessionMemory(str(tmp_path / "session"), ttl_days=365)
+        global_mem.put("global_only", "decision", "use TP=4", "s1")
+        tool = MemoryReadTool(global_mem, session_mem)
+        result = tool.execute(key="global_only")
         assert "[decision]" in result
         assert "use TP=4" in result
+        assert "[global]" in result
 
-    def test_memory_read_tool_miss(self, memory):
-        tool = MemoryReadTool(memory)
+    def test_memory_read_tool_explicit_scope(self, tmp_path):
+        global_mem = SessionMemory(str(tmp_path / "global"), ttl_days=7)
+        session_mem = SessionMemory(str(tmp_path / "session"), ttl_days=365)
+        global_mem.put("k", "finding", "global fact", "s1")
+        session_mem.put("k", "finding", "session fact", "s1")
+        tool = MemoryReadTool(global_mem, session_mem)
+        assert "global fact" in tool.execute(key="k", scope="global")
+        assert "session fact" in tool.execute(key="k", scope="session")
+
+    def test_memory_read_tool_miss(self, tmp_path):
+        global_mem = SessionMemory(str(tmp_path / "global"), ttl_days=7)
+        session_mem = SessionMemory(str(tmp_path / "session"), ttl_days=365)
+        tool = MemoryReadTool(global_mem, session_mem)
         result = tool.execute(key="nonexistent")
         assert "No memory found" in result
 
@@ -297,3 +374,179 @@ class TestKeywordExpansion:
         # Same keywords in different order — should hit cache
         memory.query_relevant(["nccl", "oom"])
         assert call_count[0] == 1
+
+
+# ── New tests for per-session scope feature ────────────────────────────────
+
+from flagscale_agent.react.tools.memory_list import MemoryListTool
+from flagscale_agent.react.paths import get_session_memory_dir, get_memory_dir
+
+
+class TestMemoryListToolScope:
+    """MemoryListTool scope filtering and output format."""
+
+    def _make_tools(self, tmp_path):
+        global_mem = SessionMemory(str(tmp_path / "global"), ttl_days=7)
+        session_mem = SessionMemory(str(tmp_path / "session"), ttl_days=365)
+        tool = MemoryListTool(global_mem, session_mem)
+        return global_mem, session_mem, tool
+
+    def test_default_scope_is_all(self, tmp_path):
+        """Default scope is 'all': both session and global entries are returned."""
+        global_mem, session_mem, tool = self._make_tools(tmp_path)
+        global_mem.put("g1", "finding", "global entry", "s1")
+        session_mem.put("s1_key", "finding", "session entry", "s1")
+        result = tool.execute()
+        assert "session entry" in result
+        assert "global entry" in result
+
+    def test_scope_global_shows_only_global(self, tmp_path):
+        global_mem, session_mem, tool = self._make_tools(tmp_path)
+        global_mem.put("g1", "finding", "global entry", "s1")
+        session_mem.put("s1_key", "finding", "session entry", "s1")
+        result = tool.execute(scope="global")
+        assert "global entry" in result
+        assert "session entry" not in result
+
+    def test_scope_all_shows_both(self, tmp_path):
+        global_mem, session_mem, tool = self._make_tools(tmp_path)
+        global_mem.put("g1", "finding", "global entry", "s1")
+        session_mem.put("s1_key", "finding", "session entry", "s1")
+        result = tool.execute(scope="all")
+        assert "global entry" in result
+        assert "session entry" in result
+
+    def test_scope_labels_in_output(self, tmp_path):
+        global_mem, session_mem, tool = self._make_tools(tmp_path)
+        global_mem.put("g1", "finding", "global entry", "s1")
+        session_mem.put("s1_key", "finding", "session entry", "s1")
+        result = tool.execute(scope="all")
+        assert "[global]" in result
+        assert "[session]" in result
+
+    def test_session_entries_before_global_in_all(self, tmp_path):
+        global_mem, session_mem, tool = self._make_tools(tmp_path)
+        global_mem.put("g1", "finding", "global entry", "s1")
+        session_mem.put("s1_key", "finding", "session entry", "s1")
+        result = tool.execute(scope="all")
+        session_pos = result.index("session entry")
+        global_pos = result.index("global entry")
+        assert session_pos < global_pos, "session entries should appear before global entries"
+
+    def test_header_shows_correct_count_session(self, tmp_path):
+        global_mem, session_mem, tool = self._make_tools(tmp_path)
+        global_mem.put("g1", "finding", "g", "s1")
+        global_mem.put("g2", "finding", "g", "s1")
+        session_mem.put("s1_key", "finding", "s", "s1")
+        result = tool.execute(scope="session")
+        assert "1/1" in result
+        assert "[session]" in result
+
+    def test_header_shows_correct_count_global(self, tmp_path):
+        global_mem, session_mem, tool = self._make_tools(tmp_path)
+        global_mem.put("g1", "finding", "g", "s1")
+        global_mem.put("g2", "finding", "g", "s1")
+        session_mem.put("s1_key", "finding", "s", "s1")
+        result = tool.execute(scope="global")
+        assert "2/2" in result
+        assert "[global]" in result
+
+    def test_header_shows_combined_count_all(self, tmp_path):
+        global_mem, session_mem, tool = self._make_tools(tmp_path)
+        global_mem.put("g1", "finding", "g", "s1")
+        session_mem.put("s1_key", "finding", "s", "s1")
+        result = tool.execute(scope="all")
+        assert "2/2" in result
+
+    def test_keyword_filter_applied_within_scope(self, tmp_path):
+        global_mem, session_mem, tool = self._make_tools(tmp_path)
+        session_mem.put("nccl_timeout", "finding", "nccl timeout fix", "s1")
+        session_mem.put("oom_fix", "finding", "out of memory fix", "s1")
+        result = tool.execute(scope="session", keyword="nccl")
+        assert "nccl timeout fix" in result
+        assert "out of memory fix" not in result
+
+    def test_empty_session_returns_no_entries_message(self, tmp_path):
+        global_mem, session_mem, tool = self._make_tools(tmp_path)
+        global_mem.put("g1", "finding", "global entry", "s1")
+        result = tool.execute(scope="session")
+        assert "no memory entries found" in result
+
+    def test_type_filter_works_with_scope(self, tmp_path):
+        global_mem, session_mem, tool = self._make_tools(tmp_path)
+        session_mem.put("d1", "decision", "use TP=4", "s1")
+        session_mem.put("f1", "finding", "nccl issue", "s1")
+        result = tool.execute(scope="session", type_filter="decision")
+        assert "use TP=4" in result
+        assert "nccl issue" not in result
+
+
+class TestMemoryWriteSupersedeCrossScope:
+    """supersedes should remove entries from either scope store."""
+
+    def test_supersede_removes_session_entry(self, tmp_path):
+        global_mem = SessionMemory(str(tmp_path / "global"), ttl_days=7)
+        session_mem = SessionMemory(str(tmp_path / "session"), ttl_days=365)
+        session_mem.put("old_key", "finding", "old info", "s1")
+        # Verify file exists before supersede
+        assert os.path.isfile(os.path.join(str(tmp_path / "session"), "old_key.yaml"))
+        tool = MemoryWriteTool(global_mem, session_mem, "s1")
+        result = tool.execute(
+            key="new_key", type="finding", content="new info",
+            supersedes=["old_key"]
+        )
+        assert "Superseded" in result
+        assert "old_key" in result
+        # File must be gone — use direct file check to avoid get() semantic fallback
+        assert not os.path.isfile(os.path.join(str(tmp_path / "session"), "old_key.yaml"))
+
+    def test_supersede_removes_global_entry(self, tmp_path):
+        global_mem = SessionMemory(str(tmp_path / "global"), ttl_days=7)
+        session_mem = SessionMemory(str(tmp_path / "session"), ttl_days=365)
+        global_mem.put("old_global", "finding", "old global info", "s1")
+        tool = MemoryWriteTool(global_mem, session_mem, "s1")
+        result = tool.execute(
+            key="new_key", type="finding", content="new info",
+            supersedes=["old_global"], scope="session"
+        )
+        assert "Superseded" in result
+        assert global_mem.get("old_global") is None
+
+    def test_supersede_nonexistent_key_is_silent(self, tmp_path):
+        global_mem = SessionMemory(str(tmp_path / "global"), ttl_days=7)
+        session_mem = SessionMemory(str(tmp_path / "session"), ttl_days=365)
+        tool = MemoryWriteTool(global_mem, session_mem, "s1")
+        # Should not raise, and "Superseded" should not appear since nothing deleted
+        result = tool.execute(
+            key="new_key", type="finding", content="content",
+            supersedes=["ghost_key"]
+        )
+        assert "ERROR" not in result
+        assert "Superseded" not in result
+
+
+class TestPaths:
+    """get_session_memory_dir returns correct path structure."""
+
+    def test_session_memory_dir_structure(self, tmp_path, monkeypatch):
+        # Monkeypatch get_sessions_root to use tmp_path
+        import flagscale_agent.react.paths as paths_mod
+        monkeypatch.setattr(paths_mod, "get_sessions_root", lambda: str(tmp_path / "sessions"))
+        result = get_session_memory_dir("abc123")
+        expected = str(tmp_path / "sessions" / "abc123" / "memory")
+        assert result == expected
+
+    def test_session_memory_dir_unique_per_session(self, tmp_path, monkeypatch):
+        import flagscale_agent.react.paths as paths_mod
+        monkeypatch.setattr(paths_mod, "get_sessions_root", lambda: str(tmp_path / "sessions"))
+        dir_a = get_session_memory_dir("session_a")
+        dir_b = get_session_memory_dir("session_b")
+        assert dir_a != dir_b
+
+    def test_session_memory_dir_separate_from_global(self, tmp_path, monkeypatch):
+        import flagscale_agent.react.paths as paths_mod
+        monkeypatch.setattr(paths_mod, "get_dot_flagscale_root", lambda: str(tmp_path / ".flagscale"))
+        monkeypatch.setattr(paths_mod, "get_sessions_root", lambda: str(tmp_path / ".flagscale" / "sessions"))
+        global_dir = get_memory_dir()
+        session_dir = get_session_memory_dir("abc123")
+        assert not session_dir.startswith(global_dir)
