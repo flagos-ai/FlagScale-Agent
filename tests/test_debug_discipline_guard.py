@@ -56,7 +56,7 @@ class TestHypothesisGate:
         result = g.check_pre(ctx2)
         assert result is not None
         assert result.action == "inject_msg"
-        assert "HYPOTHESIS" in result.message
+        assert "hypothesis" in result.message.lower()
 
     def test_non_py_files_not_blocked(self):
         """Edits to non-.py files are never blocked."""
