@@ -62,11 +62,8 @@ class MemoryDisciplineGuard(Guard):
                 if self._tool_call_count == 0 and self._read_reminders < 1:
                     self._read_reminders += 1
                     return GuardVerdict.inject(
-                        "[MemoryDiscipline] Session start — load context first:\n"
-                        "  1. plan_status() — where did we leave off?\n"
-                        "  2. memory_list() — what do we already know?\n"
-                        "  3. memory_read(key=...) for relevant entries\n"
-                        "Do this BEFORE starting work to avoid repeating past efforts.",
+                        "[MemoryDiscipline] Session start — check memory and plan status "
+                        "before acting to avoid repeating past efforts.",
                         reason="session_start_read",
                         category="memory_read_reminder",
                     )
@@ -88,10 +85,8 @@ class MemoryDisciplineGuard(Guard):
                 if ctx.tool_name not in ("memory_list", "memory_read", "plan_status"):
                     self._read_reminders += 1
                     return GuardVerdict.inject(
-                        "[MemoryDiscipline] Session start — load context first:\n"
-                        "  1. plan_status() — where did we leave off?\n"
-                        "  2. memory_list() — what do we already know?\n"
-                        "Do this BEFORE starting work to avoid repeating past efforts.",
+                        "[MemoryDiscipline] Session start — check memory and plan status "
+                        "before acting to avoid repeating past efforts.",
                         reason="session_start_read",
                         category="memory_read_reminder",
                     )
@@ -104,13 +99,12 @@ class MemoryDisciplineGuard(Guard):
                 if self._read_reminders >= 4:
                     # Escalate: block after repeated ignoring
                     return GuardVerdict.block(
-                        "[MemoryDiscipline] BLOCKED: You have ignored 3+ memory-read reminders.\n"
-                        "  Call memory_list() or memory_read() FIRST, then retry this command.",
+                        "[MemoryDiscipline] BLOCKED: Check memory before running experiments.",
                         reason="pre_experiment_block",
                     )
                 return GuardVerdict.inject(
-                    "[MemoryDiscipline] Running experiment without checking memory.\n"
-                    "  → memory_list(keyword=...) to check for prior attempts/failures.",
+                    "[MemoryDiscipline] About to run experiment without checking memory. "
+                    "Check for prior attempts/failures before proceeding.",
                     reason="pre_experiment_check",
                     category="memory_read_reminder",
                 )
@@ -151,9 +145,8 @@ class MemoryDisciplineGuard(Guard):
             if self._write_reminders < 2:
                 self._write_reminders += 1
                 return GuardVerdict.inject(
-                    "[MemoryDiscipline] Error/failure detected. Record it:\n"
-                    "  → memory_write(key=..., type='finding', content='what failed and why')\n"
-                    "  This prevents repeating the same mistake in future sessions.",
+                    "[MemoryDiscipline] Error/failure detected. "
+                    "Record what failed and why to memory so future sessions don't repeat this mistake.",
                     reason="record_failure",
                     category="memory_write_reminder",
                 )
@@ -164,9 +157,8 @@ class MemoryDisciplineGuard(Guard):
             self._write_reminders += 1
             msg = (
                 f"[MemoryDiscipline] {len(self._pending_discoveries)} findings since last "
-                f"memory_write (types: {', '.join(cats)}). Record key results now:\n"
-                f"  → memory_write(key=..., type='finding', content=...)\n"
-                f"  Include: exact numbers, what worked/failed, config details."
+                f"memory_write (types: {', '.join(cats)}). "
+                f"Record key results now — include exact numbers, what worked/failed, config details."
             )
             if self._write_reminders >= 4:
                 # Final reminder, then back off — don't block forever

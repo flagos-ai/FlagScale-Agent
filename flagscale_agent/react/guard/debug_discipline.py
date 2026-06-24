@@ -101,14 +101,9 @@ class DebugDisciplineGuard(Guard):
                     self._edits_since_failure += 1
                     if self._edits_since_failure >= 2:
                         return GuardVerdict.inject(
-                            "[DebugDiscipline] You're editing code after a training "
-                            "failure without declaring a hypothesis. Before making "
-                            "more changes, state:\n"
-                            "  HYPOTHESIS: [one sentence — what's actually wrong]\n"
-                            "  EVIDENCE: [what you read/checked that supports this]\n"
-                            "  VERIFICATION: [what you expect to see if correct]\n\n"
-                            "This prevents blind trial-and-error. Training launches "
-                            "are expensive — each attempt should test a specific theory.",
+                            "[DebugDiscipline] Multiple edits after failure without a hypothesis. "
+                            "State what you think is wrong and what evidence supports it "
+                            "before making more changes.",
                             reason="hypothesis_required",
                         )
         return None
@@ -164,13 +159,9 @@ class DebugDisciplineGuard(Guard):
 
                 if self._debug_prints_added == 1:
                     return GuardVerdict.inject(
-                        "[DebugDiscipline] Adding debug prints. Remember: add ALL "
-                        "diagnostic prints in ONE pass. Don't do one-print-per-launch. "
-                        "Think about what OTHER intermediate values you need to see "
-                        "and add them all now. Training startup cost is 2-5 minutes "
-                        "— make each launch count.\n\n"
-                        "Also: use the marker '# AGENT_DEBUG' on debug lines for "
-                        "easy cleanup later.",
+                        "[DebugDiscipline] Adding debug prints — add ALL diagnostic prints "
+                        "in one pass, not one per launch. Mark debug lines with '# AGENT_DEBUG' "
+                        "for easy cleanup.",
                         reason="debug_print_maximization",
                     )
 

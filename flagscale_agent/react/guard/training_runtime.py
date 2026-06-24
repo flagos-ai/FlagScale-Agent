@@ -140,12 +140,8 @@ class TrainingRuntimeGuard(Guard):
                 return None
 
             return GuardVerdict.block(
-                "[MONITOR GATE — COMMAND NOT EXECUTED]\n\n"
-                "After launching training, you MUST call monitor() to observe "
-                "the process. Training was just launched — use "
-                "monitor(output_dir=...) to watch for errors or progress "
-                "before doing anything else.\n\n"
-                "Read-only commands (pgrep, ps, cat, ls) are allowed for diagnostics.",
+                "[TrainingRuntime] BLOCKED: Monitor training before doing other work. "
+                "Read-only commands (pgrep, ps, cat, ls) are allowed.",
                 reason="monitor required after train launch",
             )
 
@@ -157,14 +153,9 @@ class TrainingRuntimeGuard(Guard):
                     if not target or any(ext in target for ext in (".yaml", ".yml", ".md", ".txt", ".json")):
                         return None
                     return GuardVerdict.inject(
-                        f"\n[SOURCE READING REQUIRED] You have "
-                        f"{self._consecutive_train_failures} consecutive failures "
-                        f"but have only read {self._source_reads_since_last_failure} "
-                        f"framework source files since the last failure.\n"
-                        "Before writing another fix, read the UPSTREAM implementation:\n"
-                        "- Find the actual Megatron / TransformerEngine / FlagScale code path involved\n"
-                        "- Understand what the framework expects (args, shapes, dtypes, return values)\n"
-                        "- Then write a fix based on what you learned, not on guessing",
+                        f"[TrainingRuntime] {self._consecutive_train_failures} consecutive failures, "
+                        f"only {self._source_reads_since_last_failure} source reads. "
+                        f"Read the upstream framework code to understand what it expects before fixing.",
                         reason="source reading required before fix",
                     )
 
@@ -177,29 +168,14 @@ class TrainingRuntimeGuard(Guard):
                 self._turns_since_last_gpu_check = 0
                 self._turns_since_last_monitor = 0
                 return GuardVerdict.inject(
-                    "[HEARTBEAT] Training was launched "
-                    f"{self._turns_since_last_monitor + self._HEARTBEAT_MONITOR_INTERVAL} turns ago.\n"
-                    "Check GPU utilization and process health:\n"
-                    "  nvidia-smi\n"
-                    "  ps aux | grep python\n"
-                    "  tail -50 <output_dir>/log.txt\n\n"
-                    "Also: No monitor call for too long — run "
-                    "monitor(output_dir=...) to check training progress, "
-                    "loss curve, throughput, and error logs.",
+                    "[HEARTBEAT] Training running but not monitored. Check GPU utilization and training progress.",
                     reason="periodic gpu health check + monitor overdue",
                 )
 
             if gpu_overdue:
                 self._turns_since_last_gpu_check = 0
                 return GuardVerdict.inject(
-                    "[HEARTBEAT] Training was launched "
-                    f"{self._turns_since_last_monitor} turns ago. "
-                    "Check GPU utilization and process health:\n"
-                    "  nvidia-smi\n"
-                    "  ps aux | grep python\n"
-                    "  tail -50 <output_dir>/log.txt\n\n"
-                    "If GPU util = 0% and process exists but no output, "
-                    "training may be hung — kill and diagnose.",
+                    "[HEARTBEAT] Check GPU utilization — if 0% with active process, training may be hung.",
                     reason="periodic gpu health check",
                 )
 
@@ -207,19 +183,14 @@ class TrainingRuntimeGuard(Guard):
                 self._turns_since_last_monitor = 0
                 if self._last_launch_output_dir:
                     return GuardVerdict.inject(
-                        "[HEARTBEAT] No monitor call in "
-                        f"{self._HEARTBEAT_MONITOR_INTERVAL} turns. "
-                        "Run monitor(output_dir=...) to check training progress, "
-                        "loss curve, throughput, and error logs.",
+                        "[HEARTBEAT] Monitor training progress — no observation in "
+                        f"{self._HEARTBEAT_MONITOR_INTERVAL} turns.",
                         reason="monitor overdue",
                     )
                 else:
                     return GuardVerdict.inject(
-                        "[HEARTBEAT] No monitor call in "
-                        f"{self._HEARTBEAT_MONITOR_INTERVAL} turns. "
-                        "Training is running but not being observed. "
-                        "Check nvidia-smi for GPU utilization and look for "
-                        "progress indicators in the training log.",
+                        "[HEARTBEAT] Training running but unobserved for "
+                        f"{self._HEARTBEAT_MONITOR_INTERVAL} turns. Check progress.",
                         reason="monitor overdue",
                     )
 
@@ -311,8 +282,7 @@ class TrainingRuntimeGuard(Guard):
                 f"\n[AUTO-RESTART STRATEGY] Detected failure category, "
                 f"suggested config modifications before next attempt:\n"
                 f"{strategy_lines}\n"
-                "After applying fixes, call add_attempt() with new config, "
-                "then relaunch training."
+                "Apply fixes before next attempt."
             )
 
             compare_msg = ""
@@ -357,12 +327,8 @@ class TrainingRuntimeGuard(Guard):
                 "result": ctx.tool_result,
             }, default=False):
                 return GuardVerdict.inject(
-                    "\n[GPU ZOMBIE WARNING] Possible zombie GPU processes detected. "
-                    "Action plan:\n"
-                    "1. Identify: nvidia-smi | grep python ; pgrep -a python\n"
-                    "2. Kill: kill -9 <PID> (for each zombie process)\n"
-                    "3. Verify: nvidia-smi should show 0MiB memory used\n"
-                    "4. If zombies persist: fuser -v /dev/nvidia* to find PIDs",
+                    "[TrainingRuntime] Possible zombie GPU processes detected. "
+                    "Clean them up before launching new training.",
                     reason="gpu zombie process detected",
                 )
 
@@ -428,16 +394,7 @@ class TrainingRuntimeGuard(Guard):
             return None
 
         return (
-            "\n[MULTI-NODE HEALTH CHECK] Multi-node training detected "
-            f"({' ; '.join(indicators)}). Before launching, verify:\n\n"
-            "1. NCCL allreduce bandwidth:\n"
-            "   mpirun -np <ngpus> -H <node1>:<ngpus_per>,<node2>:<ngpus_per> \\\n"
-            "     -x NCCL_IB_DISABLE=0 -x NCCL_DEBUG=INFO \\\n"
-            "     all_reduce_perf -b 8M -e 128M -f 2 -g 1\n\n"
-            "2. Inter-node SSH (passwordless):\n"
-            "   for host in <nodelist>; do ssh $host hostname; done\n\n"
-            "3. Shared storage writability:\n"
-            "   mpirun -np <nnodes> -H <nodelist> touch /shared/test_write && rm /shared/test_write\n\n"
-            "4. GPU visibility:\n"
-            "   mpirun -np <nnodes> -H <nodelist> nvidia-smi --query-gpu=name,memory.total --format=csv"
+            "[MULTI-NODE] Multi-node training detected "
+            f"({' ; '.join(indicators)}). "
+            "Verify inter-node connectivity (NCCL allreduce, SSH, shared storage) before launching."
         )

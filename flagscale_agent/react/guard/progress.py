@@ -83,8 +83,8 @@ class ProgressGuard(Guard):
                         self._shared_state.issue_read_warning()
                     return GuardVerdict.inject(
                         f"[Progress] You've re-read '{path.split('/')[-1]}' "
-                        f"{self._reread_count} times. Consider using grep/shell for "
-                        f"targeted lookups, or save findings to memory.",
+                        f"{self._reread_count} times. You already have this content — "
+                        f"act on it or save key findings to memory.",
                         reason="re-read_same_file",
                         category="read_stall",
                     )
@@ -109,11 +109,8 @@ class ProgressGuard(Guard):
             if self._shared_state:
                 self._shared_state.issue_read_warning()
             return GuardVerdict.inject(
-                f"[Progress] {consecutive_reads}/{self._block_threshold} "
-                f"consecutive read-only calls. You have enough information to act. "
-                f"Ask yourself: do I have enough to move forward? "
-                f"If yes — write, build, or fix something. "
-                f"If no — what specific piece is missing?",
+                f"[Progress] {consecutive_reads} consecutive read-only calls. "
+                f"You have enough information — produce output now.",
                 reason="read_only_stall_block",
                 category="read_stall",
             )

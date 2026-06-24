@@ -1112,22 +1112,24 @@ class WorkerAgent:
                 [{"name": e["name"], "status": e["status"]} for e in experiments[:5]]
             )
 
-        # Determine status
+        # Determine status — use full output, no truncation.
+        # The summary is what downstream stages receive as context.
+        clean_text = last_text.replace("[TASK_COMPLETE]", "").replace("[NEED_USER_INPUT]", "").strip()
         if loop_error:
             status = "failed"
-            summary = f"ReAct loop crashed: {loop_error[:200]}"
+            summary = f"ReAct loop crashed: {loop_error}"
         elif task_complete:
             status = "success"
-            summary = last_text.replace("[TASK_COMPLETE]", "").strip()[:500] or "Task completed."
+            summary = clean_text or "Task completed."
         elif needs_user:
             status = "partial"
-            summary = last_text.replace("[NEED_USER_INPUT]", "").strip()[:500] or "Waiting for user input."
+            summary = clean_text or "Waiting for user input."
         elif not self.history.messages:
             status = "failed"
             summary = "No messages in history — provider or config issue."
         else:
             status = "partial"
-            summary = last_text[:500] if last_text else "No final response."
+            summary = clean_text or "No final response."
 
         elapsed = time.time() - t0
 
@@ -1351,6 +1353,7 @@ class WorkerAgent:
         steps = active.get("steps", [])
         icons = {"pending": "⬜", "doing": "🔄", "done": "✅", "skipped": "⏭", "blocked": "🚫"}
         lines = [f'<active-plan title="{active.get("title", "")}">']
+        current_step = None
         for s in steps:
             icon = icons.get(s.get("status", "pending"), "?")
             title = s.get("title", "") or s.get("description", "")
@@ -1359,7 +1362,16 @@ class WorkerAgent:
             if notes:
                 line += f" — {notes[:80]}"
             lines.append(line)
+            if s.get("status") in ("pending", "doing") and current_step is None:
+                current_step = s
         lines.append("</active-plan>")
+        # Add explicit advancement instruction
+        if current_step:
+            step_id = current_step.get("id", "?")
+            lines.append(
+                f"\n→ Focus on Step {step_id}. When done, call: "
+                f"plan_update(action='step_done', step_id={step_id})"
+            )
         return "\n".join(lines)
 
     # ── Startup ─────────────────────────────────────────────────────────────

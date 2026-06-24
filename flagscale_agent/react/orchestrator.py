@@ -387,8 +387,9 @@ class SubtaskRunner:
 
     @staticmethod
     def _build_upstream_summary(keys: list[str], upstream: dict) -> str:
-        """Build concise summary from upstream results. NOT full history.
+        """Build context from upstream stage results.
 
+        Passes the FULL output from previous stages — no truncation.
         keys can be stage IDs (e.g. "env_setup"), which map to stored summaries,
         or semantic artifact keys (e.g. "env_path") which map to WorkerResult.artifacts.
         """
@@ -397,17 +398,30 @@ class SubtaskRunner:
         for k in keys:
             if k in upstream:
                 val = upstream[k]
-                lines.append(f"  {k}: {str(val)[:300]}")
+                lines.append(f"\n### {k}\n{val}")
                 found_any = True
         return "\n".join(lines) if found_any else ""
 
     @staticmethod
     def _build_task(description: str, user_input: str, context: str) -> str:
-        """Build the task prompt for a subtask Worker."""
-        parts = [description]
+        """Build the task prompt for a subtask Worker.
+
+        Includes explicit scope boundary to prevent the worker from executing
+        work that belongs to later stages.
+        """
+        parts = [
+            f"## Your Stage Task\n\n{description}",
+            "\n## Scope Boundary\n\n"
+            "Complete ONLY the task described above, then respond with [TASK_COMPLETE]. "
+            "Do NOT proceed to work that belongs to later stages, even if you can infer what they are. "
+            "Include key results (paths, conclusions, data) in your final response — "
+            "this will be passed as context to the next stage.",
+        ]
         if context:
-            parts.append(f"\nContext from previous stages:\n{context}")
-        parts.append(f"\nOriginal request: {user_input}")
+            parts.append(f"\n## Context from Previous Stages\n\n{context}")
+        parts.append(
+            f"\n## Original User Request (for reference only — do NOT execute beyond your stage)\n\n{user_input}"
+        )
         return "\n".join(parts)
 
 
@@ -736,7 +750,9 @@ class Orchestrator:
                     description=s.get("description", s["id"]),
                     profile_name=s.get("profile", "training-reproduce"),
                     depends_on=s.get("depends_on", []),
-                    upstream_keys=s.get("upstream_keys", []),
+                    # Default upstream_keys to depends_on — downstream stages
+                    # should always receive output from their dependencies.
+                    upstream_keys=s.get("upstream_keys", s.get("depends_on", [])),
                 )
                 for s in dynamic_stages
             ]

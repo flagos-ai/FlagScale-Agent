@@ -167,28 +167,20 @@ class TrainingAttemptGuard(Guard):
                     return GuardVerdict.block(
                         f"[2-Strike Rule] BLOCKED: {self.STRIKE_THRESHOLD} consecutive "
                         f"attempts failed with category '{self._blocked_category}'. "
-                        f"You must read source code to diagnose the root cause before retrying. "
-                        f"Progress: {self._source_reads_since_block}/{self.SOURCE_READ_REQUIREMENT} "
-                        f"source files read. "
-                        f"\n\nPrevious failures:\n"
+                        f"Read source code to diagnose root cause before retrying "
+                        f"({self._source_reads_since_block}/{self.SOURCE_READ_REQUIREMENT} reads done)."
+                        + "\n\nPrevious failures:\n"
                         + "\n".join(
                             f"  Attempt {i+1}: [{a.error_category}] {a.error_snippet[:150]}"
                             for i, a in enumerate(self._attempts[-self.STRIKE_THRESHOLD:])
                             if a.error_category
-                        )
-                        + "\n\nBefore launching again, you MUST:\n"
-                        "1. State your hypothesis about the root cause\n"
-                        "2. Read relevant source code to verify\n"
-                        "3. Explain what was wrong and how the fix addresses it",
+                        ),
                         reason=f"2_strike_{self._blocked_category}",
                     )
                 elif not self._hypothesis_declared:
                     return GuardVerdict.block(
-                        f"[2-Strike Rule] You've read source code, but haven't stated your "
-                        f"hypothesis. Before relaunching, declare:\n"
-                        f"  HYPOTHESIS: [what's actually wrong]\n"
-                        f"  FIX: [what you changed and why]\n"
-                        f"  EXPECTED: [what you expect to see this time]",
+                        f"[2-Strike Rule] Source code read, but no hypothesis stated. "
+                        f"State what's wrong and how your fix addresses it before relaunching.",
                         reason="2_strike_no_hypothesis",
                     )
                 else:
@@ -272,15 +264,11 @@ class TrainingAttemptGuard(Guard):
             self._hypothesis_declared = False
 
             return GuardVerdict.inject(
-                f"\n[2-STRIKE RULE TRIGGERED]\n"
-                f"Category '{self._blocked_category}' has failed {self.STRIKE_THRESHOLD} "
-                f"consecutive times. The approach is fundamentally wrong.\n\n"
-                f"STOP making incremental fixes. You MUST:\n"
-                f"1. Re-read the relevant source code end-to-end\n"
-                f"2. Identify the systemic assumption that is wrong\n"
-                f"3. State your root cause hypothesis clearly\n"
-                f"4. Propose a fundamentally different approach\n\n"
-                f"Further training launches are BLOCKED until you do this.",
+                f"[2-STRIKE RULE TRIGGERED] Category '{self._blocked_category}' "
+                f"failed {self.STRIKE_THRESHOLD} consecutive times. "
+                f"The approach is fundamentally wrong — stop incremental fixes. "
+                f"Identify what systemic assumption is wrong before proceeding. "
+                f"Further launches are BLOCKED until root cause is stated.",
                 reason=f"2_strike_triggered_{self._blocked_category}",
             )
 

@@ -168,6 +168,14 @@ _INJECT_CATEGORY_PATTERNS = {
     "budget": re.compile(r"budget|token|exhausted", re.IGNORECASE),
 }
 
+# Category suppression: if a higher-priority category fires, suppress lower-priority ones.
+# Key = category that suppresses, Value = set of categories it suppresses.
+_CATEGORY_SUPPRESSION: dict[str, set[str]] = {
+    "comprehension": {"memory_write_reminder", "memory_read_reminder"},
+    "read_stall": {"memory_write_reminder"},
+    "loop": {"read_stall", "memory_write_reminder"},
+}
+
 
 def _infer_category(verdict: GuardVerdict) -> str:
     """Infer the semantic category of an inject verdict for deduplication."""
@@ -268,6 +276,10 @@ class GuardRegistry:
                     continue
                 if category:
                     inject_categories_seen.add(category)
+                    # v2.1: Suppress lower-priority categories
+                    suppressed = _CATEGORY_SUPPRESSION.get(category)
+                    if suppressed:
+                        inject_categories_seen.update(suppressed)
 
                 # v2: Check effectiveness — if this inject has been repeatedly
                 # ineffective, escalate instead of repeating
@@ -356,6 +368,10 @@ class GuardRegistry:
                     continue
                 if category:
                     inject_categories_seen.add(category)
+                    # v2.1: Suppress lower-priority categories
+                    suppressed = _CATEGORY_SUPPRESSION.get(category)
+                    if suppressed:
+                        inject_categories_seen.update(suppressed)
 
                 # v2: Check effectiveness — suppress repeatedly ineffective injects
                 if category and self._shared_state.inject_tracker.should_suppress(

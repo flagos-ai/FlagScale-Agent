@@ -79,26 +79,15 @@ class ExperimentTrackingGuard(Guard):
                         return GuardVerdict.block(
                             f"[ExperimentTracking] BLOCKED: {self._unrecorded_launches} "
                             "training launches without experiment recording. "
-                            "You MUST call workspace_experiment(action='add_attempt') "
-                            "before launching. Required fields:\n"
-                            "  - change: what changed in this attempt\n"
-                            "  - hardware: {gpus, gpu_type}\n"
-                            "  - config: {model, tp, dp, pp, ...}\n"
-                            "  - output_dir: where logs will be written\n\n"
-                            "If no experiment exists yet, create one first with "
-                            "workspace_experiment(action='create').",
+                            "Record an experiment attempt before launching training.",
                             reason="experiment_not_recorded",
                         )
                     else:
                         # Warn for first 2 unrecorded launches
                         return GuardVerdict.inject(
-                            f"[ExperimentTracking] WARNING: Launching training without "
-                            "recording an experiment attempt. Call "
-                            "workspace_experiment(action='add_attempt') with:\n"
-                            "  - change: what changed\n"
-                            "  - output_dir: log directory\n"
-                            "  - hardware: {gpus, gpu_type}\n"
-                            "This helps track debugging history across sessions.",
+                            f"[ExperimentTracking] Launching training without "
+                            "recording an experiment attempt. "
+                            "Record the attempt before launching to track debugging history.",
                             reason="experiment_not_recorded_warn",
                         )
 
@@ -141,10 +130,7 @@ class ExperimentTrackingGuard(Guard):
                 if self._last_experiment_name:
                     return GuardVerdict.inject(
                         f"[ExperimentTracking] Training result observed. "
-                        f"Update the experiment record:\n"
-                        f"  workspace_experiment(action='update_last_attempt', "
-                        f"name='{self._last_experiment_name}', "
-                        f"result='<success/failure + key metrics>')",
+                        f"Update experiment '{self._last_experiment_name}' with the result.",
                         reason="update_experiment_result",
                     )
 

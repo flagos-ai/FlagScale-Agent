@@ -105,19 +105,11 @@ class ExperimentGuard(Guard):
             self._inject_count += 1
             if self._inject_count >= 3:
                 return GuardVerdict.escalate(
-                    "⚠️ EXPERIMENT REQUIRED: Warned {0} times but no experiment created. "
-                    "You MUST call workspace_experiment(action='create', ...) "
-                    "BEFORE launching. STOP and comply.".format(self._inject_count),
+                    "[Experiment] Training launch blocked — create an experiment record first." .format(self._inject_count),
                     reason="experiment_not_created_persistent"
                 )
             return GuardVerdict.block(
-                "⚠️ EXPERIMENT REQUIRED: You are about to launch a training/inference run, "
-                "but no experiment has been created. Call:\n"
-                "  workspace_experiment(action='create', name=..., purpose=..., hypothesis=...)\n"
-                "THEN:\n"
-                "  workspace_experiment(action='add_attempt', name=..., change=..., "
-                "hardware={...}, config={...}, output_dir=...)\n"
-                "BEFORE launching.",
+                "[Experiment] Training launch blocked — create an experiment record and add an attempt before launching.",
                 reason="experiment_not_created"
             )
 
@@ -125,16 +117,11 @@ class ExperimentGuard(Guard):
             self._inject_count += 1
             if self._inject_count >= 3:
                 return GuardVerdict.escalate(
-                    "⚠️ ATTEMPT REQUIRED: Warned {0} times but no attempt added. "
-                    "You MUST call workspace_experiment(action='add_attempt', ...) "
-                    "BEFORE launching. STOP and comply.".format(self._inject_count),
+                    "[Experiment] Training launch blocked — add an experiment attempt first.".format(self._inject_count),
                     reason="attempt_not_added_persistent"
                 )
             return GuardVerdict.block(
-                "⚠️ ATTEMPT REQUIRED: Experiment exists but no attempt has been added. Call:\n"
-                "  workspace_experiment(action='add_attempt', name=..., change=..., "
-                "hardware={...}, config={...}, output_dir=...)\n"
-                "BEFORE launching. This records what you're about to try.",
+                "[Experiment] Training launch blocked — add an experiment attempt before launching.",
                 reason="attempt_not_added"
             )
 
