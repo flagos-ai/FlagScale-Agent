@@ -65,7 +65,8 @@ def tool_display_summary(tool_name: str, arguments: dict) -> str:
     if tool_name == "shell":
         cmd = arguments.get("command", "")
         s = cmd.replace("\n", " ").replace("\r", "").strip()
-        return s[:120] + ("..." if len(s) > 120 else "")
+        # Show full command — most shell commands are short enough to display completely
+        return s
     if tool_name == "read_file":
         path = arguments.get("path", "") or arguments.get("file_path", "")
         summary = _short_path(path)

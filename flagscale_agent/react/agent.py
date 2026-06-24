@@ -334,6 +334,9 @@ class WorkerAgent:
         guard_registry.register(FileToolGuard())
         # Memory discipline guard (always active)
         guard_registry.register(MemoryDisciplineGuard())
+        # Code context guard (always active — tracks reads/writes across compaction)
+        from flagscale_agent.react.guard.code_context import CodeContextGuard
+        guard_registry.register(CodeContextGuard())
 
         deps = KernelDeps(
             provider=self.provider,
