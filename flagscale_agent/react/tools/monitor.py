@@ -31,10 +31,13 @@ class MonitorTool(Tool):
     description = (
         "Watch a file or command output locally WITHOUT calling the LLM. "
         "Use this when you need to wait for training progress, model loading, "
-        "or any long-running process. The tool polls locally and only returns "
+        "or any long-running process. Also supports watching file size growth "
+        "(downloads, copies) via 'watch_size' parameter. "
+        "The tool polls locally and only returns "
         "when: (1) an error/completion pattern is detected, (2) new training "
         "metrics appear, (3) the timeout is reached, (4) the target step is hit, "
-        "or (5) the monitored process has died. "
+        "(5) the monitored process has died, or "
+        "(6) watch_size file reaches target_size / stalls. "
         "IMPORTANT: For FlagScale training, use 'output_dir' to auto-scan all "
         "rank stderr.log files for errors — this catches crashes that don't "
         "appear in stdout. "
@@ -91,6 +94,23 @@ class MonitorTool(Tool):
                     "Default: auto-detect from 'torchrun|python.*train|flagscale'."
                 ),
             },
+            "watch_size": {
+                "type": "string",
+                "description": (
+                    "Path to a file whose size to monitor (e.g., a downloading file). "
+                    "Polls file size at each interval, reports progress. "
+                    "Returns when target_size is reached, file stops growing (stall), "
+                    "or timeout. Use with 'target_size' for downloads."
+                ),
+            },
+            "target_size": {
+                "type": "integer",
+                "description": (
+                    "Target file size in bytes. Monitor returns success when "
+                    "watch_size file reaches this size. If omitted, monitors "
+                    "until timeout or stall."
+                ),
+            },
         },
         "required": [],
     }
@@ -144,6 +164,17 @@ class MonitorTool(Tool):
         return False
 
     def execute(self, **kwargs) -> str:
+        # ── Watch file size mode (for downloads, large copies, etc.) ──
+        watch_size_path = kwargs.get("watch_size", "")
+        if watch_size_path:
+            return self._watch_file_size(
+                watch_size_path,
+                target_size=kwargs.get("target_size"),
+                duration=min(kwargs.get("duration", 600), 1800),
+                interval=max(kwargs.get("interval", 30), 5),
+                process_pattern=kwargs.get("process_pattern", ""),
+            )
+
         file_path = kwargs.get("file", "")
         command = kwargs.get("command", "")
         output_dir = kwargs.get("output_dir", "")
@@ -341,6 +372,19 @@ class MonitorTool(Tool):
                     events, self._tail_lines(current, 20), current
                 )
 
+            # Early return if log stays empty for too long (process alive but silent)
+            # This avoids wasting timeout waiting for processes stuck in import/loading
+            _SILENT_THRESHOLD = 3  # cycles with no output before early return
+            if no_change_cycles >= _SILENT_THRESHOLD and not current.strip():
+                events.append(
+                    f"[process ALIVE but log empty after {int(elapsed)}s, "
+                    f"{no_change_cycles} polls with no output — likely still loading/importing]"
+                )
+                return self._format_result(
+                    "no_output", poll_count, elapsed,
+                    events, ["(log file is empty — process may be in startup phase)"], current
+                )
+
             # Display progress
             if self._display_fn:
                 self._display_fn(poll_count, elapsed, last_line_count)
@@ -352,6 +396,114 @@ class MonitorTool(Tool):
             "timeout", poll_count, time.time() - start,
             events, self._tail_lines(current, 20), current
         )
+
+    def _watch_file_size(self, path, target_size=None, duration=600, interval=30, process_pattern=""):
+        """Monitor a file's size growth. Returns when target reached, stalled, or timeout."""
+        start = time.time()
+        poll_count = 0
+        prev_size = -1
+        stall_count = 0
+        max_stall = 3  # return after 3 consecutive polls with no growth
+        events = []
+
+        # Human-readable size formatter
+        def _human(nbytes):
+            for unit in ("B", "KB", "MB", "GB", "TB"):
+                if abs(nbytes) < 1024:
+                    return f"{nbytes:.1f}{unit}"
+                nbytes /= 1024
+            return f"{nbytes:.1f}PB"
+
+        while True:
+            elapsed = time.time() - start
+            if elapsed >= duration:
+                events.append(f"[timeout after {int(elapsed)}s]")
+                break
+
+            # Check file size
+            try:
+                current_size = os.path.getsize(path)
+            except OSError as e:
+                events.append(f"[file not found or inaccessible: {e}]")
+                break
+
+            poll_count += 1
+            progress_pct = (current_size / target_size * 100) if target_size else 0
+
+            # Early liveness check on first poll — don't waste time if process is already dead
+            if poll_count == 1 and process_pattern:
+                if not self._is_process_alive(process_pattern):
+                    if target_size and current_size >= target_size:
+                        events.append(f"[DONE] File already at target size")
+                        return self._format_watch_result("completed", poll_count, elapsed, events, path)
+                    events.append(f"[DEAD] Process not running, file at {_human(current_size)}")
+                    return self._format_watch_result("process_dead", poll_count, elapsed, events, path)
+
+            # Calculate speed
+            if prev_size >= 0 and current_size > prev_size:
+                speed = (current_size - prev_size) / interval
+                speed_str = f"{_human(speed)}/s"
+                stall_count = 0
+            elif prev_size >= 0 and current_size == prev_size:
+                speed_str = "stalled"
+                stall_count += 1
+            else:
+                speed_str = "measuring..."
+                stall_count = 0
+
+            if target_size:
+                events.append(
+                    f"[poll {poll_count}] {_human(current_size)} / {_human(target_size)} "
+                    f"({progress_pct:.1f}%) — {speed_str}"
+                )
+            else:
+                events.append(f"[poll {poll_count}] {_human(current_size)} — {speed_str}")
+
+            # Success: target reached
+            if target_size and current_size >= target_size:
+                events.append(f"[DONE] Target size reached in {int(elapsed)}s")
+                return self._format_watch_result("completed", poll_count, elapsed, events, path)
+
+            # Stall detection
+            if stall_count >= max_stall:
+                events.append(f"[STALL] File size unchanged for {stall_count} consecutive polls")
+                # Check if associated process is still alive
+                if process_pattern:
+                    if not self._is_process_alive(process_pattern):
+                        events.append("[DEAD] Associated process is no longer running")
+                        return self._format_watch_result("process_dead", poll_count, elapsed, events, path)
+                return self._format_watch_result("stalled", poll_count, elapsed, events, path)
+
+            prev_size = current_size
+            time.sleep(interval)
+
+        return self._format_watch_result("timeout", poll_count, time.time() - start, events, path)
+
+    @staticmethod
+    def _format_watch_result(reason, poll_count, elapsed, events, path):
+        """Format watch_size result."""
+        status_map = {
+            "completed": "✓ Download/copy COMPLETE",
+            "stalled": "⚠ File stopped growing (stalled or failed)",
+            "process_dead": "✖ File stopped growing — process died",
+            "timeout": "⏱ Timeout reached (file still growing)",
+        }
+        header = status_map.get(reason, f"Monitor: {reason}")
+        parts = [f"{header} — {poll_count} polls, {int(elapsed)}s elapsed"]
+        parts.append(f"File: {path}")
+        if events:
+            parts.append("Progress:")
+            # Show first 3 and last 3 events if too many
+            if len(events) > 8:
+                for e in events[:3]:
+                    parts.append(f"  {e}")
+                parts.append(f"  ... ({len(events) - 6} polls omitted)")
+                for e in events[-3:]:
+                    parts.append(f"  {e}")
+            else:
+                for e in events:
+                    parts.append(f"  {e}")
+        return "\n".join(parts)
 
     def _discover_logs(self, output_dir):
         """Discover log files — tries FlagScale structure first, then generic scan."""

@@ -126,7 +126,7 @@ class LoopDetectGuard(Guard):
         self._tool_name_history.append(ctx.tool_name)
 
         if ctx.tool_name == "shell":
-            cmd = ctx.tool_args.get("command", "").lower()
+            cmd = str(ctx.tool_args.get("command", "")).lower()
             self._shell_cmd_history.append(cmd)
             if len(self._shell_cmd_history) > self._RETRY_WINDOW:
                 self._shell_cmd_history = self._shell_cmd_history[-self._RETRY_WINDOW:]
@@ -304,7 +304,7 @@ class LoopDetectGuard(Guard):
         if ctx.tool_name != "shell":
             return None
 
-        cmd = ctx.tool_args.get("command", "").lower()
+        cmd = str(ctx.tool_args.get("command", "")).lower()
         recent = self._shell_cmd_history[-self._RETRY_WINDOW:]
         if len(recent) < 4:
             return None

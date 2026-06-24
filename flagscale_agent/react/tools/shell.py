@@ -438,6 +438,8 @@ class ShellTool(Tool):
 
     def execute(self, **kwargs) -> str:
         command = kwargs["command"]
+        if not isinstance(command, str):
+            return f"ERROR: shell command must be a string, got {type(command).__name__}: {repr(command)[:200]}"
         skip_confirm = kwargs.pop("_skip_confirm", False)
         parallel_index = kwargs.pop("_parallel_index", None)
         quiet = skip_confirm  # suppress dots/progress in parallel mode
