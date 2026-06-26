@@ -56,7 +56,8 @@ class ExperimentTrackingGuard(Guard):
         # Track workspace_experiment in pre-check too (handles same-batch scenarios)
         if ctx.tool_name == "workspace_experiment":
             action = ctx.tool_args.get("action", "")
-            if action == "add_attempt":
+            if action in ("add_attempt", "read", "update_last_attempt"):
+                # Reading or updating an experiment counts as awareness
                 self._attempt_recorded = True
                 self._unrecorded_launches = 0
                 name = ctx.tool_args.get("name", "")
@@ -75,20 +76,23 @@ class ExperimentTrackingGuard(Guard):
                     self._unrecorded_launches += 1
                     
                     if self._unrecorded_launches >= 3:
-                        # Escalate after 3 unrecorded launches
-                        return GuardVerdict.block(
-                            f"[ExperimentTracking] BLOCKED: {self._unrecorded_launches} "
-                            "training launches without experiment recording. "
-                            "Record an experiment attempt before launching training.",
+                        # Escalate after 3 unrecorded launches — but inject, don't block
+                        # The agent may have recorded the attempt in a previous session
+                        return GuardVerdict.inject(
+                            f"[ExperimentTracking] {self._unrecorded_launches} "
+                            "training launches without experiment recording in this session. "
+                            "Consider recording an experiment attempt.",
                             reason="experiment_not_recorded",
+                            category="experiment_tracking",
                         )
                     else:
                         # Warn for first 2 unrecorded launches
                         return GuardVerdict.inject(
-                            f"[ExperimentTracking] Launching training without "
+                            "[ExperimentTracking] Launching training without "
                             "recording an experiment attempt. "
                             "Record the attempt before launching to track debugging history.",
                             reason="experiment_not_recorded_warn",
+                            category="experiment_tracking",
                         )
 
         return None
@@ -102,6 +106,7 @@ class ExperimentTrackingGuard(Guard):
             if action == "add_attempt":
                 self._attempt_recorded = True
                 self._unrecorded_launches = 0
+                self._warn_count = 0
                 name = ctx.tool_args.get("name", "")
                 if name:
                     self._last_experiment_name = name
@@ -117,8 +122,12 @@ class ExperimentTrackingGuard(Guard):
             cmd = ctx.tool_args.get("command", "")
             if _LAUNCH_RE.search(cmd):
                 self._training_launched = True
-                # Reset for next launch
-                self._attempt_recorded = False
+                # Only reset attempt_recorded after a SUCCESSFUL launch,
+                # so the next launch requires a new add_attempt.
+                # But don't increment _unrecorded_launches here — that's
+                # handled in check_pre if _attempt_recorded is False.
+                if self._attempt_recorded:
+                    self._attempt_recorded = False
 
         # Track training result (from monitor)
         if self._training_launched and ctx.tool_name in ("monitor", "find_latest_log", "parse_training_metrics"):
@@ -137,5 +146,10 @@ class ExperimentTrackingGuard(Guard):
         return None
 
     def reset_turn(self):
-        """Tracking persists across turns."""
-        pass
+        """Reset escalation counters to prevent dead loops across turns.
+        
+        Knowledge state persists (_last_experiment_name, _result_pending),
+        but block counters reset to prevent permanent blocking.
+        """
+        self._unrecorded_launches = 0
+        self._warn_count = 0

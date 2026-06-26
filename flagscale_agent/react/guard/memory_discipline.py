@@ -72,6 +72,9 @@ class MemoryDisciplineGuard(Guard):
 
         if ctx.tool_name == "memory_list":
             self._memory_list_done = True
+        elif ctx.tool_name == "memory_read":
+            # memory_read also counts as having checked memory
+            self._memory_list_done = True
         elif ctx.tool_name == "plan_status":
             self._plan_status_done = True
         elif ctx.tool_name == "memory_write":
@@ -92,16 +95,16 @@ class MemoryDisciplineGuard(Guard):
                     )
 
         # Before experiment: check memory if haven't yet
+        # Only trigger for actual training launch commands, not any shell with "train" in path
         if ctx.tool_name == "shell" and not self._memory_list_done:
             cmd = ctx.tool_args.get("command", "")
-            if any(k in cmd for k in ["python", "torchrun", "train", "timeout"]):
+            # More specific patterns: actual launch commands, not file paths containing "train"
+            launch_indicators = ["torchrun", "flagscale train", "python.*train.py", "run.py"]
+            if any(k in cmd for k in launch_indicators):
+                if self._read_reminders >= 3:
+                    # After 3 reminders, just let it go — don't block forever
+                    return None
                 self._read_reminders += 1
-                if self._read_reminders >= 4:
-                    # Escalate: block after repeated ignoring
-                    return GuardVerdict.block(
-                        "[MemoryDiscipline] BLOCKED: Check memory before running experiments.",
-                        reason="pre_experiment_block",
-                    )
                 return GuardVerdict.inject(
                     "[MemoryDiscipline] About to run experiment without checking memory. "
                     "Check for prior attempts/failures before proceeding.",
