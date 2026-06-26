@@ -14,15 +14,17 @@ import re
 from flagscale_agent.react.guard import Guard, GuardContext, GuardVerdict
 
 
-# Same launch patterns as TrainingAttemptGuard
+# Detect actual training launches (not just any command mentioning train.py).
+# A real launch is: running a training script as the main entry point, not
+# grep/find/cat/import-checking it.
 _LAUNCH_RE = re.compile(
-    r"\brun\.py\b.*\baction\s*=\s*run\b"
-    r"|\brun\.py\b.*--config"
-    r"|\bconda\s+run\b.*\brun\.py\b"
-    r"|\btorchrun\b"
-    r"|\bflagscale\s+train\b"
-    r"|\btrain\.py\b"
-    r"|\bpretrain\.py\b",
+    r"\brun\.py\b.*\baction\s*=\s*run\b"        # flagscale CLI launch
+    r"|\brun\.py\b.*--config"                    # flagscale CLI with config
+    r"|\bconda\s+run\b.*\brun\.py\b"            # conda wrapper launch
+    r"|\btorchrun\s+"                            # torchrun (with args, not just the word)
+    r"|\bflagscale\s+train\b"                   # flagscale train subcommand
+    r"|\bpython[23]?\s+.*(?:train|pretrain)\.py\b"  # python train.py / python pretrain.py
+    ,
     re.IGNORECASE,
 )
 
@@ -48,8 +50,6 @@ class ExperimentTrackingGuard(Guard):
         self._last_experiment_name = ""
         # Whether agent just launched training
         self._training_launched = False
-        # Count how many times we've warned about missing recording
-        self._warn_count = 0
 
     def check_pre(self, ctx: GuardContext) -> GuardVerdict | None:
         """Block training launch if no attempt recorded."""
@@ -106,7 +106,6 @@ class ExperimentTrackingGuard(Guard):
             if action == "add_attempt":
                 self._attempt_recorded = True
                 self._unrecorded_launches = 0
-                self._warn_count = 0
                 name = ctx.tool_args.get("name", "")
                 if name:
                     self._last_experiment_name = name
@@ -122,18 +121,13 @@ class ExperimentTrackingGuard(Guard):
             cmd = ctx.tool_args.get("command", "")
             if _LAUNCH_RE.search(cmd):
                 self._training_launched = True
-                # Only reset attempt_recorded after a SUCCESSFUL launch,
-                # so the next launch requires a new add_attempt.
-                # But don't increment _unrecorded_launches here — that's
-                # handled in check_pre if _attempt_recorded is False.
-                if self._attempt_recorded:
-                    self._attempt_recorded = False
 
         # Track training result (from monitor)
         if self._training_launched and ctx.tool_name in ("monitor", "find_latest_log", "parse_training_metrics"):
             if ctx.tool_result:
                 self._training_launched = False
                 self._result_pending = True
+                self._attempt_recorded = False  # Full cycle complete, reset for next launch
                 
                 # Remind to update experiment
                 if self._last_experiment_name:
@@ -152,4 +146,3 @@ class ExperimentTrackingGuard(Guard):
         but block counters reset to prevent permanent blocking.
         """
         self._unrecorded_launches = 0
-        self._warn_count = 0
