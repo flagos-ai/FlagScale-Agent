@@ -135,7 +135,8 @@ constraints:
     rather than a local source build (pip install --no-build-isolation . inside a cloned TransformerEngine-FL directory)?
     Only local source builds are allowed."
   correction: "Build from source: git clone --recursive https://github.com/flagos-ai/TransformerEngine-FL.git && cd TransformerEngine-FL &&
-    NVTE_FRAMEWORK=pytorch pip install --no-build-isolation . Pre-built whls are NOT acceptable."
+    NVTE_FRAMEWORK=pytorch pip install --no-build-isolation . Pre-built whls are NOT acceptable.
+    On non-NVIDIA accelerator platforms, prepend TE_FL_SKIP_CUDA=1 to the build command."
 - id: train_env_setup_pytorch_must_match_driver
   description: PyTorch CUDA tag should match the driver's max supported CUDA to avoid source-build mismatches. While torch+cu128 CAN run on driver 535 (forward compat), it causes problems when source-building Apex/TE/Flash-Attn because system nvcc (12.4) mismatches torch.version.cuda (12.8).
   trigger:
@@ -184,7 +185,7 @@ constraints:
     MUST be built from source — pre-built whls may not match the system CUDA."
   correction: "Do NOT install FL dependencies from pre-built whls or PyPI. Build from source instead:
     Megatron-LM-FL: git clone + pip install --no-build-isolation .
-    TransformerEngine-FL: git clone --recursive + NVTE_FRAMEWORK=pytorch pip install --no-build-isolation .
+    TransformerEngine-FL: git clone --recursive + NVTE_FRAMEWORK=pytorch pip install --no-build-isolation . (on non-NVIDIA platforms, add TE_FL_SKIP_CUDA=1)
     Apex: git clone + APEX_CUDA_EXT=1 pip install --no-build-isolation .
     Flash-Attention: git clone + pip install --no-build-isolation --no-deps ."
 - id: train_env_setup_cuda_version_check
@@ -325,14 +326,26 @@ Collect ALL version constraints before installing anything. Do NOT look at exist
 
 ### 1a. Hardware constraint — driver → max CUDA
 
+First, detect the accelerator type:
+
 ```bash
+# Try NVIDIA first
 nvidia-smi --query-gpu=driver_version,name,compute_cap,memory.total --format=csv,noheader | head -1 && echo "GPU_COUNT=$(nvidia-smi -L | wc -l)"
 nvcc --version 2>/dev/null || echo "nvcc not found"
+
+# If nvidia-smi fails, detect non-NVIDIA accelerators
+# Huawei Ascend NPU:
+npu-smi info 2>/dev/null || true
+# Other vendors: add detection commands as needed
 ```
+
+**Hardware type determination:**
+- If `nvidia-smi` succeeds → **NVIDIA GPU platform**. Follow the standard CUDA-based flow below.
+- If `nvidia-smi` fails but a non-NVIDIA accelerator is detected (e.g., `npu-smi info` succeeds) → **Non-NVIDIA accelerator platform**. Mark `IS_NON_NVIDIA=true`. The rest of the installation follows the same steps as NVIDIA, with one exception: TransformerEngine-FL must be built with `TE_FL_SKIP_CUDA=1` (see Step 4b).
 
 The `GPU_COUNT=` line gives the exact GPU count. Use that number in all subsequent references — never count nvidia-smi output lines manually.
 
-Driver → max CUDA version (for PyTorch wheel selection):
+Driver → max CUDA version (for PyTorch wheel selection, NVIDIA platforms only):
 - Driver 570.x → CUDA ≤ 12.8 → wheels: cu118, cu121, cu124, cu126, cu128
 - Driver 560.x → CUDA ≤ 12.6 → wheels: cu118, cu121, cu124, cu126
 - Driver 550.x → CUDA ≤ 12.4 → wheels: cu118, cu121, cu124
@@ -404,7 +417,7 @@ FlagScale requires four FL-customized / special packages. ALL four are MANDATORY
 
 For each, analyze:
 - **Megatron-LM-FL**: MUST build from source. Clone from GitHub and build with `pip install --no-build-isolation .`. Never use pre-built whls from FlagScale PyPI — they may not match the system CUDA.
-- **TransformerEngine-FL**: MUST build from source. Requires `--recursive` clone for submodules. Build with `NVTE_FRAMEWORK=pytorch pip install --no-build-isolation .`
+- **TransformerEngine-FL**: MUST build from source. Requires `--recursive` clone for submodules. Build with `NVTE_FRAMEWORK=pytorch pip install --no-build-isolation .`. On non-NVIDIA accelerator platforms, prepend `TE_FL_SKIP_CUDA=1` to skip CUDA kernel compilation.
 - **Apex**: MUST build from source. Must compile with `APEX_CUDA_EXT=1` matching PyTorch's CUDA version. Check that the nvcc toolkit version matches torch.version.cuda (not just driver CUDA version).
 - **Flash-Attention**: MUST build from source. The version must match the installed PyTorch version. Use `--no-deps` to prevent pip from upgrading PyTorch. Check: GPU compute capability ≥ 8.0 required for flash-attn v2.x.
 
@@ -459,7 +472,7 @@ FlagScale requirements:
 | 2 | PyTorch | torch==X.Y.Z+cuXXX | pip (whl) | EXACT version from PyPI query; cuXXX matches driver's max CUDA; --extra-index-url https://download.pytorch.org/whl/cuXXX |
 | 3 | FlagScale | editable | pip -e ".[cuda-train]" | from project root, --no-deps |
 | 4 | Megatron-LM-FL | latest | SOURCE BUILD | git clone + pip install --no-build-isolation . |
-| 5 | TransformerEngine-FL | latest | SOURCE BUILD | git clone --recursive + NVTE_FRAMEWORK=pytorch pip install --no-build-isolation . |
+| 5 | TransformerEngine-FL | latest | SOURCE BUILD | git clone --recursive + NVTE_FRAMEWORK=pytorch pip install --no-build-isolation . (add `TE_FL_SKIP_CUDA=1` on non-NVIDIA platforms) |
 | 6 | Apex | master | SOURCE BUILD | git clone NVIDIA/apex + APEX_CUDA_EXT=1 |
 | 7 | Flash-Attention | fa_ver | SOURCE BUILD | --no-deps --no-build-isolation to protect PyTorch |
 ```
@@ -473,7 +486,7 @@ CRITICAL CHECKLIST before proceeding:
 - [ ] CUDA toolkit version matches PyTorch's CUDA (not driver's)
 - [ ] GPU compute capability ≥ required by flash-attn
 - [ ] Megatron-LM-FL will be built from source (NO whl, NO PyPI)
-- [ ] TransformerEngine-FL will be built from source (NO whl, NO PyPI)
+- [ ] TransformerEngine-FL will be built from source (NO whl, NO PyPI); on non-NVIDIA platforms, uses `TE_FL_SKIP_CUDA=1`
 - [ ] Apex build flags include APEX_CUDA_EXT=1
 - [ ] Flash-attn install uses --no-deps
 
@@ -601,12 +614,22 @@ python -c "from megatron.plugin.platform import get_platform; print('OK:', get_p
 
 **Always build from source** — pre-built whls are NOT acceptable regardless of source.
 
+**For NVIDIA GPU platforms:**
 ```bash
 pip install nvidia-mathdx --extra-index-url https://pypi.nvidia.com
 git clone --recursive https://github.com/flagos-ai/TransformerEngine-FL.git {deps_dir}/TransformerEngine-FL
 cd {deps_dir}/TransformerEngine-FL
 NVTE_FRAMEWORK=pytorch pip install --no-build-isolation . -v
 ```
+
+**For non-NVIDIA accelerator platforms (e.g., Huawei Ascend NPU):**
+```bash
+git clone --recursive https://github.com/flagos-ai/TransformerEngine-FL.git {deps_dir}/TransformerEngine-FL
+cd {deps_dir}/TransformerEngine-FL
+TE_FL_SKIP_CUDA=1 NVTE_FRAMEWORK=pytorch pip install --no-build-isolation . -v
+```
+
+The `TE_FL_SKIP_CUDA=1` flag tells the build system to skip CUDA-specific compilation (cuDNN, cuBLAS kernels, etc.) that would fail on non-NVIDIA hardware. The Python-level TE interfaces remain available for the vendor's backend to hook into.
 
 Note: Source build takes 10-30 minutes. Do NOT interrupt or ask for confirmation during compilation — just wait for it to finish.
 

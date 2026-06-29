@@ -269,7 +269,7 @@ class SharedState:
         self._override_log.append({
             "guard": guard_name,
             "reason": reason,
-            "turn": self.read_stats.total_reads + self.read_stats._productive_count,
+            "turn": self.read_stats.total_reads_session,
         })
 
     @property

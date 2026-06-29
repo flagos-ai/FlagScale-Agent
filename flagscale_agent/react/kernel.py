@@ -264,7 +264,9 @@ class AgentKernel:
                 d.append_tool_results_fn(tool_results)
 
                 # Apply post-guard verdicts AFTER tool results are appended,
-                # so inject messages don't break tool_call → tool_result pairing
+                # so inject messages don't break tool_call → tool_result pairing.
+                # v3: Inject messages are applied normally but with ADVISORY prefix
+                # (set in _inject_message) + max_inject_repeats prevents flooding.
                 for verdict in post_verdicts:
                     self._apply_verdict(verdict, pre=False)
 
@@ -320,6 +322,15 @@ class AgentKernel:
         if tool_args and "_override_reason" in tool_args:
             override_reason = tool_args["_override_reason"]
             tool_args = {k: v for k, v in tool_args.items() if k != "_override_reason"}
+        # v3: Extract _dismiss_guard (LLM explicitly dismisses a guard's inject)
+        if tool_args and "_dismiss_guard" in tool_args:
+            dismiss_name = tool_args["_dismiss_guard"]
+            tool_args = {k: v for k, v in tool_args.items() if k != "_dismiss_guard"}
+            for guard in d.guard_registry.guards:
+                if guard.name == dismiss_name:
+                    guard.dismiss_inject()
+                    display.guard_inject(f"[{dismiss_name}] dismissed by LLM")
+                    break
         # Get last assistant text for guards that need to scan LLM responses
         assistant_text = self._get_last_assistant_text()
         return GuardContext(
@@ -341,13 +352,16 @@ class AgentKernel:
         d = self.deps
         if verdict.action == "block":
             d.inject_message_fn(verdict.message)
+            display.guard_block(verdict.message)
             return True
         elif verdict.action == "inject_msg":
             d.inject_message_fn(verdict.message)
+            display.guard_inject(verdict.message)
         elif verdict.action == "force_compact":
             d.history.force_compact()
         elif verdict.action == "escalate":
             d.inject_message_fn(verdict.message)
+            display.guard_block(verdict.message)
             self.fsm.transition(AgentState.REVIEWING, reason=verdict.reason)
         return False
 
