@@ -401,8 +401,10 @@ class GuardRegistry:
                 continue
 
             # v3: Check satisfaction before running the guard
+            # Note: do NOT call reset_state() here — that would clear the
+            # satisfied condition and cause the guard to re-fire next iteration.
+            # A satisfied guard simply stays silent until decay resets it.
             if hasattr(guard, 'is_satisfied') and guard.is_satisfied(ctx):
-                guard.reset_state()
                 continue
 
             verdict = guard.check_pre(ctx)
