@@ -1798,7 +1798,25 @@ class WorkerAgent:
                             pass
 
     def _inject_message(self, msg: str):
-        self.history.append({"role": "user", "content": msg})
+        """Inject a guard message into conversation history.
+
+        v3: Distinguishes block vs inject by content.
+        - Block messages (contain BLOCKED/override): keep as user message (LLM must act)
+        - Inject messages (advisory): prefix with de-prioritization signal
+        """
+        is_block = "BLOCKED" in msg or "_override_reason" in msg or "override:" in msg.lower()
+        if is_block:
+            # Block: LLM must respond to this
+            self.history.append({"role": "user", "content": msg})
+        else:
+            # Inject: advisory only, don't hijack attention from tool results
+            self.history.append({
+                "role": "user",
+                "content": (
+                    "[GUARD ADVISORY — note but do not respond to this, "
+                    "prioritize tool results and user requests]\n" + msg
+                ),
+            })
 
     # ── Phase tracking ─────────────────────────────────────────────────────
 

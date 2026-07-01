@@ -665,6 +665,22 @@ def guard_overridden(guard_name, reason):
     _print(f"     {dim(reason)}")
 
 
+def guard_inject(message):
+    """Display a guard inject message to the terminal (visible to user)."""
+    # Show inject messages with a distinct prefix so user can see guard activity
+    for line in message.strip().split('\n'):
+        if line.strip():
+            _print(f"  {dim('🛡')} {dim(line.strip())}")
+
+
+def guard_block(message):
+    """Display a guard block message to the terminal (visible to user)."""
+    # Show block messages prominently
+    for line in message.strip().split('\n'):
+        if line.strip():
+            _print(f"  {red('🚫')} {line.strip()}")
+
+
 def turn_summary(turn_num, elapsed, input_tokens, output_tokens):
     _stop_all_spinners()
     _print()

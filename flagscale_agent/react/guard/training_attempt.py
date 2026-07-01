@@ -344,6 +344,12 @@ class TrainingAttemptGuard(Guard):
         """Attempt state persists across turns (session-level)."""
         pass
 
+    def reset_state(self):
+        """v3: Full state reset — called on decay or override acceptance."""
+        super().reset_state()
+        self._attempts.clear()
+        self._current_hypothesis = ""
+
     @property
     def attempt_count(self) -> int:
         return len(self._attempts)
