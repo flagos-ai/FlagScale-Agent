@@ -201,7 +201,9 @@ class TestGuardRegistry:
         verdict = reg.check_pre(ctx)
         assert verdict.action == "block"
         # Inject message prepended to block message for full context
-        assert verdict.message == "injected by g2\n\nblocked by g1"
+        # v3: override hint is appended since guards are overridable by default
+        assert "injected by g2" in verdict.message
+        assert "blocked by g1" in verdict.message
 
     def test_check_pre_block_only_no_inject(self):
         """Block verdict alone — no inject merging."""
@@ -215,7 +217,8 @@ class TestGuardRegistry:
         ctx = GuardContext(current_state=AgentState.EXECUTING)
         verdict = reg.check_pre(ctx)
         assert verdict.action == "block"
-        assert verdict.message == "blocked"
+        # v3: override hint appended since overridable=True by default
+        assert "blocked" in verdict.message
 
     def test_check_pre_returns_none_when_all_allow(self):
         reg = GuardRegistry()

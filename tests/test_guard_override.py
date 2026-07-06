@@ -170,19 +170,38 @@ class TestResetTurnPreventsDeadLoop:
     """reset_turn clears escalation state to prevent stale blocks."""
 
     def test_memory_discipline_reset(self):
+        """reset_turn only clears ephemeral per-turn state, NOT escalation counters.
+        v3: Escalation counters persist across iterations to prevent re-firing."""
         g = MemoryDisciplineGuard()
         g._read_reminders = 10
         g._write_reminders = 5
         g._shells_since_write = 20
         g._pending_discoveries.append("error found")
         g.reset_turn()
+        # v3: counters are NOT reset by reset_turn (prevents infinite re-fire)
+        assert g._read_reminders == 10
+        assert g._write_reminders == 5
+        assert g._shells_since_write == 20
+        # Only ephemeral state is cleared
+        assert len(g._pending_discoveries) == 0
+
+    def test_memory_discipline_reset_state(self):
+        """reset_state (full reset via decay/override) clears everything."""
+        g = MemoryDisciplineGuard()
+        g._read_reminders = 10
+        g._write_reminders = 5
+        g._shells_since_write = 20
+        g._pending_discoveries.append("error found")
+        g._memory_list_done = True
+        g.reset_state()
         assert g._read_reminders == 0
         assert g._write_reminders == 0
         assert g._shells_since_write == 0
         assert len(g._pending_discoveries) == 0
+        assert g._memory_list_done == False
 
     def test_memory_discipline_preserves_knowledge(self):
-        """reset_turn keeps knowledge state (list/plan done) but clears counters."""
+        """reset_turn keeps knowledge state AND escalation counters (v3)."""
         g = MemoryDisciplineGuard()
         g._memory_list_done = True
         g._plan_status_done = True
@@ -190,7 +209,8 @@ class TestResetTurnPreventsDeadLoop:
         g.reset_turn()
         assert g._memory_list_done is True
         assert g._plan_status_done is True
-        assert g._read_reminders == 0
+        # v3: counters persist across reset_turn to prevent infinite re-firing
+        assert g._read_reminders == 5
 
     def test_comprehension_gate_reset(self):
         g = ComprehensionGateGuard()

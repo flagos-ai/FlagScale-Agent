@@ -94,7 +94,15 @@ class GuardVerdict:
 
 
 class Guard(abc.ABC):
-    """Base class for all guards."""
+    """Base class for all guards.
+
+    Lifecycle:
+    - Guards accumulate state over time (across iterations/turns).
+    - Guards that block/inject must define when they are SATISFIED (concern resolved).
+    - Guards must support DECAY: if N iterations pass without re-triggering, state resets.
+    - All guards are overridable by default (LLM can bypass with a reason).
+    - Inject messages have a MAX_INJECT_REPEATS cooldown to avoid context pollution.
+    """
 
     name: str = "unnamed"
     priority: int = 50  # lower = higher priority
@@ -104,16 +112,79 @@ class Guard(abc.ABC):
     # Override mechanism: if True, LLM can bypass this guard's block by providing
     # a reason in tool_args["_override_reason"]. The guard's accept_override()
     # method decides whether the reason is sufficient.
-    overridable: bool = False
+    # v3: Default changed to True — all guards should be overridable to prevent
+    # death spirals. Guards can set to False only for safety-critical blocks.
+    overridable: bool = True
+
+    # v3: Inject cooldown — max times the same inject message category fires
+    # before going silent. Prevents context pollution from repetitive warnings.
+    max_inject_repeats: int = 3
+
+    # v3: Decay window — if this many iterations pass without the guard
+    # re-triggering (returning a non-None verdict), persistent state is reset.
+    # Set to 0 to disable decay (state persists indefinitely).
+    decay_after_idle: int = 10
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        # v3: Patch subclass __init__ to ensure lifecycle attrs exist even if
+        # subclass doesn't call super().__init__()
+        original_init = cls.__dict__.get('__init__')
+        if original_init:
+            def patched_init(self, *args, _original=original_init, **kw):
+                # Ensure lifecycle attrs exist BEFORE subclass init
+                if not hasattr(self, '_inject_counts'):
+                    self._inject_counts = {}
+                    self._iterations_since_trigger = 0
+                    self._is_suppressed = False
+                _original(self, *args, **kw)
+                # Also ensure they exist AFTER (in case subclass clobbers)
+                if not hasattr(self, '_inject_counts'):
+                    self._inject_counts = {}
+                    self._iterations_since_trigger = 0
+                    self._is_suppressed = False
+            cls.__init__ = patched_init
+
+    def __init__(self):
+        # v3: Lifecycle tracking (managed by GuardRegistry)
+        self._inject_counts: dict[str, int] = {}  # category -> times fired
+        self._iterations_since_trigger: int = 0
+        self._is_suppressed: bool = False  # True = guard went silent after cooldown
 
     def should_activate(self, ctx: GuardContext) -> bool:
         """Check if this guard should run for the current context."""
+        # v3: Suppressed guards skip entirely until reset
+        if self._is_suppressed:
+            return False
         # Empty activate_on_states means "all states" (no filter)
         if self.activate_on_states and ctx.current_state not in self.activate_on_states:
             return False
         if self.activate_on_tools and ctx.tool_name not in self.activate_on_tools:
             return False
         return True
+
+    def is_satisfied(self, ctx: GuardContext) -> bool:
+        """Return True if the guard's concern has been addressed.
+
+        When satisfied, the guard resets its persistent state and stops firing.
+        Subclasses SHOULD override this to define their satisfaction condition.
+        Default: never satisfied (backward compat).
+        """
+        return False
+
+    def reset_state(self):
+        """Reset all persistent state to initial values.
+
+        Called when:
+        - is_satisfied() returns True
+        - Decay window expires (no re-triggers for N iterations)
+        - LLM successfully overrides the guard
+
+        Subclasses MUST override this to reset their specific state.
+        """
+        self._inject_counts.clear()
+        self._iterations_since_trigger = 0
+        self._is_suppressed = False
 
     def check_pre(self, ctx: GuardContext) -> GuardVerdict | None:
         """Pre-execution check. Return block/inject to prevent or warn."""
@@ -132,8 +203,14 @@ class Guard(abc.ABC):
 
         Only called when overridable=True and the guard returned a block verdict.
         Default: accept any non-empty reason. Override for stricter validation.
+
+        v3: When override is accepted, guard state is reset to prevent re-blocking
+        on the same concern.
         """
-        return bool(reason and reason.strip())
+        accepted = bool(reason and reason.strip())
+        if accepted:
+            self.reset_state()
+        return accepted
 
     def notify_blocked(self, ctx: GuardContext):
         """Called when a tool call was blocked externally (e.g., by another guard)."""
@@ -157,6 +234,69 @@ class Guard(abc.ABC):
     def set_shared_state(self, shared_state):
         """Optional: receive SharedState from GuardRegistry. Override to use."""
         pass
+
+    # --- v3: Lifecycle helpers (called by GuardRegistry) ---
+
+    def _record_trigger(self, category: str = ""):
+        """Record that this guard fired (returned non-None verdict)."""
+        self._iterations_since_trigger = 0
+        if category:
+            self._inject_counts[category] = self._inject_counts.get(category, 0) + 1
+
+    def _should_suppress_inject(self, category: str = "") -> bool:
+        """Check if this inject category has exceeded its repeat limit."""
+        if not category or self.max_inject_repeats <= 0:
+            return False
+        count = self._inject_counts.get(category, 0)
+        return count >= self.max_inject_repeats
+
+    def _tick_idle(self):
+        """Called each iteration when guard did NOT fire. Manages decay."""
+        self._iterations_since_trigger += 1
+        if self.decay_after_idle > 0 and self._iterations_since_trigger >= self.decay_after_idle:
+            self.reset_state()
+
+    def dismiss_inject(self, category: str = ""):
+        """Dismiss a specific inject category — it will no longer fire.
+
+        Called when the LLM explicitly acknowledges/dismisses a guard's inject.
+        The guard's inject for this category is permanently suppressed until
+        reset_state() is called (via decay or override).
+        """
+        if category:
+            # Set count to max+1 to ensure suppression
+            self._inject_counts[category] = self.max_inject_repeats + 100
+        else:
+            # Dismiss ALL categories for this guard
+            self._is_suppressed = True
+
+    def check_dismiss_from_text(self, assistant_text: str) -> bool:
+        """Check if LLM's response dismisses this guard's injects.
+
+        Override in subclasses for guard-specific dismiss patterns.
+        Base implementation checks for generic dismiss signals referencing
+        this guard's name.
+
+        Returns True if dismissed.
+        """
+        if not assistant_text:
+            return False
+        text_lower = assistant_text.lower()
+        guard_name_lower = self.name.lower().replace("_", " ")
+
+        # Generic dismiss patterns
+        dismiss_signals = [
+            f"dismiss {guard_name_lower}",
+            f"ignore {guard_name_lower}",
+            f"suppress {guard_name_lower}",
+            f"stop {guard_name_lower}",
+            f"{guard_name_lower} not needed",
+            f"no need for {guard_name_lower}",
+        ]
+        if any(sig in text_lower for sig in dismiss_signals):
+            self.dismiss_inject()
+            return True
+        return False
 
 
 # Semantic categories for inject deduplication
@@ -242,13 +382,37 @@ class GuardRegistry:
         first_hard_verdict = None
         first_hard_guard = None
         first_reason = ""
+        fired_guards: set[str] = set()
+
+        # v3: Scan assistant text for dismiss signals BEFORE running guards
+        assistant_text = getattr(ctx, 'assistant_text', "") or ""
+        if assistant_text:
+            for guard in self._guards:
+                if guard._is_suppressed:
+                    continue
+                guard.check_dismiss_from_text(assistant_text)
 
         for guard in self._guards:
             if not guard.should_activate(ctx):
                 continue
+
+            # v3: Skip if guard is fully suppressed (dismissed)
+            if guard._is_suppressed:
+                continue
+
+            # v3: Check satisfaction before running the guard
+            # Note: do NOT call reset_state() here — that would clear the
+            # satisfied condition and cause the guard to re-fire next iteration.
+            # A satisfied guard simply stays silent until decay resets it.
+            if hasattr(guard, 'is_satisfied') and guard.is_satisfied(ctx):
+                continue
+
             verdict = guard.check_pre(ctx)
             if verdict is None:
                 continue
+
+            # v3: Track which guards fired
+            fired_guards.add(guard.name)
 
             if verdict.action in ("block", "escalate", "force_compact", "redirect"):
                 # Override mechanism: if guard is overridable and LLM provided a reason,
@@ -307,6 +471,8 @@ class GuardRegistry:
 
         # If there's a hard verdict, prepend inject messages and add override hint
         if first_hard_verdict:
+            # v3: Still tick lifecycle for idle guards
+            self.tick_guard_lifecycle(fired_guards)
             if inject_messages and first_hard_verdict.message:
                 first_hard_verdict.message = "\n\n".join(inject_messages) + "\n\n" + first_hard_verdict.message
             # Add override hint if the blocking guard is overridable
@@ -317,11 +483,30 @@ class GuardRegistry:
 
         # Merge all inject messages into one verdict (deduplicated)
         if inject_messages:
+            # v3: Tick lifecycle for idle guards
+            self.tick_guard_lifecycle(fired_guards)
+            combined = "\n\n".join(inject_messages)
+            # v3: Add dismiss hint so LLM knows it can stop the inject
+            # Only add hint if any guard has fired more than once (repeated inject)
+            any_repeated = any(
+                sum(g._inject_counts.values()) > 1
+                for g in self._guards
+                if g.name in fired_guards
+            )
+            if any_repeated:
+                combined += (
+                    "\n\n[To dismiss these reminders: include "
+                    "\"_dismiss_guard\": \"<guard_name>\" in your next "
+                    "tool_args, or simply proceed — they will stop after "
+                    "2 repeats automatically.]"
+                )
             return GuardVerdict.inject(
-                "\n\n".join(inject_messages),
+                combined,
                 reason=first_reason or "multi_guard_inject"
             )
 
+        # v3: Tick lifecycle for idle guards (no verdict case)
+        self.tick_guard_lifecycle(fired_guards)
         return None
 
     def check_post(self, ctx: GuardContext) -> GuardVerdict | None:
@@ -423,8 +608,7 @@ class GuardRegistry:
         """Reset per-iteration state for all guards.
 
         Called at the start of each iteration (LLM+tool loop) within a turn.
-        Guards that need to track state across iterations should keep their
-        reset_turn() as pass (default behavior).
+        v3: Satisfaction and decay are handled in tick_guard_lifecycle(), not here.
         """
         self._shared_state.new_iteration()
         for guard in self._guards:
@@ -433,6 +617,18 @@ class GuardRegistry:
 
     # Backward compat alias
     reset_turn = reset_iteration
+
+    def tick_guard_lifecycle(self, fired_guards: set[str]):
+        """v3: Called after each check cycle to manage decay for idle guards.
+
+        Args:
+            fired_guards: set of guard names that returned non-None verdicts this cycle
+        """
+        for guard in self._guards:
+            if guard.name in fired_guards:
+                guard._record_trigger()
+            else:
+                guard._tick_idle()
 
     @property
     def guards(self) -> list[Guard]:
