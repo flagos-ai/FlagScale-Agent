@@ -172,10 +172,43 @@ class AgentKernel:
                             b.get("text", "") for b in response["content"]
                             if isinstance(b, dict) and b.get("type") == "text"
                         )
+
+                    # ── Empty output defense: auto-retry up to 3 times ──
+                    if not assistant_text.strip():
+                        empty_retries = getattr(self, "_empty_output_retries", 0)
+                        if empty_retries < 3:
+                            self._empty_output_retries = empty_retries + 1
+                            d.display.warn(f"Empty LLM output (retry {empty_retries + 1}/3), auto-continuing...")
+                            # Remove the empty assistant message we just appended
+                            msgs = d.history.get_messages()
+                            if msgs and msgs[-1].get("role") == "assistant":
+                                msgs.pop()
+                            # Inject a nudge
+                            d.history.append({"role": "user", "content": "[system: empty response detected, please continue your work]"})
+                            continue
+                        else:
+                            self._empty_output_retries = 0
+                            result.stop_reason = "empty_output_max_retries"
+                            break
+                    else:
+                        self._empty_output_retries = 0
+
                     if "[TASK_COMPLETE]" in assistant_text or "[NEED_USER_INPUT]" in assistant_text:
                         result.stop_reason = "explicit_signal"
                         break
                     if not self._should_auto_continue_plan():
+                        # Defense: if last turn had tool calls (still working) and this turn
+                        # is trivially short (<10 chars), auto-continue instead of stopping
+                        if (len(assistant_text.strip()) < 10 and iteration > 0
+                                and getattr(self, "_last_turn_had_tools", False)):
+                            short_retries = getattr(self, "_short_output_retries", 0)
+                            if short_retries < 2:
+                                self._short_output_retries = short_retries + 1
+                                d.display.warn(f"Short output without tools after active turn, auto-continuing...")
+                                d.history.append({"role": "user", "content": "[system: please continue your work]"})
+                                continue
+                            else:
+                                self._short_output_retries = 0
                         result.stop_reason = "no_tool_calls"
                         break
                     # Plan auto-continue — check token budget first
@@ -273,7 +306,24 @@ class AgentKernel:
                 if d.on_tool_results_fn:
                     d.on_tool_results_fn(tool_calls, results)
 
+                self._last_turn_had_tools = True
                 result.iterations = iteration + 1
+
+                # ── Self-modification detection ──
+                # If any file tool modified flagscale_agent/ source, stop and ask for /reload
+                if self._detect_self_modification(tool_calls):
+                    # Inject a notice to the assistant so it knows to stop
+                    d.history.append({"role": "user", "content": (
+                        "[system: You just modified FlagScale Agent's own source code "
+                        "(flagscale_agent/). These changes require /reload to take effect. "
+                        "STOP here and tell the user to run /reload. Do NOT continue other work.]"
+                    )})
+                    # Do one more LLM call to let it produce the stop message
+                    response, usage = d.stream_fn(d.history.get_messages())
+                    if d.append_response_fn:
+                        d.append_response_fn(response)
+                    result.stop_reason = "self_modification_reload_needed"
+                    break
 
         finally:
             signal.signal(signal.SIGINT, _prev_handler)
@@ -388,6 +438,33 @@ class AgentKernel:
                     display.warn(f"LLM error after compact: {e2}")
                     return None, {}
         return None, {}
+
+    def _detect_self_modification(self, tool_calls: list) -> bool:
+        """Check if any tool call modified flagscale_agent/ source files.
+        
+        Detects write_file/edit_file operations targeting the agent's own code,
+        which require a /reload to take effect.
+        """
+        SELF_PATHS = ("flagscale_agent/", "flagscale_agent\\")
+        FILE_TOOLS = ("write_file", "edit_file")
+        
+        for tc in tool_calls:
+            name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
+            if name not in FILE_TOOLS:
+                continue
+            # Extract path from tool call input
+            inp = tc.get("input", {}) if isinstance(tc, dict) else getattr(tc, "input", {})
+            if isinstance(inp, str):
+                try:
+                    import json
+                    inp = json.loads(inp)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            path = inp.get("path", "") if isinstance(inp, dict) else ""
+            # Check if path touches agent source
+            if any(seg in path for seg in SELF_PATHS):
+                return True
+        return False
 
     def _save_recovery_state(self):
         """Save current progress to plan notes before compaction.
