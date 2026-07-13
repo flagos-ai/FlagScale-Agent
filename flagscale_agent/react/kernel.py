@@ -84,6 +84,7 @@ class AgentKernel:
 
         self._interrupted = False
         self._plan_auto_continue_count = 0  # Reset per turn to avoid poisoning
+        self._empty_response_retries = 0  # Reset empty response retry counter per turn
         self.fsm.transition(AgentState.EXECUTING, reason="new turn")
         d.judge.reset_turn()
 
@@ -175,21 +176,36 @@ class AgentKernel:
                     if "[TASK_COMPLETE]" in assistant_text or "[NEED_USER_INPUT]" in assistant_text:
                         result.stop_reason = "explicit_signal"
                         break
-                    if not self._should_auto_continue_plan():
-                        result.stop_reason = "no_tool_calls"
-                        break
-                    # Plan auto-continue — check token budget first
-                    pressure = d.history.get_context_pressure() if hasattr(d.history, 'get_context_pressure') else 0
-                    if pressure >= 0.85:
-                        result.stop_reason = "context_pressure"
-                        break
-                    self._plan_auto_continue_count += 1
-                    if self._plan_auto_continue_count > 10:
-                        result.stop_reason = "plan_auto_continue_limit"
-                        break
-                    continuation = self._generate_continuation()
-                    d.history.append({"role": "user", "content": continuation})
-                    continue
+                    if self._should_auto_continue_plan():
+                        # Plan auto-continue — check token budget first
+                        pressure = d.history.get_context_pressure() if hasattr(d.history, 'get_context_pressure') else 0
+                        if pressure >= 0.85:
+                            result.stop_reason = "context_pressure"
+                            break
+                        self._plan_auto_continue_count += 1
+                        if self._plan_auto_continue_count > 10:
+                            result.stop_reason = "plan_auto_continue_limit"
+                            break
+                        continuation = self._generate_continuation()
+                        d.history.append({"role": "user", "content": continuation})
+                        continue
+                    # ── Empty response protection ──
+                    # No plan to continue, about to exit. But if the response is
+                    # degenerate (single punctuation, whitespace-only), the LLM
+                    # likely glitched — give it a retry instead of exiting.
+                    _stripped = assistant_text.strip().strip(".,;:!?。，；：！？…—")
+                    if len(_stripped) < 10 and self._empty_response_retries < 2:
+                        self._empty_response_retries += 1
+                        d.inject_message_fn(
+                            "[EMPTY_RESPONSE_RECOVERY] Your last response had no tool calls "
+                            "and no substantive content. Either call a tool to continue working, "
+                            "or provide your full analysis ending with [TASK_COMPLETE] or [NEED_USER_INPUT]."
+                        )
+                        display.warn(f"Empty response detected (retry {self._empty_response_retries}/2), injecting recovery prompt")
+                        continue
+                    self._empty_response_retries = 0
+                    result.stop_reason = "no_tool_calls"
+                    break
 
                 self._plan_auto_continue_count = 0
 
