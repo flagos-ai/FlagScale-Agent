@@ -17,7 +17,7 @@ triggers:
 3. **One patch per failure** — fix, re-test, then move to the next error. Never batch unverified fixes.
 4. **Fix order matters**: imports → class/factory API → signature kwargs → op schemas → model-specific.
 5. **NVIDIA A800 is ground truth** — validate every fix on A800 before declaring done.
-6. **Stream and persist logs** — use `2>&1 | tee /nfs/wlx/tmp/<stage>_<timestamp>.log`.
+6. **Stream and persist logs** — use `2>&1 | tee <log_dir>/<stage>_<timestamp>.log`.
 7. **Squash before PR** — all upgrade commits squashed into one clean commit.
 
 ---
@@ -30,7 +30,7 @@ Run before ANY work. Never skip.
 ssh <host> "docker exec <container> bash -c '
   python3 -c \"import vllm; print(vllm.__version__)\" &&
   python3 -c \"import vllm_fl; print(vllm_fl.__file__)\" &&
-  cat /nfs/wlx/adapt/nvidia-vllm-*/vllm-plugin-FL/pyproject.toml | grep -E \"^version|vllm\" | head -10
+  cat <plugin_root>/pyproject.toml | grep -E \"^version|vllm\" | head -10
 '"
 ```
 
@@ -38,8 +38,8 @@ Record to memory immediately:
 ```
 memory_write('nvidia_vllm_version', 'X.Y.Z')          # installed vllm
 memory_write('nvidia_plugin_version', 'A.B.C')         # plugin version
-memory_write('nvidia_plugin_root', '/nfs/wlx/adapt/nvidia-vllm-X.Y.Z/vllm-plugin-FL')
-memory_write('nvidia_vllm_root', '/nfs/wlx/code/vllm-X.Y.Z')
+memory_write('nvidia_plugin_root', '<plugin_root>')
+memory_write('nvidia_vllm_root', '<vllm_root>')
 ```
 
 ### Detect version gap
@@ -47,7 +47,7 @@ memory_write('nvidia_vllm_root', '/nfs/wlx/code/vllm-X.Y.Z')
 ```bash
 ssh <host> "docker exec <container> bash -c '
   # what vllm version does the plugin declare it supports?
-  grep -r \"vllm\" /nfs/wlx/adapt/nvidia-vllm-*/vllm-plugin-FL/pyproject.toml | grep -i \"requires\|version\"
+  grep -r \"vllm\" <plugin_root>/pyproject.toml | grep -i \"requires\|version\"
   # what is actually installed?
   python3 -c \"import vllm; print(vllm.__version__)\"
 '"
@@ -65,7 +65,7 @@ Before touching any code, enumerate what changed between the old and new vLLM ve
 
 ```bash
 ssh <host> "docker exec <container> grep -r 'from vllm\|import vllm' \
-  /nfs/wlx/adapt/nvidia-vllm-X.Y.Z/vllm-plugin-FL/vllm_fl/ \
+  <plugin_root>/vllm_fl/ \
   --include='*.py' -l"
 ```
 
@@ -73,9 +73,9 @@ ssh <host> "docker exec <container> grep -r 'from vllm\|import vllm' \
 
 ```bash
 ssh <host> "docker exec -e VLLM_PLUGINS=fl -e PYTHONPATH=<plugin_root> <container> \
-  /nfs/wlx/envs/vllm-fl-0.24.0/bin/python -m pytest \
+  python3 -m pytest \
   <plugin_root>/tests/unit_tests/ -x --tb=short \
-  2>&1 | tee /nfs/wlx/tmp/unit_baseline_$(date +%Y%m%d_%H%M%S).log"
+  2>&1 | tee <log_dir>/unit_baseline_$(date +%Y%m%d_%H%M%S).log"
 ```
 
 Collect all `ImportError`, `AttributeError`, `TypeError` from unit tests — these are the API breakages to fix.
@@ -85,7 +85,7 @@ Collect all `ImportError`, `AttributeError`, `TypeError` from unit tests — the
 Write a probe script to find which plugin-declared ops are missing from the installed vLLM:
 
 ```python
-# /nfs/wlx/tmp/check_ops.py
+# <log_dir>/check_ops.py
 import torch, re, sys
 sys.path.insert(0, '<plugin_root>')
 from vllm_fl.ops._C_ops_schemas import SCHEMAS
@@ -128,7 +128,7 @@ If `from vllm.X import Y` fails → check new vllm for where `Y` moved:
 ```bash
 ssh <host> "docker exec <container> python3 -c \"
 import subprocess
-r = subprocess.run(['grep', '-r', 'class Y\|def Y', '/nfs/wlx/code/vllm-X.Y.Z/vllm/'],
+r = subprocess.run(['grep', '-r', 'class Y\|def Y', '<vllm_root>/vllm/'],
     capture_output=True, text=True)
 print(r.stdout[:3000])
 \""
@@ -183,7 +183,7 @@ def _make_input_batch(*args, **kwargs):
 
 ```bash
 ssh <host> "docker exec <container> grep -n 'def use_uniform_kv_cache' \
-  /nfs/wlx/code/vllm-X.Y.Z/vllm/v1/worker/gpu_model_runner.py"
+  <vllm_root>/vllm/v1/worker/gpu_model_runner.py"
 ```
 
 ### 2e. Missing _C_cache_ops (model-specific)
@@ -205,9 +205,9 @@ After all API fixes, run unit tests and establish the new baseline:
 
 ```bash
 ssh <host> "docker exec -e VLLM_PLUGINS=fl -e PYTHONPATH=<plugin_root> <container> \
-  /nfs/wlx/envs/vllm-fl-0.24.0/bin/python -m pytest \
+  python3 -m pytest \
   <plugin_root>/tests/unit_tests/ -v --tb=short \
-  2>&1 | tee /nfs/wlx/tmp/unit_after_fix_$(date +%Y%m%d_%H%M%S).log"
+  2>&1 | tee <log_dir>/unit_after_fix_$(date +%Y%m%d_%H%M%S).log"
 ```
 
 **Acceptable**: pre-existing failures that were also present before the upgrade (document these).
@@ -224,12 +224,12 @@ Test each model in the validation matrix. Run models roughly in order of archite
 ```bash
 ssh <host> "docker exec -d \
   -e CUDA_HOME=/usr/local/cuda \
-  -e PATH=/nfs/wlx/envs/vllm-fl-0.24.0/bin:/usr/local/cuda/bin:/usr/bin:/usr/local/bin \
+  -e PATH=<env_bin>:/usr/local/cuda/bin:/usr/bin:/usr/local/bin \
   -e PYTHONPATH=<plugin_root> \
   -e CC=/usr/bin/gcc \
   -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   -e VLLM_PLUGINS=fl \
-  <container> bash /nfs/wlx/tmp/run_<model>.sh"
+  <container> bash <log_dir>/run_<model>.sh"
 ```
 
 ### Launch pattern (multi-node, e.g. TP=16 across 2 nodes)
@@ -238,8 +238,8 @@ ssh <host> "docker exec -d \
 
 ```bash
 # Launch rank0 and rank1 in the same shell response (not sequentially)
-ssh <host0> "docker exec -d -e ... <container> bash /nfs/wlx/tmp/run_rank0.sh && echo rank0_ok"
-ssh <host1> "docker exec -d -e ... <container> bash /nfs/wlx/tmp/run_rank1.sh && echo rank1_ok"
+ssh <host0> "docker exec -d -e ... <container> bash <log_dir>/run_rank0.sh && echo rank0_ok"
+ssh <host1> "docker exec -d -e ... <container> bash <log_dir>/run_rank1.sh && echo rank1_ok"
 ```
 
 ### Monitor
@@ -247,7 +247,7 @@ ssh <host1> "docker exec -d -e ... <container> bash /nfs/wlx/tmp/run_rank1.sh &&
 After launch, wait 3-5 minutes then check logs:
 
 ```bash
-ssh <host> "tail -20 /nfs/wlx/tmp/<model>_rank0.log"
+ssh <host> "tail -20 <log_dir>/<model>_rank0.log"
 ```
 
 **Success pattern**: `Uvicorn running on` or `Generated text:` or `Application startup complete`
@@ -283,7 +283,7 @@ Build this table as models are tested. Target: all models in the matrix must rea
 FlagGems replaces compute kernels (matmul, attention, elementwise). It does NOT replace `_C_cache_ops`. After offline inference passes, verify FlagGems is actually being used:
 
 ```bash
-ssh <host> "docker exec <container> grep -a 'FlagGems\|flag_gems' /nfs/wlx/tmp/<model>.log | head -5"
+ssh <host> "docker exec <container> grep -a 'FlagGems\|flag_gems' <log_dir>/<model>.log | head -5"
 ```
 
 ### FlagGems-specific issues to watch for
@@ -306,9 +306,9 @@ Test the full serving stack (APIServer + EngineCore + Workers) for at least one 
 ```bash
 ssh <host> "docker exec -d -e VLLM_PLUGINS=fl -e PYTHONPATH=<plugin_root> \
   -e CUDA_HOME=/usr/local/cuda -e PATH=<env_bin>:/usr/local/cuda/bin:/usr/bin:/usr/local/bin \
-  <container> /nfs/wlx/envs/vllm-fl-0.24.0/bin/python -m vllm.entrypoints.openai.api_server \
+  <container> python3 -m vllm.entrypoints.openai.api_server \
   --model <model_path> --tensor-parallel-size <tp> --port 8000 \
-  2>&1 | tee /nfs/wlx/tmp/serve_<model>_$(date +%Y%m%d_%H%M%S).log &"
+  2>&1 | tee <log_dir>/serve_<model>_$(date +%Y%m%d_%H%M%S).log &"
 
 # Wait for startup (~2-3 min), then test
 ssh <host> "docker exec <container> curl -s http://localhost:8000/v1/completions \
@@ -368,7 +368,7 @@ Always set these when launching inference in the container:
 
 ```bash
 CUDA_HOME=/usr/local/cuda
-PATH=/nfs/wlx/envs/vllm-fl-0.24.0/bin:/usr/local/cuda/bin:/usr/bin:/usr/local/bin
+PATH=<env_bin>:/usr/local/cuda/bin:/usr/bin:/usr/local/bin
 PYTHONPATH=<plugin_root>
 CC=/usr/bin/gcc
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -394,10 +394,10 @@ ssh <host> "cat /proc/net/tcp | grep -c '7335'"  # 0x7335 = port 29501
 ssh <host> "docker exec <container> pkill -9 -f 'vllm|python'"
 
 # Find errors in log (skip NCCL noise)
-ssh <host> "docker exec <container> grep -a 'ERROR' /nfs/wlx/tmp/<model>.log | grep -v 'NCCL\|nccl\|fa_utils' | head -20"
+ssh <host> "docker exec <container> grep -a 'ERROR' <log_dir>/<model>.log | grep -v 'NCCL\|nccl\|fa_utils' | head -20"
 
 # Check which ops are missing
-ssh <host> "docker exec <container> python3 /nfs/wlx/tmp/check_ops.py"
+ssh <host> "docker exec <container> python3 <log_dir>/check_ops.py"
 ```
 
 ---
