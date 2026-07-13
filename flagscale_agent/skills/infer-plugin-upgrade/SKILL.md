@@ -1,8 +1,8 @@
----
+﻿---
 name: infer-plugin-upgrade
 description: Upgrade vllm-plugin-FL to a new vLLM version on NVIDIA hardware. Covers version
   detection, API diff analysis, targeted fixes, and validation across unit tests, offline
-  inference, and serving. Applies to any vLLM minor version bump (e.g., 0.20.x → 0.24.x).
+  inference, and serving. Applies to any vLLM minor version bump (e.g., 0.20.x to 0.24.x).
 triggers:
   - vllm-plugin-FL upgrade
   - plugin version bump
@@ -12,85 +12,100 @@ triggers:
 
 ## Critical Rules
 
-1. **Auto-detect versions first** — never assume plugin or vLLM version. Always read from installed packages.
-2. **Never modify vLLM source** — all fixes go through `vllm_fl/` plugin files only.
-3. **One patch per failure** — fix, re-test, then move to the next error. Never batch unverified fixes.
-4. **Fix order matters**: imports → class/factory API → signature kwargs → op schemas → model-specific.
-5. **NVIDIA A800 is ground truth** — validate every fix on A800 before declaring done.
-6. **Stream and persist logs** — use `2>&1 | tee <log_dir>/<stage>_<timestamp>.log`.
-7. **Squash before PR** — all upgrade commits squashed into one clean commit.
+1. **Auto-detect versions first** -- never assume plugin or vLLM version. Always read from installed packages and pyproject.toml.
+2. **Never modify vLLM source** -- all fixes go through `vllm_fl/` plugin files only.
+3. **One patch per failure** -- fix, re-test, then move to the next error. Never batch unverified fixes.
+4. **Fix order matters**: imports then class/factory API then signature kwargs then op schemas then model-specific.
+5. **NVIDIA GPU is ground truth** -- validate every fix on real hardware before declaring done.
+6. **Stream and persist logs** -- use `2>&1 | tee <log_dir>/<stage>_<timestamp>.log`.
+7. **Squash before PR** -- all upgrade commits squashed into one clean commit.
 
 ---
 
-## Step 0: Version Detection & Workspace Orientation
+## Step 0: Workspace Orientation and Version Detection
 
-Run before ANY work. Never skip.
+Run before ANY work. Never skip. All paths must be probed -- never assumed.
+
+### 0a. SSH connection and container check
+
+```bash
+ssh <host> "hostname && docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'"
+```
+
+Identify the running container for vllm-plugin-FL work. If no container exists, set one up following `infer-env-setup`.
+
+### 0b. Locate plugin and vllm roots
 
 ```bash
 ssh <host> "docker exec <container> bash -c '
+  echo === vllm version === &&
   python3 -c \"import vllm; print(vllm.__version__)\" &&
+  echo === plugin location === &&
   python3 -c \"import vllm_fl; print(vllm_fl.__file__)\" &&
-  cat <plugin_root>/pyproject.toml | grep -E \"^version|vllm\" | head -10
+  echo === plugin pyproject === &&
+  find / -path \"*/vllm-plugin-FL/pyproject.toml\" 2>/dev/null | head -3 &&
+  echo === vllm source root === &&
+  python3 -c \"import vllm, os; print(os.path.dirname(vllm.__file__))\"
 '"
 ```
 
 Record to memory immediately:
 ```
-memory_write('nvidia_vllm_version', 'X.Y.Z')          # installed vllm
-memory_write('nvidia_plugin_version', 'A.B.C')         # plugin version
-memory_write('nvidia_plugin_root', '<plugin_root>')
-memory_write('nvidia_vllm_root', '<vllm_root>')
+memory_write('nvidia_vllm_version', 'X.Y.Z')
+memory_write('nvidia_plugin_root', '<discovered_plugin_root>')
+memory_write('nvidia_vllm_root', '<discovered_vllm_root>')
+memory_write('nvidia_container', '<container_name>')
+memory_write('nvidia_log_dir', '<log_dir>')
 ```
 
-### Detect version gap
+### 0c. Detect version gap
 
 ```bash
 ssh <host> "docker exec <container> bash -c '
-  # what vllm version does the plugin declare it supports?
-  grep -r \"vllm\" <plugin_root>/pyproject.toml | grep -i \"requires\|version\"
-  # what is actually installed?
+  cat <plugin_root>/pyproject.toml | grep -E \"vllm|version\" &&
   python3 -c \"import vllm; print(vllm.__version__)\"
 '"
 ```
 
-If installed vllm version ≠ plugin's declared compatible version → version gap confirmed, proceed with upgrade.
+If installed vllm version != plugin declared compatible version, version gap is confirmed -- proceed with upgrade.
 
 ---
 
 ## Step 1: API Diff Analysis
 
-Before touching any code, enumerate what changed between the old and new vLLM versions.
+Before touching any code, enumerate what changed between old and new vLLM versions.
 
-### 1a. Check which plugin files import from vllm directly
+### 1a. Find plugin files that import from vllm directly
 
 ```bash
 ssh <host> "docker exec <container> grep -r 'from vllm\|import vllm' \
-  <plugin_root>/vllm_fl/ \
-  --include='*.py' -l"
+  <plugin_root>/vllm_fl/ --include='*.py' -l"
 ```
 
 ### 1b. Run unit tests to get the baseline error list
 
 ```bash
-ssh <host> "docker exec -e VLLM_PLUGINS=fl -e PYTHONPATH=<plugin_root> <container> \
-  python3 -m pytest \
-  <plugin_root>/tests/unit_tests/ -x --tb=short \
+ssh <host> "docker exec \
+  -e VLLM_PLUGINS=fl \
+  -e PYTHONPATH=<plugin_root> \
+  <container> \
+  python3 -m pytest <plugin_root>/tests/unit_tests/ -x --tb=short \
   2>&1 | tee <log_dir>/unit_baseline_$(date +%Y%m%d_%H%M%S).log"
 ```
 
-Collect all `ImportError`, `AttributeError`, `TypeError` from unit tests — these are the API breakages to fix.
+Collect all ImportError, AttributeError, TypeError -- these are the API breakages to fix.
 
 ### 1c. Check _C_cache_ops op availability
 
-Write a probe script to find which plugin-declared ops are missing from the installed vLLM:
+Write a probe script to find which plugin-declared ops are missing from installed vLLM:
 
 ```python
-# <log_dir>/check_ops.py
+# check_ops.py -- run inside container with VLLM_PLUGINS=fl and plugin on PYTHONPATH
 import torch, re, sys
-sys.path.insert(0, '<plugin_root>')
-from vllm_fl.ops._C_ops_schemas import SCHEMAS
 
 native_ops = set(dir(torch.ops._C_cache_ops)) | set(dir(torch.ops._C))
+
+from vllm_fl.ops._C_ops_schemas import SCHEMAS
 schema_names = set(re.split(r'[\(.]', sc)[0].strip() for sc in SCHEMAS)
 
 missing = schema_names - native_ops
@@ -101,282 +116,258 @@ print(f'\nPlugin schemas present in native vllm ({len(present)}):')
 for n in sorted(present): print(' ', n)
 ```
 
-**Missing ops = ops that need NVIDIA backend implementation in the plugin.**
-Note: FlagGems covers compute kernels (matmul, attention, elementwise). It does NOT cover `_C_cache_ops` — those are vLLM's paged KV cache management ops and must be implemented in the plugin.
+Key distinction: FlagGems covers compute kernels (matmul, attention, elementwise). It does NOT cover
+`_C_cache_ops` -- those are vLLM's paged KV cache management ops and must be implemented in the plugin.
 
-### 1d. Known API change patterns by area
+Missing ops fall into two categories:
+- **Generic cache ops** (e.g., `reshape_and_cache`, `copy_blocks`): must be present for any model to run.
+  If missing, the plugin is broken for this vllm version.
+- **Model-specific ops** (e.g., `concat_and_cache_mla` for a specific model's attention variant): only
+  blocks that model. Other models run fine without them.
 
-| Area | What to check | Common breakage |
-|------|--------------|-----------------|
-| `FusedMoE` | Is it a class or factory in new vllm? | Factory returns existing instance → recursive call in plugin's `__init__` |
-| `InputBatch` | `__init__` signature | New kwargs added that plugin passes but vllm doesn't accept |
-| `use_uniform_kv_cache` | Signature | Stale kwargs like `cache_dtype` removed |
-| `_C_cache_ops` | Op list vs plugin schemas | Model-specific ops (MLA, DSA) may not be in base vllm |
-| `WorkerProc` | `worker_main` vs `worker_busy_loop` | Entry point renamed between versions |
-| `parallel_state` | `world_size`, `rank` init API | Signature changes in distributed init |
+### 1d. Breakage-prone areas to audit
+
+Every vLLM minor bump changes something. Before writing any fix, audit these areas by reading both the
+plugin code and the new vllm source side by side:
+
+| Plugin file | What to audit in new vllm | Why it commonly breaks |
+|---|---|---|
+| `vllm_fl/ops/fused_moe/layer.py` | Is `FusedMoE` still a class or now a factory? What is `FusedTopKRouter.__init__` signature? | vllm toggles between class and factory; subclassing or kwarg forwarding breaks silently |
+| `vllm_fl/worker/model_runner.py` | `InputBatch.__init__` params, `use_uniform_kv_cache` signature, `WorkerProc` entry point name | Plugin often lags behind by 1-2 vllm versions; new params appear or old ones are removed |
+| `vllm_fl/ops/_C_ops_schemas.py` | Run check_ops.py (Step 1c) to diff registered schemas vs installed ops | vllm reorganizes C extensions; model-specific ops may never be in base vllm |
+| Any file with `from vllm.X import Y` | Does that import path still exist in new vllm? | vllm moves symbols between modules frequently |
+| `vllm_fl/worker/` distributed code | `parallel_state` init API, `world_size`/`rank` call signatures | Distributed init API evolves across versions |
+
+The specific breakages you encounter depend entirely on the version gap. Do not assume the same bugs will
+appear across upgrades -- read the actual error, trace it to the changed vllm code, then fix.
 
 ---
 
 ## Step 2: Fix API Breakages
 
-Fix in this order. After each fix, run the relevant test before moving on.
+The workflow for every breakage is the same:
+1. Read the error traceback -- identify which plugin file and line calls into vllm
+2. Read the new vllm source at that call site to understand what changed
+3. Apply the minimal fix
+4. Verify with an import check or targeted test before moving to the next error
 
-### 2a. Import errors
+**Fix strategies by error type**:
 
-If `from vllm.X import Y` fails → check new vllm for where `Y` moved:
+### TypeError: unexpected keyword argument
+
+The plugin passes a kwarg that no longer exists in the new vllm signature.
 
 ```bash
-ssh <host> "docker exec <container> python3 -c \"
-import subprocess
-r = subprocess.run(['grep', '-r', 'class Y\|def Y', '<vllm_root>/vllm/'],
-    capture_output=True, text=True)
-print(r.stdout[:3000])
-\""
+# Find the new signature
+ssh <host> "docker exec <container> grep -rn 'def <function_name>' <vllm_root>/vllm/"
 ```
 
-Update the import in the plugin file. Never add a `sys.path` hack.
+Options:
+- Remove the stale kwarg if it was genuinely dropped upstream
+- Use `inspect.signature()` to filter kwargs dynamically if the plugin must support multiple vllm versions
 
-### 2b. FusedMoE factory/class change
+### ImportError or AttributeError on import
 
-**Symptom**: `RecursionError` or `TypeError: FusedTopKRouter.__init__() got unexpected keyword argument 'moe_config'`
+A symbol moved between vllm modules.
 
-**Root cause**: vLLM changed `FusedMoE` from a class to a factory function (or changed its `__init__` signature). The plugin's `FusedMoEFL` subclass or factory wrapper calls the parent in a way that no longer works.
+```bash
+# Find where it moved
+ssh <host> "docker exec <container> grep -r 'class <Name>\|def <name>' \
+  <vllm_root>/vllm/ --include='*.py' -l"
+```
 
-**Fix pattern** (vllm 0.24.0 approach):
-1. Save a reference to the original class before any monkey-patching:
-   ```python
-   _OrigFusedMoE = _fused_moe_pkg.FusedMoE  # capture before patching
-   ```
-2. Use `replace_router_with_fl()` to monkey-patch the router on existing instances rather than subclassing:
-   ```python
-   def replace_router_with_fl(module):
-       # replace module.router with FusedTopKRouterFL instance
-       ...
-   ```
-3. Apply the replacement in `FusedMoEFL.__init__` after calling `_OrigFusedMoE.__init__`.
+Update the import path in the plugin file. Never add `sys.path` hacks or guessing `try/except` imports.
 
-File: `vllm_fl/ops/fused_moe/layer.py`
+### RecursionError or infinite loop in __init__
 
-### 2c. InputBatch signature mismatch
+The plugin subclasses or wraps a vllm class, but vllm changed that class to a factory or changed its MRO.
+The plugin's `__init__` ends up calling back into itself.
 
-**Symptom**: `TypeError: InputBatch.__init__() got an unexpected keyword argument 'pin_memory'`
-
-**Root cause**: Plugin's `model_runner.py` was ported from a newer vLLM version that has `pin_memory`/`is_spec_decode` in `InputBatch.__init__`, but the installed vLLM doesn't.
-
-**Fix**: Add a shim that filters kwargs to only what the installed vLLM accepts:
-
+Fix pattern: capture the original class reference before any monkey-patching, and call it explicitly:
 ```python
-# In vllm_fl/worker/model_runner.py, near InputBatch construction:
-import inspect as _inspect
-_InputBatch_params = set(_inspect.signature(InputBatch.__init__).parameters)
-
-def _make_input_batch(*args, **kwargs):
-    filtered = {k: v for k, v in kwargs.items() if k in _InputBatch_params}
-    return InputBatch(*args, **filtered)
+_Orig = _pkg.SomeClass   # capture before any patching occurs
+class SomeClassFL(_Orig):
+    def __init__(self, ...):
+        _Orig.__init__(self, ...)   # explicit call, not through patched name
 ```
 
-### 2d. use_uniform_kv_cache stale kwargs
+### AttributeError: _C_cache_ops has no attribute X
 
-**Symptom**: `TypeError: use_uniform_kv_cache() got an unexpected keyword argument 'cache_dtype'`
+A KV cache op is declared in `vllm_fl/ops/_C_ops_schemas.py` but has no NVIDIA backend implementation.
 
-**Fix**: Remove the stale kwarg from the call site in `vllm_fl/worker/model_runner.py`. Check the new signature:
+- Generic cache op (needed by all models): must implement it -- the plugin is broken without it
+- Model-specific op: only blocks that model, implement when adding support for that model
 
-```bash
-ssh <host> "docker exec <container> grep -n 'def use_uniform_kv_cache' \
-  <vllm_root>/vllm/v1/worker/gpu_model_runner.py"
-```
-
-### 2e. Missing _C_cache_ops (model-specific)
-
-**Symptom**: `AttributeError: '_OpNamespace' '_C_cache_ops' object has no attribute 'concat_and_cache_mla'`
-
-**Root cause**: Model-specific KV cache ops (e.g., GLM-5.2 DSA/MLA) are registered in `vllm_fl/ops/_C_ops_schemas.py` but have no NVIDIA backend implementation.
-
-**Fix**: Implement the missing op in plugin's CUDA extension or provide a pure-PyTorch fallback:
-- Schema location: `vllm_fl/ops/_C_ops_schemas.py`
-- Reference: upstream vllm's `_custom_ops.py` for the function wrapper pattern
-- For MLA-specific ops: reference the existing MetaX implementation as algorithmic guide
+For implementation: reference upstream vllm's `_custom_ops.py` for the C extension wrapper pattern.
+For model-specific ops, check other hardware backends in the plugin for algorithmic reference.
 
 ---
 
 ## Step 3: Unit Test Verification
 
-After all API fixes, run unit tests and establish the new baseline:
+After all API fixes, run unit tests to confirm no regressions:
 
 ```bash
-ssh <host> "docker exec -e VLLM_PLUGINS=fl -e PYTHONPATH=<plugin_root> <container> \
-  python3 -m pytest \
-  <plugin_root>/tests/unit_tests/ -v --tb=short \
+ssh <host> "docker exec \
+  -e VLLM_PLUGINS=fl \
+  -e PYTHONPATH=<plugin_root> \
+  <container> \
+  python3 -m pytest <plugin_root>/tests/unit_tests/ -v --tb=short \
   2>&1 | tee <log_dir>/unit_after_fix_$(date +%Y%m%d_%H%M%S).log"
 ```
 
-**Acceptable**: pre-existing failures that were also present before the upgrade (document these).
-**Not acceptable**: new failures introduced by the upgrade fixes.
+Compare pass/fail counts against the baseline from Step 1b.
+- Acceptable: pre-existing failures that were present before the upgrade (document these)
+- Not acceptable: new failures introduced by the upgrade fixes
 
 ---
 
-## Step 4: Offline Inference Validation (NVIDIA A800)
+## Step 4: Offline Inference Validation (NVIDIA)
 
-Test each model in the validation matrix. Run models roughly in order of architectural complexity: dense → MoE → Mamba hybrid → multi-modal → multi-node.
+Validate on real GPU hardware. Run at minimum one model per architecture type.
 
-### Launch pattern (single node)
+### 4a. Probe environment before running
 
 ```bash
-ssh <host> "docker exec -d \
-  -e CUDA_HOME=/usr/local/cuda \
-  -e PATH=<env_bin>:/usr/local/cuda/bin:/usr/bin:/usr/local/bin \
-  -e PYTHONPATH=<plugin_root> \
-  -e CC=/usr/bin/gcc \
-  -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+ssh <host> "docker exec <container> bash -c '
+  nvidia-smi --query-compute-apps=pid,used_memory,name --format=csv,noheader &&
+  python3 -c \"import torch; print(torch.cuda.device_count(), torch.version.cuda)\" &&
+  find /usr/local -name nvcc 2>/dev/null | head -1
+'"
+```
+
+Required env vars for the container (probe all values, never hardcode):
+```
+VLLM_PLUGINS=fl
+PYTHONPATH=<plugin_root>
+CUDA_HOME=<cuda_home>    # probe: find /usr/local -name nvcc | xargs dirname | xargs dirname
+CC=<gcc_path>            # probe: which gcc
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+```
+
+### 4b. Model coverage matrix
+
+Run at minimum one model per architecture type, in order of increasing complexity:
+
+| Architecture | Why |
+|---|---|
+| Dense LLM (e.g., Qwen, LLaMA) | Base case, no MoE or special ops |
+| MoE LLM (e.g., Qwen-MoE, Mixtral) | Exercises FusedMoE plugin path |
+| Mamba/Hybrid | Exercises CUDA graph with non-attention layers |
+| VLM (e.g., Gemma, SmolVLM) | Exercises multimodal pipeline |
+
+For each model:
+```bash
+ssh <host> "docker exec \
   -e VLLM_PLUGINS=fl \
-  <container> bash <log_dir>/run_<model>.sh"
+  -e PYTHONPATH=<plugin_root> \
+  <container> \
+  python3 <plugin_root>/examples/<model>_offline_inference.py \
+  2>&1 | tee <log_dir>/offline_<model>_$(date +%Y%m%d_%H%M%S).log"
 ```
 
-### Launch pattern (multi-node, e.g. TP=16 across 2 nodes)
+Monitor: `monitor(file=<log_file>, success_pattern='Generated text:|Output:', fail_pattern='ERROR|Traceback', duration=600)`
 
-**Critical**: launch both nodes simultaneously — do NOT wait for rank0 before launching rank1. Gloo init has a short timeout; if rank1 is late, rank0 workers time out with `Connection refused`.
+### 4c. Hardware-specific failure patterns on NVIDIA A800/A100
 
-```bash
-# Launch rank0 and rank1 in the same shell response (not sequentially)
-ssh <host0> "docker exec -d -e ... <container> bash <log_dir>/run_rank0.sh && echo rank0_ok"
-ssh <host1> "docker exec -d -e ... <container> bash <log_dir>/run_rank1.sh && echo rank1_ok"
+These are documented from past upgrades as reference. New upgrades may encounter different issues.
+
+**fp8e4nv on sm<89 (A800, A100)**
+
+Triton rejects `torch.float8_e4m3fn` on GPUs with `sm_major < 9`.
+
+Symptom: `triton.runtime.errors.OutOfResources` or `TypeError` in fp8 quantization code.
+
+Fix location: `vllm/model_executor/layers/quantization/utils/fp8_utils.py` (note: vllm source, prefer
+upstreaming to vllm rather than keeping as a local patch):
+```python
+# TODO: remove when triton supports fp8e4nv on sm<89
+if dtype == torch.float8_e4m3fn and torch.cuda.get_device_capability()[0] < 9:
+    dtype = torch.float8_e5m2
 ```
 
-### Monitor
+**FlagGems mm shmem overflow**
 
-After launch, wait 3-5 minutes then check logs:
+Symptom: `triton.runtime.errors.OutOfResources: out of resource: shared memory, Required: 196608, Hardware limit: 166912`
 
-```bash
-ssh <host> "tail -20 <log_dir>/<model>_rank0.log"
-```
+Root cause: FlagGems mm autotune configs exceed A800's shared memory limit (166912 bytes).
 
-**Success pattern**: `Uvicorn running on` or `Generated text:` or `Application startup complete`
-**Failure pattern**: `EXIT:1`, `WorkerProc failed`, `AttributeError`, `RuntimeError`
+Fix: in FlagGems `tune_configs.yaml`, remove autotune entries where the product of BLOCK sizes
+exceeds the hardware limit.
 
-### Common runtime failures and fixes
+**FlagGems broadcast_to CUDA graph bug**
 
-| Error | Root cause | Fix |
-|-------|-----------|-----|
-| `float8_e4m3fn` triton error on A800 | sm_80 doesn't support fp8e4nv in triton | Override dtype to `float8_e5m2` when `sm_major < 9` in `fp8_utils.py` |
-| `broadcast_to` CPU→CUDA copy during CUDA graph | FlagGems `broadcast_to.py` creates CPU tensors | Use `pin_memory()` before `.to(device)` in broadcast_to (see FlagGems PR #4472) |
-| `mm_kernel_general` out of resource: shared memory | FlagGems autotune config exceeds A800 shmem limit (166912 bytes) | Remove configs where `BLOCK_M*BLOCK_K*num_stages > 166912 / element_size` from `tune_configs.yaml` |
-| `concat_and_cache_mla` AttributeError | MLA KV cache op missing in NVIDIA backend | Implement in plugin CUDA extension or pure-PyTorch fallback |
-| `Connection refused` on Gloo | rank1 not started before rank0 Gloo timeout | Launch both nodes simultaneously |
-| `EADDRINUSE` port busy | Previous process still running | `pkill -9 -f 'vllm\|python'` on both nodes, wait 8s, check `/proc/net/tcp` |
+Symptom: `RuntimeError: Cannot copy between CPU and CUDA tensors during CUDA graph capture unless
+the CPU tensor is pinned`
 
-### Validation matrix
-
-Build this table as models are tested. Target: all models in the matrix must reach ✅ PASS.
-
-| Model | Type | TP | CUDA Graph | Result |
-|-------|------|----|-----------|--------|
-| (dense 1-7B) | Dense LLM | 1 | ✅ | |
-| (MoE) | MoE LLM | 4 | ✅ | |
-| (Mamba hybrid) | Mamba Dense | 4 | ✅ | |
-| (VLM) | VLM | 1 | ✅ | |
-| (large MoE, 2-node) | Dense MoE | 16 | — | |
+Fix: wrap `torch.tensor(...)` calls in `broadcast_to.py` with `pin_memory=True` when device is CUDA.
+Reference: https://github.com/FlagOpen/FlagGems/pull/4472
 
 ---
 
 ## Step 5: FlagGems Integration Checks
 
-FlagGems replaces compute kernels (matmul, attention, elementwise). It does NOT replace `_C_cache_ops`. After offline inference passes, verify FlagGems is actually being used:
+After basic inference passes, verify FlagGems kernels are actually dispatched and not silently falling back:
 
 ```bash
-ssh <host> "docker exec <container> grep -a 'FlagGems\|flag_gems' <log_dir>/<model>.log | head -5"
+ssh <host> "docker exec \
+  -e VLLM_PLUGINS=fl \
+  -e PYTHONPATH=<plugin_root> \
+  -e FLAG_GEMS_LOG_LEVEL=DEBUG \
+  <container> \
+  python3 <plugin_root>/examples/<model>_offline_inference.py \
+  2>&1 | grep -i 'flag_gems\|triton' | head -20"
 ```
 
-### FlagGems-specific issues to watch for
-
-**broadcast_to CUDA graph bug** (models with `attention_bias=true` or `mlp_bias=true`):
-- Symptom: `RuntimeError: Cannot copy between CPU and CUDA tensors during CUDA graph capture unless the CPU tensor is pinned`
-- Fix: In `FlagGems/src/flag_gems/ops/broadcast_to.py`, replace bare `torch.tensor(..., device=x.device)` with `torch.tensor(...).pin_memory().to(x.device)` for the three constant tensors (~lines 147-155)
-- Gate with `if x.device.type == flag_gems.device:`
-
-**mm shared memory overflow on A800**:
-- Symptom: `triton.runtime.errors.OutOfResources: out of resource: shared memory, Required: 196608, Hardware limit: 166912`
-- Fix: In FlagGems `tune_configs.yaml`, remove autotune configs where `BLOCK_M × BLOCK_K × num_stages × dtype_bytes > 166912`
+Check:
+1. FlagGems ops are being called (not falling back to torch)
+2. No silent errors swallowed by FlagGems error handling
+3. Output tokens are correct (compare against a non-FlagGems run if suspicious)
 
 ---
 
 ## Step 6: Serving Validation
 
-Test the full serving stack (APIServer + EngineCore + Workers) for at least one model:
-
 ```bash
-ssh <host> "docker exec -d -e VLLM_PLUGINS=fl -e PYTHONPATH=<plugin_root> \
-  -e CUDA_HOME=/usr/local/cuda -e PATH=<env_bin>:/usr/local/cuda/bin:/usr/bin:/usr/local/bin \
-  <container> python3 -m vllm.entrypoints.openai.api_server \
-  --model <model_path> --tensor-parallel-size <tp> --port 8000 \
+ssh <host> "docker exec -d \
+  -e VLLM_PLUGINS=fl \
+  -e PYTHONPATH=<plugin_root> \
+  <container> \
+  python3 -m vllm.entrypoints.openai.api_server \
+  --model <model_path> \
+  --port 8000 \
   2>&1 | tee <log_dir>/serve_<model>_$(date +%Y%m%d_%H%M%S).log &"
 
-# Wait for startup (~2-3 min), then test
-ssh <host> "docker exec <container> curl -s http://localhost:8000/v1/completions \
+# Wait for server ready, then test
+sleep 30
+ssh <host> "curl -s http://localhost:8000/v1/completions \
   -H 'Content-Type: application/json' \
-  -d '{\"model\": \"<model_path>\", \"prompt\": \"The capital of France is\", \"max_tokens\": 20}'"
+  -d '{\"model\": \"<model_path>\", \"prompt\": \"Hello\", \"max_tokens\": 20}' | python3 -m json.tool"
 ```
 
-Success: JSON response with `choices[0].text` containing a coherent completion.
+Check: response contains `choices[0].text` with actual tokens (not empty, not error).
 
 ---
 
-## Step 7: PR
+## Step 7: PR Discipline
 
-### Commit discipline
+Before opening a PR:
 
-```bash
-cd <plugin_root>
-git add -p  # stage specific hunks, not git add .
-git commit -m "feat: upgrade to vllm X.Y.Z compatibility"
-# if multiple fix commits, squash before PR:
-git rebase -i HEAD~N  # squash N commits
+1. Review all changes: `git diff HEAD~<n> --stat` -- remove any debug prints, temporary patches, or commented-out code
+2. Verify no vllm source files were modified: `git diff HEAD~<n> -- <vllm_root>/` should be empty
+3. Squash all commits: `git rebase -i HEAD~<n>`
+4. Run unit tests one final time on the squashed commit
+
+PR commit message format:
 ```
+feat(plugin): upgrade vllm-plugin-FL compatibility to vllm X.Y.Z
 
-### PR description template
+- <one line per fix, e.g. "fix FusedMoE recursion by capturing _OrigFusedMoE before patching">
+- <fix InputBatch kwargs mismatch with inspect-based shim>
+- <remove stale cache_dtype kwarg from use_uniform_kv_cache call>
 
-```markdown
-## PR Category
-Core
-
-## PR Type
-Improvements
-
-## Description
-Upgrades vllm-plugin-FL compatibility from vllm A.B.C to vllm X.Y.Z.
-
-## Changes
-- `vllm_fl/worker/model_runner.py`: [describe change]
-- `vllm_fl/ops/fused_moe/layer.py`: [describe change]
-- [other files]
-
-## Testing
-Hardware: A800 80GB × N, CUDA 12.x, vllm X.Y.Z, FlagGems (NVIDIA backend)
-
-| Model | Type | TP | CUDA Graph | Result |
-|-------|------|----|-----------|--------|
-| ...   | ...  | .. | ..        | ✅ PASS |
-
-## Upstream follow-ups
-- [any bugs found in FlagGems or vllm during testing]
-```
-
----
-
-## Environment Variables (NVIDIA)
-
-Always set these when launching inference in the container:
-
-```bash
-CUDA_HOME=/usr/local/cuda
-PATH=<env_bin>:/usr/local/cuda/bin:/usr/bin:/usr/local/bin
-PYTHONPATH=<plugin_root>
-CC=/usr/bin/gcc
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-VLLM_PLUGINS=fl
-# For multi-node:
-GLOO_SOCKET_IFNAME=<nic_name>   # e.g. ens201
-NCCL_SOCKET_IFNAME=<nic_name>
-NCCL_DEBUG=INFO
+Tested: unit tests (N passed, M pre-existing failures), offline inference on NVIDIA A800
+Models validated: <list>
 ```
 
 ---
@@ -384,22 +375,31 @@ NCCL_DEBUG=INFO
 ## Diagnostic Commands
 
 ```bash
-# Check GPU free before launch
-ssh <host> "docker exec <container> nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader"
-
-# Check port availability
-ssh <host> "cat /proc/net/tcp | grep -c '7335'"  # 0x7335 = port 29501
-
-# Kill stale processes
-ssh <host> "docker exec <container> pkill -9 -f 'vllm|python'"
-
-# Find errors in log (skip NCCL noise)
-ssh <host> "docker exec <container> grep -a 'ERROR' <log_dir>/<model>.log | grep -v 'NCCL\|nccl\|fa_utils' | head -20"
+# Check all remaining errors after a fix attempt
+ssh <host> "docker exec -e VLLM_PLUGINS=fl -e PYTHONPATH=<plugin_root> <container> \
+  python3 -m pytest <plugin_root>/tests/unit_tests/ --tb=short -q 2>&1 | tail -30"
 
 # Check which ops are missing
-ssh <host> "docker exec <container> python3 <log_dir>/check_ops.py"
+ssh <host> "docker exec -e VLLM_PLUGINS=fl -e PYTHONPATH=<plugin_root> <container> \
+  python3 check_ops.py"
+
+# Check CUDA graph capture failures
+ssh <host> "docker exec <container> grep -a 'graph capture\|cudaGraphCapture\|CUDA graph' <log> | tail -10"
+
+# Check GPU processes before relaunch
+ssh <host> "docker exec <container> nvidia-smi --query-compute-apps=pid,used_memory,name --format=csv,noheader"
 ```
 
 ---
 
-Related skills (load if needed): `infer-hw-adapt`, `infer-model-adapt`, `debug-strategy`, `ops-discipline`
+## Related skills
+
+- `infer-env-setup` -- set up the container and conda env from scratch
+- `infer-hw-adapt` -- hardware-specific backend adaptation (non-NVIDIA)
+- `infer-model-adapt` -- port a new model into the plugin
+- `debug-strategy` -- systematic debugging when stuck
+- `ops-discipline` -- shell safety and environment awareness
+appear across upgrades -- read the actual error, trace it to the changed vllm code, then fix.
+
+---
+
