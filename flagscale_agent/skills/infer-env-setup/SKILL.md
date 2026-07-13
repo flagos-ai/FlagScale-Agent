@@ -304,14 +304,33 @@ ssh <ssh_host> "docker exec <container> bash -c \
 
 Record the version: `memory_write('<backend>_vllm_pinned_version', 'X.Y.Z')`
 
-### Step 2: Install vLLM CPU-only
+### Step 2: Install vLLM CPU-only (from source)
+
+Install from source to ensure `VLLM_TARGET_DEVICE=empty` takes effect correctly.
+Pre-built PyPI wheels may bundle device-specific compiled extensions that conflict
+with the plugin's hardware backend.
 
 ```bash
+# Clone the pinned vLLM version
 ssh <ssh_host> "docker exec <container> bash -c \
-  'VLLM_TARGET_DEVICE=empty pip install vllm==<pinned_version> \
+  'cd /workspace/adapt/<backend>-vllm-<version> && \
+   git clone https://github.com/vllm-project/vllm.git vllm-src && \
+   cd vllm-src && git checkout v<pinned_version> && \
+   git log -1 --oneline'"
+
+# Install from source with empty device target
+ssh <ssh_host> "docker exec <container> bash -c \
+  'cd /workspace/adapt/<backend>-vllm-<version>/vllm-src && \
+   VLLM_TARGET_DEVICE=empty pip install -e . \
    --extra-index-url https://download.pytorch.org/whl/cpu \
    2>&1 | tee /workspace/adapt-logs/install_vllm.log'"
 ```
+
+> **Why source install?** `VLLM_TARGET_DEVICE=empty` must be set at *build time* when
+> installing from source so that no CUDA/hardware C extensions are compiled. Installing
+> a pre-built wheel from PyPI may silently include compiled ops that break on non-NVIDIA
+> backends. Source install with this flag produces a pure-Python, device-agnostic vLLM
+> that the plugin can override completely.
 
 ### Step 3: Clone vllm-plugin-FL (fresh workspace)
 
