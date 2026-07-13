@@ -1,22 +1,29 @@
-# Infer-Plugin-Upgrade — Summary
+# Infer-Plugin-Upgrade -- Summary
 
-Upgrade vllm-plugin-FL to a new vLLM version on NVIDIA hardware. Covers version detection, API diff analysis, targeted fixes, and full test validation from unit tests through serving.
+Upgrade vllm-plugin-FL to a new vLLM version on NVIDIA hardware. Covers version detection, API diff
+analysis, targeted fixes, and full test validation from unit tests through serving.
 
-**Load when**: vllm-plugin-FL needs to be upgraded to a new vLLM version (e.g., 0.20.2 → 0.24.0), or when the plugin breaks after a vLLM dependency update.
+**Load when**: vllm-plugin-FL needs to be upgraded to a new vLLM version, or when the plugin breaks
+after a vLLM dependency update.
 
-**Full pipeline**: Step 0 orientation + version detection → Step 1 API diff analysis → Step 2 unit tests (establish baseline) → Step 3 fix API breakages → Step 4 offline inference validation → Step 5 multi-model validation → Step 6 serving validation → Step 7 PR.
+**Full pipeline**: Step 0 orientation + version detection -- Step 1 API diff analysis (unit test
+baseline + _C_cache_ops probe + high-risk area audit) -- Step 2 fix API breakages -- Step 3 unit test
+verification -- Step 4 offline inference validation (dense, MoE, Mamba, VLM) -- Step 5 FlagGems checks
+-- Step 6 serving validation -- Step 7 PR.
 
 **Key principles**:
-- Auto-detect both the current plugin version and the target vLLM version before any changes
-- Fix API breakages in order: imports → class/factory changes → signature changes → schema changes
-- One patch per failure — fix, verify, then move to next
-- Never modify vLLM source — all patches go through plugin files in `vllm_fl/`
-- NVIDIA A800 is the primary validation target; all models must pass offline inference
+- Auto-detect both plugin version and installed vLLM version before any changes -- never assume
+- Every upgrade has different breakages; read the actual error and trace it to changed vllm code first
+- Fix by error type: TypeError (stale kwargs) / ImportError (moved symbols) / RecursionError (class vs factory) / AttributeError (_C_cache_ops missing)
+- One patch per failure -- fix, verify import or unit test, then move to next
+- Never modify vLLM source -- all patches go through `vllm_fl/` plugin files only
+- Validate on real NVIDIA GPU hardware before declaring done
 
-**Known patterns across vLLM minor versions**:
-- `FusedMoE` may change between class and factory function → OOT registration breaks, use monkey-patch
-- `InputBatch.__init__()` gains/loses kwargs between versions → use `**kwargs` shim
-- `_C_cache_ops` op set changes → check for missing ops before running model tests
-- `use_uniform_kv_cache()` signature changes → remove stale kwargs
+**High-risk areas to audit each upgrade**:
+- `vllm_fl/ops/fused_moe/layer.py` -- FusedMoE class vs factory, FusedTopKRouter signature
+- `vllm_fl/worker/model_runner.py` -- InputBatch params, use_uniform_kv_cache signature, WorkerProc entry point
+- `vllm_fl/ops/_C_ops_schemas.py` -- diff registered schemas vs installed ops with check_ops.py
+- Any `from vllm.X import Y` -- symbol may have moved to a different module
 
-**Constraints**: no vLLM source modification, one-patch-at-a-time discipline, all fixes platform-gated if hardware-specific, TODO comment on every workaround.
+**Constraints**: no vLLM source modification, one-patch-at-a-time discipline, TODO comment on every
+workaround, squash all commits before PR.
