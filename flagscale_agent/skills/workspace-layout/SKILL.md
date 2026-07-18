@@ -123,6 +123,23 @@ context_injection:
     write_file:
     - Rules for Each Artifact Type
 ---
+
+<!--
+ Copyright 2026 FlagOS Contributors
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+ -->
+
 # Workspace Layout & Storage Management
 
 This skill defines the standard directory layout and storage management rules for all FlagScale projects. Follow these rules whenever creating, downloading, or referencing artifacts (models, datasets, checkpoints, logs, conda envs).

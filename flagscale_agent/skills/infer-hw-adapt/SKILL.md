@@ -84,6 +84,23 @@ context_injection:
     - Version-Adaptive Patching
     - Copy-then-Patch Discipline
 ---
+
+<!--
+ Copyright 2026 FlagOS Contributors
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+ -->
+
 # Hardware Adaptation after Plugin Upgrade
 
 Adapt and fix vllm-plugin-FL for specific hardware backends after each plugin version upgrade. When vLLM bumps its base version (e.g., 0.19 -> 0.20), hardware-specific code paths break because internal APIs shift, new Triton kernels are introduced, or FlagGems op coverage lags.
