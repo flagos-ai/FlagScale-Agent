@@ -87,26 +87,33 @@ flagscale-agent "Generate a FlagScale config for Qwen2.5 7B with TP=4, DP=2"
 ## 📚 Core Concepts
 
 ### Skills
-Skills are domain-specific knowledge modules that teach the agent how to handle specific tasks. Each skill includes:
+Skills are domain knowledge modules that teach Agents how to handle specific tasks. FlagScale-Agent incorporates multiple skills to guide the Agent in completing tasks such as model training, inference and troubleshooting. Each skill consists of the following contents:
 - **Task description** — What the skill solves
 - **Tools** — Which tools to use
 - **Constraints** — Safety rules and best practices
 - **Examples** — Reference workflows
 
-Built-in skills:
-- `train-env-setup` — Install FlagScale, conda envs, dependencies
-- `train-data-prep` — Prepare and tokenize training data
-- `train-config` — Generate Hydra configs for training
-- `train-run` — Launch, monitor, stop distributed training
-- `train-monitor` — Analyze logs, detect training issues
-- `train-parallel-strategy` — Design parallelism strategies (TP/PP/DP/EP/SP)
-- `train-precision-alignment` — Debug precision mismatches
-- `train-model-porter` — Port models from HuggingFace to Megatron
-- `train-reproduce` — Reproduce training results from references
-- `debug-strategy` — Systematic debugging for training failures
-- `topo-detect` — Detect hardware topology (NVLink, NUMA, RDMA)
-- `workspace-layout` — Standardized workspace directory layout
-- `ops-discipline` — General operational discipline
+Introduction to built-in skills is as follows:
+| Name | Description |
+|:---|:---|
+| [train-env-setup](flagscale_agent/skills/train-env-setup/SKILL.md) | Set up the FlagScale training environment, including GPU environment checks, FlagScale installation, Conda environment configuration, and dependency installation. |
+| [train-data-prep](flagscale_agent/skills/train-data-prep/SKILL.md) | Prepare training data, supporting both plain-text and multimodal data processing. |
+| [train-config](flagscale_agent/skills/train-config/SKILL.md) | Generate and manage training configurations, including Hydra YAML files, TP/DP/PP parallel strategies, mixed precision, and checkpoint settings. |
+| [train-run](flagscale_agent/skills/train-run/SKILL.md) | Launch, monitor, and manage distributed training jobs, including GPU availability checks, CLI and legacy launch modes, and log directory management. |
+| [train-monitor](flagscale_agent/skills/train-monitor/SKILL.md) | Monitor distributed training by analyzing logs, checking training status, detecting anomalies such as OOM errors and NCCL timeouts, and parsing training metrics. |
+| [train-parallel-strategy](flagscale_agent/skills/train-parallel-strategy/SKILL.md) | Select and configure TP, PP, DP, EP, and SP parallel strategies for model migration and parallelism issue debugging. |
+| [train-precision-alignment](flagscale_agent/skills/train-precision-alignment/SKILL.md) | Debug precision alignment. Precision alignment for three scenarios: model migration (Native → FlagScale), internal iteration (autoregressive), hardware migration (NVIDIA → new hardware) |
+| [train-model-porter](flagscale_agent/skills/train-model-porter/SKILL.md) | Port models from Hugging Face and other platforms to Megatron-LM-FL, including architecture analysis and checkpoint conversion and so on. |
+| [train-reproduce](flagscale_agent/skills/train-reproduce/SKILL.md) | Reproduce training results, including reuse of original artifacts and baseline verification,etc. |
+| [infer-env-setup](flagscale_agent/skills/infer-env-setup/SKILL.md) | Set up the inference environment, including vLLM-Plugin-FL installation, Docker container creation, and FlagGems deployment. |
+| [infer-hw-adapt](flagscale_agent/skills/infer-hw-adapt/SKILL.md) | Adapt and fix vLLM-Plugin-FL support for specific hardware backends, such as MetaX and Ascend, through a complete test–patch–validation cycle. |
+| [infer-model-adapt](flagscale_agent/skills/infer-model-adapt/SKILL.md) | Model Adaptation. Adapt new models to vllm-plugin-FL, including source coverage discovery, copy-then-patch workflow, import conversion and other steps. |
+| [infer-precision-check](flagscale_agent/skills/infer-precision-check/SKILL.md) | Verify the inference output accuracy of vLLM-Plugin-FL across different hardware backends. |
+| [infer-plugin-upgrade](flagscale_agent/skills/infer-plugin-upgrade/SKILL.md) |Upgrade vllm-plugin-FL to the new version, including version detection, API difference analysis, etc. |
+| [workspace-layout](flagscale_agent/skills/workspace-layout/SKILL.md) | Standardize the workspace directory structure, including storage capacity checks, private disk space prechecks, and dataset path management. |
+| [debug-strategy](flagscale_agent\skills\debug-strategy\SKILL.md) | A systematic troubleshooting method for training infrastructure, including error classification, problem localization, and root cause analysis. |
+| [topo-detect](flagscale_agent/skills/topo-detect/SKILL.md) | Hardware topology detection, which checks NVLink, NUMA, RDMA and disk topologies. |
+| [ops-discipline](flagscale_agent/skills/ops-discipline/SKILL.md) | Define general operational practices, including documentation review strategies, terminal safety, and environment awareness. |
 
 Skills are automatically loaded based on task context. Use `/skill <name>` to manually load.
 
