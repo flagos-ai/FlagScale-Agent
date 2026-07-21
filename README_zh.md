@@ -87,20 +87,35 @@ flagscale-agent "生成 Qwen2.5 7B 的 FlagScale 训练配置，TP=4, DP=2"
 ## 📚 核心概念
 
 ### Skills（技能）
-技能是领域知识模块，教 Agent 如何处理特定任务。内置技能包括：
-- `train-env-setup` — 安装 FlagScale、配置 conda 环境
-- `train-data-prep` — 准备和分词训练数据
-- `train-config` — 生成 Hydra 训练配置
-- `train-run` — 启动、监控、停止分布式训练
-- `train-monitor` — 分析日志、检测训练问题
-- `train-parallel-strategy` — 设计并行策略（TP/PP/DP/EP/SP）
-- `train-precision-alignment` — 调试精度对齐
-- `train-model-porter` — 从 HuggingFace 移植模型到 Megatron
-- `train-reproduce` — 复现参考实现的训练结果
-- `debug-strategy` — 系统化调试训练故障
-- `topo-detect` — 检测硬件拓扑（NVLink, NUMA, RDMA）
-- `workspace-layout` — 标准化工作区目录结构
-- `ops-discipline` — 通用运维规范
+技能是领域知识模块，教 Agent 如何处理特定任务。FlagScale-Agent包含多个技能，用于指导Agent完成模型训练，推理和故障排查等任务。每项技能内容包括：
+- **Task description** — 该技能所能解决的问题
+- **Tools** — 使用哪些工具
+- **Constraints** — 安全规范与最佳实践
+- **Examples** — 参考工作流
+
+内置技能介绍如下：
+| 名称 | 描述 |
+|:---|:---|
+| [train-env-setup](flagscale_agent/skills/train-env-setup/SKILL.md) | 搭建 FlagScale 训练环境，包括 GPU 环境检查、FlagScale 安装、Conda 环境配置和依赖安装。 |
+| [train-data-prep](flagscale_agent/skills/train-data-prep/SKILL.md) | 准备训练数据，支持纯文本数据与多模态数据处理。 |
+| [train-config](flagscale_agent/skills/train-config/SKILL.md) | 生成和管理训练配置，包括 Hydra YAML、TP、DP、PP等并行策略、混合精度和 Checkpoint 设置等 |
+| [train-run](flagscale_agent/skills/train-run/SKILL.md) | 启动、监控和管理分布式训练任务，包含GPU可用性、训练启动（CLI和legacy方式）、日志目录结构等 |
+| [train-monitor](flagscale_agent/skills/train-monitor/SKILL.md) | 监控分布式训练，包含分析日志、检测训练状态、检测异常（OOM、NCCL超时...）等 |
+| [train-parallel-strategy](flagscale_agent/skills/train-parallel-strategy/SKILL.md) | 并行策略选择与配置。指导TP/PP/DP/EP/SP的选择，用于模型迁移或调试并行问题 |
+| [train-precision-alignment](flagscale_agent/skills/train-precision-alignment/SKILL.md) | 调试精度对齐。三种场景的精度对齐：模型迁移（原生->FlagScale）、内部迭代(自回归)、硬件迁移（NVIDIA->新硬件） |
+| [train-model-porter](flagscale_agent/skills/train-model-porter/SKILL.md) | 从HuggingFace等移植模型到 Megatron-LM-FL。包含架构分析、Checkpoint转换等 |
+| [train-reproduce](flagscale_agent/skills/train-reproduce/SKILL.md) | 复现训练结果。包含原始产物复用、基线验证等 |
+| [infer-env-setup](flagscale_agent/skills/infer-env-setup/SKILL.md) | 搭建推理环境，包括 vLLM-Plugin-FL 安装、Docker 容器创建和 FlagGems 部署等。 |
+| [infer-hw-adapt](flagscale_agent/skills/infer-hw-adapt/SKILL.md) | 硬件适配。适配和修复 vllm-plugin-FL 对特定硬件后端（MetaX、Ascend等）的支持，包含完整的测试-补丁-验证周期 |
+| [infer-model-adapt](flagscale_agent/skills/infer-model-adapt/SKILL.md) | 模型适配。将新模型适配到vllm-plugin-FL，包含覆盖源发现、copy-then-patch 工作流、import 转换等步骤 |
+| [infer-precision-check](flagscale_agent/skills/infer-precision-check/SKILL.md) | 验证 vllm-plugin-FL 在各硬件后端上的推理输出精度。 |
+| [infer-plugin-upgrade](flagscale_agent/skills/infer-plugin-upgrade/SKILL.md) | 升级vllm-plugin-FL至新版本。包括版本检测、API 差异分析等 |
+| [workspace-layout](flagscale_agent/skills/workspace-layout/SKILL.md) | 标准工作区目录结构，包括存储空间检查、私盘预检和数据集路径管理。 |
+| [debug-strategy](flagscale_agent/skills/debug-strategy/SKILL.md) | 训练基础设施的系统化排障方法，包括错误分类、问题定位和根因分析等。 |
+| [topo-detect](flagscale_agent/skills/topo-detect/SKILL.md) | 硬件拓扑检测，检测 NVLink、NUMA、RDMA 和磁盘拓扑。 |
+| [ops-discipline](flagscale_agent/skills/ops-discipline/SKILL.md) | 通用运维规范。包含研读策略、终端安全、环境认知等。 |
+
+系统会根据任务上下文自动加载技能。可输入 `/skill <name>` 手动加载技能。
 
 ### Tools（工具）
 Agent 内置 19 个专用工具：
