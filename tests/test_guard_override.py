@@ -96,14 +96,10 @@ class TestAcceptOverrideValid:
 
     def test_memory_discipline_accepts_reason(self):
         g = MemoryDisciplineGuard()
-        g._read_reminders = 10
-        g._write_reminders = 5
-        g._shells_since_write = 20
+        g._calls_since_memory = 15
         ctx = _ctx()
         assert g.accept_override("Already checked memory, no relevant entries exist", ctx) is True
-        assert g._read_reminders == 0
-        assert g._write_reminders == 0
-        assert g._shells_since_write == 0
+        assert g._calls_since_memory == 0
 
     def test_comprehension_gate_accepts_reason(self):
         g = ComprehensionGateGuard()
@@ -184,47 +180,25 @@ class TestResetTurnPreventsDeadLoop:
     """reset_turn clears escalation state to prevent stale blocks."""
 
     def test_memory_discipline_reset(self):
-        """reset_turn only clears ephemeral per-turn state, NOT escalation counters.
-        v3: Escalation counters persist across iterations to prevent re-firing."""
+        """reset_turn is a no-op — counter persists within a turn."""
         g = MemoryDisciplineGuard()
-        g._read_reminders = 10
-        g._write_reminders = 5
-        g._shells_since_write = 20
-        g._pending_discoveries.append("error found")
+        g._calls_since_memory = 7
         g.reset_turn()
-        # v3: counters are NOT reset by reset_turn (prevents infinite re-fire)
-        assert g._read_reminders == 10
-        assert g._write_reminders == 5
-        assert g._shells_since_write == 20
-        # Only ephemeral state is cleared
-        assert len(g._pending_discoveries) == 0
+        assert g._calls_since_memory == 7
 
     def test_memory_discipline_reset_state(self):
-        """reset_state (full reset via decay/override) clears everything."""
+        """reset_state (full reset via decay/override) clears counter."""
         g = MemoryDisciplineGuard()
-        g._read_reminders = 10
-        g._write_reminders = 5
-        g._shells_since_write = 20
-        g._pending_discoveries.append("error found")
-        g._memory_list_done = True
+        g._calls_since_memory = 20
         g.reset_state()
-        assert g._read_reminders == 0
-        assert g._write_reminders == 0
-        assert g._shells_since_write == 0
-        assert len(g._pending_discoveries) == 0
-        assert g._memory_list_done == False
+        assert g._calls_since_memory == 0
 
     def test_memory_discipline_preserves_knowledge(self):
-        """reset_turn keeps knowledge state AND escalation counters (v3)."""
+        """reset_new_turn doesn't reset counter — memory gap persists across turns."""
         g = MemoryDisciplineGuard()
-        g._memory_list_done = True
-        g._plan_status_done = True
-        g._read_reminders = 5
-        g.reset_turn()
-        assert g._memory_list_done is True
-        assert g._plan_status_done is True
-        # v3: counters persist across reset_turn to prevent infinite re-firing
-        assert g._read_reminders == 5
+        g._calls_since_memory = 8
+        g.reset_new_turn()
+        assert g._calls_since_memory == 8
 
     def test_comprehension_gate_reset(self):
         g = ComprehensionGateGuard()
@@ -237,7 +211,7 @@ class TestResetTurnPreventsDeadLoop:
         g._failure_observed = True
         g._hypothesis_declared = False
         g._edits_since_failure = 3
-        g.reset_turn()
+        g.reset_new_turn()
         assert g._failure_observed is False
         assert g._hypothesis_declared is False
         assert g._edits_since_failure == 0
@@ -305,13 +279,11 @@ class TestEndToEndOverrideFlow:
         assert g._circuit_state["resource"] == g.HALF_OPEN
 
     def test_memory_discipline_override_clears_block(self):
-        """Simulate accumulated reminders → override clears them."""
+        """Simulate accumulated calls → override clears counter."""
         g = MemoryDisciplineGuard()
-        g._read_reminders = 10  # Would cause BLOCK
-        g._write_reminders = 5
+        g._calls_since_memory = 15
 
         # Override
         result = g.accept_override("Already checked memory, working on unrelated code generation task", _ctx())
         assert result is True
-        assert g._read_reminders == 0
-        assert g._write_reminders == 0
+        assert g._calls_since_memory == 0

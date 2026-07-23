@@ -138,7 +138,7 @@ constraints:
     NVTE_FRAMEWORK=pytorch pip install --no-build-isolation . Pre-built whls are NOT acceptable.
     On non-NVIDIA accelerator platforms, prepend TE_FL_SKIP_CUDA=1 to the build command."
 - id: train_env_setup_pytorch_must_match_driver
-  description: PyTorch CUDA tag should match the driver's max supported CUDA to avoid source-build mismatches. While torch+cu128 CAN run on driver 535 (forward compat), it causes problems when source-building Apex/TE/Flash-Attn because system nvcc (12.4) mismatches torch.version.cuda (12.8).
+  description: PyTorch CUDA tag should match the driver's max supported CUDA to avoid source-build mismatches. While torch+cu128 CAN run on driver 535 (forward compat), it causes problems when source-building Apex/TE/Flash-Attn because system nvcc (12.4) mismatches torch.version.cuda (12.8). Exception — if nvcc > torch CUDA (e.g., nvcc 13.0 + torch cu128), this is acceptable because CUDA is forward-compatible, but requires an nvcc shim.
   trigger:
     tools:
     - shell
@@ -148,10 +148,17 @@ constraints:
   prompt: "SCOPE: pip install torch/pytorch. CHECK: Does the CUDA tag match the driver's max supported CUDA? 
     While torch+cu128 can technically RUN on driver 535 (CUDA forward compat), it creates a nvcc vs torch.version.cuda 
     mismatch that breaks source builds of Apex/TE/Flash-Attn. For FlagScale training (which requires source builds), 
-    the CUDA tag MUST match the system nvcc version. E.g., Driver 535.x + nvcc 12.4 → use cu124 tag."
-  correction: "PyTorch CUDA tag must match the system nvcc version (for source build compatibility). 
-    Check nvidia-smi for driver version → determine max CUDA → use matching cu tag.
-    E.g., Driver 535.x → max cu124, Driver 560.x → max cu126, Driver 570.x → max cu128.
+    the CUDA tag MUST be resolvable with system nvcc.
+    Three cases:
+    (1) nvcc == torch CUDA → ideal, no action needed.
+    (2) nvcc < torch CUDA → PROBLEM. Must install matching toolkit or downgrade torch CUDA tag.
+    (3) nvcc > torch CUDA → ACCEPTABLE with shim. Create nvcc wrapper reporting torch's version. CUDA forward-compat guarantees correctness.
+    E.g., Driver 535.x + nvcc 12.4 → use cu124 tag. Driver 580.x + nvcc 13.0 but torch only has cu128 → use cu128 + shim."
+  correction: "PyTorch CUDA tag must be compatible with the system nvcc version.
+    If nvcc < torch CUDA: install matching CUDA toolkit or use a lower cu tag.
+    If nvcc > torch CUDA: create an nvcc shim (see CUDA version alignment section).
+    If nvcc == torch CUDA: no action needed.
+    E.g., Driver 535.x → max cu124, Driver 560.x → max cu126, Driver 570.x → max cu128, Driver 580.x → max cu130 (use cu128 + shim if no cu130 torch exists).
     Note: the version+tag combination must also exist on PyPI — verify with --dry-run."
 - id: train_env_setup_torch_version_from_pypi_not_requirements
   description: PyTorch version+CUDA tag must be verified to exist on PyPI BEFORE installing. FlagScale's version often does NOT have a wheel for older CUDA tags (e.g., torch 2.9.0 has no cu124 wheel).
@@ -264,6 +271,25 @@ constraints:
   correction: "Add TORCH_CUDA_ARCH_LIST to limit compilation to current GPU only:
     SM_ARCH=$(python -c \"import torch; cc = torch.cuda.get_device_capability(); print(f'{cc[0]}.{cc[1]}')\")
     TORCH_CUDA_ARCH_LIST=\"$SM_ARCH\" <rest of build command>"
+- id: train_env_setup_consistent_cuda_home
+  description: All CUDA extension source builds (TE-FL, Apex, Flash-Attention) must use the SAME CUDA_HOME value. Using different
+    CUDA_HOME values for different packages causes ABI mismatches — one .so links against headers from one CUDA version while
+    another expects different symbol signatures. Symptom is 'undefined symbol' errors on import despite successful compilation.
+  trigger:
+    tools:
+    - shell
+    keywords:
+    - CUDA_HOME=
+    - pip install --no-build-isolation
+  prompt: "SCOPE: Source build with CUDA_HOME set. CHECK: Is the CUDA_HOME value consistent with what was used for previous
+    source builds in this session? ALL CUDA extension builds must use the same CUDA_HOME. If a shim was created, all builds
+    must use the shim path. If a real toolkit is used, all builds must use that same path. Mixed CUDA_HOME values across
+    packages causes ABI mismatches (undefined symbol errors)."
+  correction: "Set CUDA_HOME once at the start of Step 4 and reuse for ALL builds:
+    export CUDA_HOME=<path_determined_in_step_1a>
+    Then use $CUDA_HOME consistently in every build command.
+    If you already built a package with a DIFFERENT CUDA_HOME, you must clean and rebuild it:
+    rm -f *.so && rm -rf build/ *.egg-info && rebuild with correct CUDA_HOME."
 context_injection:
   always:
   - Strategy
@@ -380,9 +406,60 @@ PyTorch whl bundles its own CUDA runtime, so `torch+cu128` can run on a system w
 
 2. **If system nvcc is missing or wrong version**: Install the CUDA toolkit that matches the chosen PyTorch CUDA tag. E.g., torch+cu124 → install CUDA 12.4 toolkit, then set `CUDA_HOME=/usr/local/cuda-12.4` for all source builds.
 
-3. **ALL four FL dependencies (Megatron-LM-FL, TransformerEngine-FL, Apex, Flash-Attention) MUST be built from source.** Pre-built whls from FlagScale PyPI are NOT acceptable when driver/CUDA versions don't match FlagScale's default requirements — source builds guarantee binary compatibility with the actual hardware.
+3. **If system nvcc version > PyTorch's CUDA version** (e.g., only nvcc 13.0 available but torch is cu128): This is common on cutting-edge systems where the driver/toolkit is newer than what PyTorch supports. In this case, create an **nvcc version shim** — a wrapper that reports the torch-compatible version while using the real nvcc for compilation. CUDA is forward-compatible (nvcc 13.0 can compile code targeting CUDA 12.8 without issues).
 
-**Decision rule**: If `nvcc --version` reports a different major.minor than `torch.version.cuda`, you MUST resolve this BEFORE attempting any source build. Do NOT bypass version checks by modifying dependency source code.
+   **Shim creation procedure:**
+   ```bash
+   # Determine torch's CUDA version
+   TORCH_CUDA=$(python -c "import torch; print(torch.version.cuda)")  # e.g., "12.8"
+   
+   # Create shim directory
+   SHIM_DIR={deps_dir}/cuda-${TORCH_CUDA}-shim
+   mkdir -p $SHIM_DIR/bin
+   
+   # Create nvcc wrapper that reports matching version
+   cat > $SHIM_DIR/bin/nvcc << EOF
+   #!/bin/bash
+   if [[ "\$*" == *"--version"* ]]; then
+       echo "nvcc: NVIDIA (R) Cuda compiler driver"
+       echo "Cuda compilation tools, release ${TORCH_CUDA}, V${TORCH_CUDA}.0"
+       exit 0
+   fi
+   exec /usr/local/cuda/bin/nvcc "\$@"
+   EOF
+   chmod +x $SHIM_DIR/bin/nvcc
+   
+   # Symlink libraries and headers from real CUDA
+   for dir in lib64 include targets; do
+       ln -sf /usr/local/cuda/$dir $SHIM_DIR/$dir
+   done
+   
+   # Use this for ALL source builds
+   export CUDA_HOME=$SHIM_DIR
+   ```
+   
+   **When to use the shim vs installing a matching toolkit:**
+   - Shim (preferred): When nvcc is only 1 major version ahead (e.g., 13.0 vs 12.8). CUDA forward compatibility guarantees correct compilation.
+   - Install matching toolkit: When the version gap is large, or when the shim approach produces linking errors (rare).
+   - NEVER modify dependency source code (Apex/TE/Flash-Attention) to bypass version checks.
+
+4. **ALL four FL dependencies (Megatron-LM-FL, TransformerEngine-FL, Apex, Flash-Attention) MUST be built from source.** Pre-built whls from FlagScale PyPI are NOT acceptable when driver/CUDA versions don't match FlagScale's default requirements — source builds guarantee binary compatibility with the actual hardware.
+
+**Decision rule**: If `nvcc --version` reports a different major.minor than `torch.version.cuda`, you MUST resolve this BEFORE attempting any source build. Resolution options: (a) install matching CUDA toolkit, (b) create nvcc shim (if nvcc > torch CUDA), (c) choose a different PyTorch CUDA tag. Do NOT bypass version checks by modifying dependency source code.
+
+**IMPORTANT: Use CONSISTENT CUDA_HOME for ALL source builds.** Once you determine the correct `CUDA_HOME` (real toolkit path or shim path), use it for ALL four dependency builds. Do NOT use different `CUDA_HOME` values for different packages — this causes ABI mismatches where one package's `.so` expects a different symbol signature than what torch provides. The most common symptom is `undefined symbol` errors on import (e.g., `_ZN3c104cuda...` with wrong argument types).
+
+**Pre-build verification step** (run AFTER installing PyTorch, BEFORE building any extension):
+```bash
+NVCC_VER=$(nvcc --version 2>/dev/null | grep -oP 'release \K[\d.]+')
+TORCH_CUDA=$(python -c "import torch; print(torch.version.cuda)")
+echo "nvcc version: $NVCC_VER"
+echo "torch CUDA:   $TORCH_CUDA"
+if [ "$NVCC_VER" != "$TORCH_CUDA" ]; then
+    echo "⚠️  MISMATCH DETECTED — must resolve before source builds"
+    echo "Options: (1) install CUDA $TORCH_CUDA toolkit, (2) create nvcc shim if nvcc > torch"
+fi
+```
 
 **When driver doesn't match FlagScale's default CUDA requirement** (e.g., FlagScale's train.txt specifies torch+cu128 but driver only supports cu124):
 - Install PyTorch matching the DRIVER (e.g., torch+cu124), NOT what train.txt says
@@ -500,11 +577,13 @@ CRITICAL CHECKLIST before proceeding:
 - [ ] PyTorch version was verified to exist on PyPI (via `pip index versions torch`)
 - [ ] All versions in the table are derived from FlagScale source files (NOT existing envs)
 - [ ] Shared storage checked — conda env path uses --prefix on shared FS if available
-- [ ] CUDA toolkit version matches PyTorch's CUDA (not driver's)
+- [ ] CUDA toolkit/nvcc version alignment resolved — one of: (a) nvcc matches torch CUDA, (b) shim created for nvcc > torch, (c) matching toolkit to be installed
+- [ ] `CUDA_HOME` path determined and will be used consistently for ALL source builds
 - [ ] GPU compute capability ≥ required by flash-attn
+- [ ] Build-time dependencies noted: pybind11, cmake, ninja, packaging
 - [ ] Megatron-LM-FL will be built from source (NO whl, NO PyPI)
 - [ ] TransformerEngine-FL will be built from source (NO whl, NO PyPI); on non-NVIDIA platforms, uses `TE_FL_SKIP_CUDA=1`
-- [ ] Apex build flags include APEX_CUDA_EXT=1
+- [ ] Apex build flags include APEX_CUDA_EXT=1 (environment variable, NOT --global-option)
 - [ ] Flash-attn install uses --no-deps
 
 Present the table and ASK FOR CONFIRMATION. Do NOT proceed to Step 2 until the user confirms.
@@ -631,12 +710,20 @@ python -c "from megatron.plugin.platform import get_platform; print('OK:', get_p
 
 **Always build from source** — pre-built whls are NOT acceptable regardless of source.
 
+**Build-time dependencies** (install these FIRST if not already present):
+```bash
+pip install pybind11 cmake ninja
+```
+
+**CRITICAL: Use the same `CUDA_HOME` determined in Step 1a for ALL builds.** If you created an nvcc shim, set `CUDA_HOME` to the shim directory. If you installed a matching CUDA toolkit, set it to that path. Inconsistent `CUDA_HOME` between TE-FL and other builds causes ABI mismatches (undefined symbol errors on import).
+
 **For NVIDIA GPU platforms:**
 ```bash
 pip install nvidia-mathdx --extra-index-url https://pypi.nvidia.com
 git clone --recursive https://github.com/flagos-ai/TransformerEngine-FL.git {deps_dir}/TransformerEngine-FL
 cd {deps_dir}/TransformerEngine-FL
-NVTE_FRAMEWORK=pytorch pip install --no-build-isolation . -v
+SM_ARCH=$(python -c "import torch; cc = torch.cuda.get_device_capability(); print(f'{cc[0]}.{cc[1]}')")
+CUDA_HOME=$CUDA_HOME TORCH_CUDA_ARCH_LIST="$SM_ARCH" NVTE_FRAMEWORK=pytorch pip install --no-build-isolation . -v
 ```
 
 **For non-NVIDIA accelerator platforms (e.g., Huawei Ascend NPU):**
@@ -659,6 +746,13 @@ python -c "import transformer_engine; print('TE version:', transformer_engine.__
 
 **WARNING: The PyPI package named `apex` is a Pyramid web framework — NOT NVIDIA Apex.** Never run `pip install apex` from PyPI. NVIDIA Apex must always be built from source.
 
+**Build-time dependencies** (install these FIRST if not already present):
+```bash
+pip install packaging
+```
+
+**IMPORTANT: `--global-option` is REMOVED in pip 25+.** The old pattern `pip install --global-option="--cpp_ext" --global-option="--cuda_ext"` no longer works. Apex now uses environment variables instead: `APEX_CPP_EXT=1 APEX_CUDA_EXT=1`. Always use environment variables, never `--global-option`.
+
 ```bash
 git clone --depth 1 https://github.com/NVIDIA/apex.git {deps_dir}/apex
 cd {deps_dir}/apex
@@ -666,16 +760,23 @@ cd {deps_dir}/apex
 # Detect current GPU compute capability — only compile for this architecture
 SM_ARCH=$(python -c "import torch; cc = torch.cuda.get_device_capability(); print(f'{cc[0]}.{cc[1]}')")
 
-TORCH_CUDA_ARCH_LIST="$SM_ARCH" NVCC_APPEND_FLAGS='--threads 4' APEX_PARALLEL_BUILD=8 APEX_CPP_EXT=1 APEX_CUDA_EXT=1 \
-    pip install --no-build-isolation . -v
+CUDA_HOME=$CUDA_HOME TORCH_CUDA_ARCH_LIST="$SM_ARCH" NVCC_APPEND_FLAGS='--threads 4' \
+    APEX_PARALLEL_BUILD=8 APEX_CPP_EXT=1 APEX_CUDA_EXT=1 \
+    pip install --no-build-isolation --no-deps -e . -v
 ```
 
 Verify:
 ```bash
-python -c "import apex; print('Apex OK')"
+python -c "from apex.optimizers import FusedAdam; from apex.multi_tensor_apply import multi_tensor_applier; print('Apex CUDA extensions OK')"
 ```
 
-**Common issue**: CUDA version mismatch between system nvcc and PyTorch's CUDA. If Apex build fails with version check error, go back to Step 1a "CUDA version alignment for source builds" and resolve the mismatch. Do NOT modify Apex source code to bypass the check.
+**Common issue**: CUDA version mismatch between system nvcc and PyTorch's CUDA. If Apex build fails with version check error, go back to Step 1a "CUDA version alignment for source builds" and resolve the mismatch (likely by creating an nvcc shim or installing matching CUDA toolkit). Do NOT modify Apex source code to bypass the check.
+
+**Two version checks that can fail:**
+1. **Apex's own `setup.py` check** (`check_cuda_torch_binary_vs_bare_metal`): Compares nvcc version against `torch.version.cuda`. Triggered when nvcc major.minor ≠ torch CUDA.
+2. **PyTorch's `cpp_extension.py` check** (`_check_cuda_version`): Compares `CUDA_HOME/bin/nvcc --version` against `torch.version.cuda`. Fails if major version differs.
+
+Both checks are resolved by ensuring `CUDA_HOME` points to an nvcc that reports the correct version (either a real matching toolkit, or the shim from Step 1a).
 
 **IMPORTANT: Pure-Python vs CUDA Extensions**
 
@@ -695,6 +796,11 @@ Never disable just one fusion flag — if APEX CUDA extensions are missing, ALL 
 
 **CRITICAL**: Only compile for the current GPU's SM architecture. Flash-attn defaults to compiling ALL supported architectures (sm_80, sm_86, sm_89, sm_90, ...), which takes 30-60 minutes and is completely unnecessary — you only need the architecture of the GPUs on this machine. Set `TORCH_CUDA_ARCH_LIST` to the detected compute capability. This reduces compile time to 5-10 minutes.
 
+**Build-time dependencies** (install these FIRST if not already present):
+```bash
+pip install packaging ninja
+```
+
 ```bash
 git clone --branch v2.8.1 --depth 1 https://github.com/Dao-AILab/flash-attention.git {deps_dir}/flash-attention
 cd {deps_dir}/flash-attention
@@ -703,11 +809,11 @@ cd {deps_dir}/flash-attention
 SM_ARCH=$(python -c "import torch; cc = torch.cuda.get_device_capability(); print(f'{cc[0]}.{cc[1]}')")
 echo "Building flash-attn for SM $SM_ARCH only (skipping other architectures)"
 
-TORCH_CUDA_ARCH_LIST="$SM_ARCH" FLASH_ATTENTION_FORCE_BUILD=TRUE MAX_JOBS=4 \
+CUDA_HOME=$CUDA_HOME TORCH_CUDA_ARCH_LIST="$SM_ARCH" FLASH_ATTENTION_FORCE_BUILD=TRUE MAX_JOBS=4 \
     pip install --no-build-isolation --no-deps . -v
 ```
 
-**CUDA toolkit vs driver version**: Flash-attn compilation requires the CUDA **toolkit** version (nvcc) to match PyTorch's CUDA version, NOT the driver version. Check with `nvcc --version` (toolkit) vs `nvidia-smi` (driver). If nvcc is missing or wrong version, install the matching CUDA toolkit or set `CUDA_HOME` to the correct path.
+**CUDA toolkit vs driver version**: Flash-attn compilation requires the CUDA **toolkit** version (nvcc) to match PyTorch's CUDA version, NOT the driver version. Check with `nvcc --version` (toolkit) vs `nvidia-smi` (driver). If nvcc is missing or wrong version, install the matching CUDA toolkit or use the nvcc shim from Step 1a.
 
 After installing, verify PyTorch was NOT changed:
 ```bash
@@ -719,6 +825,35 @@ Verify:
 ```bash
 python -c "import flash_attn; print('Flash-Attention version:', flash_attn.__version__)"
 ```
+
+### 4e. Troubleshooting: Rebuild after ABI mismatch
+
+If `import` of a CUDA extension fails with `undefined symbol` errors (e.g., `_ZN3c104cuda...`), the most likely cause is ABI mismatch — the extension was compiled against different C++ headers than the runtime torch library provides.
+
+**Diagnosis:**
+```bash
+# Check the missing symbol
+python -c "import transformer_engine" 2>&1 | grep "undefined symbol"
+# Look up whether torch provides it with the same signature
+nm -D $(python -c "import torch; print(torch.__file__.replace('__init__.py', 'lib/libc10_cuda.so'))") | grep "<symbol_name>"
+```
+
+If the symbol exists but with a different mangled name (e.g., `...EiPKcS2_ib` vs `...EiPKcS2_jb`), the argument types differ between compile-time headers and runtime library. This means the extension was compiled with wrong CUDA_HOME.
+
+**Resolution:**
+```bash
+cd {deps_dir}/<package>
+# 1. Clean ALL build artifacts
+rm -f *.so
+rm -rf build/ *.egg-info dist/
+# 2. Rebuild with correct CUDA_HOME (must match torch.version.cuda)
+CUDA_HOME=<correct_path> TORCH_CUDA_ARCH_LIST="<sm_arch>" <other_flags> \
+    pip install --no-build-isolation --no-deps -e . -v
+# 3. Verify import
+python -c "import <package>"
+```
+
+**Key lesson**: ALL extensions in the environment must use the SAME `CUDA_HOME`. If one was built with `/usr/local/cuda-13.0` and another with the shim reporting 12.8, their ABI expectations may conflict. Always set `CUDA_HOME` once (in Step 1a) and reuse it consistently.
 
 ## Step 5: Final Verification
 

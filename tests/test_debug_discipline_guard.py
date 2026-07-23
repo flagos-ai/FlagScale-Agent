@@ -186,27 +186,27 @@ class TestOverrideMechanism:
 
 
 class TestResetTurn:
-    """Test that reset_turn clears state properly."""
+    """Test that reset_new_turn clears state properly."""
 
     def test_reset_clears_failure(self):
-        """reset_turn clears _failure_observed."""
+        """reset_new_turn clears _failure_observed."""
         g = DebugDisciplineGuard()
         g._failure_observed = True
         g._hypothesis_declared = False
         g._edits_since_failure = 5
-        g.reset_turn()
+        g.reset_new_turn()
         assert g._failure_observed is False
         assert g._hypothesis_declared is False
         assert g._edits_since_failure == 0
 
     def test_fresh_turn_no_blocking(self):
-        """After reset_turn, no blocking occurs even with .py edits."""
+        """After reset_new_turn, no blocking occurs even with .py edits."""
         g = DebugDisciplineGuard()
         # Simulate stale state from previous session
         g._failure_observed = True
         g._edits_since_failure = 10
         # New turn resets
-        g.reset_turn()
+        g.reset_new_turn()
         # Should not block
         ctx = _ctx("write_file", {"path": "/tmp/f.py"}, assistant_text="writing code")
         result = g.check_pre(ctx)

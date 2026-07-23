@@ -83,13 +83,34 @@ class Tool(ABC):
         """Execute the tool and return a string result."""
         ...
 
+    def _inject_override_param(self, params: dict) -> dict:
+        """Inject _override_reason as an optional parameter into schema.
+
+        This allows LLM to bypass guard blocks by providing a reason.
+        The field is stripped from tool_args before execute() is called.
+        Only injected if the schema has a 'properties' dict.
+        """
+        if "properties" not in params:
+            return params
+        # Deep copy to avoid mutating the class-level parameters dict
+        import copy
+        params = copy.deepcopy(params)
+        params["properties"]["_override_reason"] = {
+            "description": (
+                "If a previous tool call was blocked by a guard, provide a reason "
+                "here to override the block and force execution."
+            ),
+            "type": "string",
+        }
+        return params
+
     def to_openai_schema(self) -> dict:
         return {
             "type": "function",
             "function": {
                 "name": self.name,
                 "description": self.description,
-                "parameters": self.parameters,
+                "parameters": self._inject_override_param(self.parameters),
             },
         }
 
@@ -97,5 +118,5 @@ class Tool(ABC):
         return {
             "name": self.name,
             "description": self.description,
-            "input_schema": self.parameters,
+            "input_schema": self._inject_override_param(self.parameters),
         }

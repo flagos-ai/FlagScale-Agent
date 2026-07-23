@@ -257,17 +257,41 @@ class TestLLMFallback:
         result = guard._classify_training_error(ctx.tool_result, ctx)
         assert result == "attribute"
 
-    def test_memory_discipline_llm_discovery(self):
-        """Memory discipline detects results in shell output and tracks pending discoveries."""
+    def test_memory_discipline_reminder_threshold(self):
+        """Memory discipline reminds every 10 non-memory tool calls."""
         guard = MemoryDisciplineGuard()
-        guard._memory_list_done = True  # Skip read-discipline checks
 
-        # Shell with measurable results → should add to pending_discoveries
-        ctx = make_ctx("shell", {"command": "python train.py"},
-                      tool_result="Solved: 6/10 tasks, score=14.0, elapsed=24.6s")
-        guard.check_post(ctx)
-        assert len(guard._pending_discoveries) >= 1
-        assert any(cat in ("solve_rate", "metric", "timing") for cat in guard._pending_discoveries)
+        # 9 calls — no reminder
+        for i in range(9):
+            ctx = make_ctx("shell", {"command": f"echo {i}"}, tool_result="ok")
+            result = guard.check_pre(ctx)
+            assert result is None, f"Unexpected reminder on call {i+1}: {result}"
+
+        # 10th call — triggers reminder, counter resets
+        ctx = make_ctx("shell", {"command": "echo 10"}, tool_result="ok")
+        result = guard.check_pre(ctx)
+        assert result is not None
+        assert result.action == "inject_msg"
+        assert "10 tool calls" in result.message
+        assert guard._calls_since_memory == 0  # Reset after firing
+
+        # Next 9 calls — no reminder again
+        for i in range(9):
+            ctx = make_ctx("shell", {"command": f"echo {i}"}, tool_result="ok")
+            result = guard.check_pre(ctx)
+            assert result is None
+
+        # 20th total call (10th since last reminder) — triggers again
+        ctx = make_ctx("shell", {"command": "echo again"}, tool_result="ok")
+        result = guard.check_pre(ctx)
+        assert result is not None
+        assert result.action == "inject_msg"
+
+        # memory_read resets counter
+        ctx = make_ctx("memory_read", {"key": "test"}, tool_result="value")
+        result = guard.check_pre(ctx)
+        assert result is None
+        assert guard._calls_since_memory == 0
 
     def test_debug_residue_llm_detection(self):
         """LLM can detect non-obvious debug prints."""

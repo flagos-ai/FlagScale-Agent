@@ -368,6 +368,7 @@ class WorkerAgent:
             display=display,
             get_schemas_fn=lambda: self._get_filtered_schemas(self.phase),
             inject_message_fn=self._inject_message,
+            append_advisory_fn=self._append_advisory,
             append_tool_results_fn=self._append_tool_results,
             format_tool_result_fn=self.provider.format_tool_result,
             execute_tools_fn=self._execute_tools,
@@ -623,6 +624,17 @@ class WorkerAgent:
             completed=completed,
         )
 
+    def _auto_save(self):
+        """Auto-save conversation after each completed turn.
+
+        Silent — no user-facing output. Failures are swallowed to avoid
+        disrupting the interactive flow.
+        """
+        try:
+            self._save_conversation(completed=False)
+        except Exception:
+            pass
+
     def _exit(self):
         display.goodbye()
         self._save_conversation(completed=True)
@@ -659,7 +671,7 @@ class WorkerAgent:
         os.makedirs(os.path.dirname(history_file), exist_ok=True)
         completer = WordCompleter(
             ["/quit", "/reload", "/skill", "/save", "/memory",
-             "/mode", "/plan", "/resume", "/compact"],
+             "/mode", "/plan", "/resume", "/compact", "/session"],
             sentence=True,
         )
         # Key bindings: Enter submits, but pasted newlines are preserved
@@ -722,6 +734,7 @@ class WorkerAgent:
             except KeyboardInterrupt:
                 display.interrupted()
                 self._interrupted = True
+                self._auto_save()
                 continue
 
             while self.config.mode == "auto" and self._should_auto_continue():
@@ -736,7 +749,11 @@ class WorkerAgent:
                 except KeyboardInterrupt:
                     display.interrupted()
                     print(display.yellow("\n[Auto mode] Interrupted by user.\n"))
+                    self._auto_save()
                     break
+
+            # Auto-save after each complete user turn (including all auto-continuations)
+            self._auto_save()
 
             if self._auto_turn_count > 0:
                 print(display.yellow(
@@ -954,6 +971,8 @@ class WorkerAgent:
         except KeyboardInterrupt:
             display.interrupted()
             self._interrupted = True
+            self._auto_save()
+            return
 
         while self.config.mode == "auto" and self._should_auto_continue():
             self._auto_turn_count += 1
@@ -967,7 +986,11 @@ class WorkerAgent:
             except KeyboardInterrupt:
                 display.interrupted()
                 print(display.yellow("\n[Auto mode] Interrupted by user.\n"))
+                self._auto_save()
                 break
+
+        # Auto-save after each complete user turn
+        self._auto_save()
 
         if self._auto_turn_count > 0:
             print(display.yellow(
@@ -1356,9 +1379,10 @@ class WorkerAgent:
         # "keep" or unrecognized → don't change current mode
 
     def _inject_context(self, user_input: str):
-        memory_context = self._build_memory_context()
+        # Memory is no longer injected into system prompt (accessed via tools).
+        # Plan context is only used for the dashboard line at the end.
         plan_context = self._build_plan_context()
-        self._refresh_system_prompt(memory_context=memory_context, plan_context=plan_context)
+        self._refresh_system_prompt(plan_context=plan_context)
 
     def _build_plan_context(self) -> str:
         active = self.task_plan.get_active()
@@ -1812,25 +1836,77 @@ class WorkerAgent:
                             pass
 
     def _inject_message(self, msg: str):
-        """Inject a guard message into conversation history.
+        """Inject a guard block/escalate message into conversation history.
 
-        v3: Distinguishes block vs inject by content.
-        - Block messages (contain BLOCKED/override): keep as user message (LLM must act)
-        - Inject messages (advisory): prefix with de-prioritization signal
+        v4: This is now ONLY called for block/escalate verdicts.
+        Soft inject_msg goes through _append_advisory instead.
         """
-        is_block = "BLOCKED" in msg or "_override_reason" in msg or "override:" in msg.lower()
-        if is_block:
-            # Block: LLM must respond to this
-            self.history.append({"role": "user", "content": msg})
-        else:
-            # Inject: advisory only, don't hijack attention from tool results
-            self.history.append({
-                "role": "user",
-                "content": (
-                    "[GUARD ADVISORY — note but do not respond to this, "
-                    "prioritize tool results and user requests]\n" + msg
-                ),
-            })
+        self.history.append({"role": "user", "content": msg})
+
+    def _append_advisory(self, msg: str):
+        """Append a soft guard advisory to the last tool_result in history.
+
+        v4: Instead of creating an independent user message (which pollutes
+        conversation history and hijacks LLM attention), advisory messages are
+        appended to the most recent tool_result. This makes them:
+        - Lower priority (tool output, not user instruction)
+        - Non-persistent (scroll out with tool results naturally)
+        - Non-confusing (LLM treats as supplementary info, not a command)
+
+        Handles both OpenAI format (role=tool, content=str) and
+        Anthropic format (role=user, content=[{type: tool_result, ...}]).
+        Falls back to a lightweight user message if no tool_result exists.
+        """
+        advisory_suffix = (
+            f"\n\n---\n"
+            f"[Guard Advisory — note but do not respond to this, prioritize tool results and user requests]\n"
+            f"{msg}"
+        )
+        messages = self.history.get_messages()
+
+        # Search backwards for the most recent tool_result message
+        for i in range(len(messages) - 1, -1, -1):
+            m = messages[i]
+
+            # OpenAI format: {"role": "tool", "content": "..."}
+            if m.get("role") == "tool" and isinstance(m.get("content"), str):
+                m["content"] += advisory_suffix
+                return
+
+            # Anthropic format: {"role": "user", "content": [{"type": "tool_result", ...}]}
+            if m.get("role") == "user" and isinstance(m.get("content"), list):
+                # Find last tool_result block in the content list
+                for j in range(len(m["content"]) - 1, -1, -1):
+                    block = m["content"][j]
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        # Append to content field of the tool_result
+                        if isinstance(block.get("content"), str):
+                            block["content"] += advisory_suffix
+                        elif isinstance(block.get("content"), list):
+                            # Content is a list of blocks, add a text block
+                            block["content"].append({
+                                "type": "text",
+                                "text": advisory_suffix,
+                            })
+                        else:
+                            block["content"] = advisory_suffix
+                        return
+                # If this user message has no tool_result blocks, keep searching
+                continue
+
+            # Stop searching if we hit an assistant message (don't go past the
+            # current turn boundary)
+            if m.get("role") == "assistant":
+                break
+
+        # Fallback: no tool_result found (e.g., pre-guard at turn start).
+        # Use a lightweight system-scoped message that won't be confused with
+        # user instructions.
+        self.history.append({
+            "role": "user",
+            "content": f"[GUARD ADVISORY — note but do not respond to this, "
+                       f"prioritize tool results and user requests]\n{msg}",
+        })
 
     # ── Phase tracking ─────────────────────────────────────────────────────
 

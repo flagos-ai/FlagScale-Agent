@@ -132,7 +132,9 @@ class Guard(abc.ABC):
 
     # v3: Inject cooldown — max times the same inject message category fires
     # before going silent. Prevents context pollution from repetitive warnings.
-    max_inject_repeats: int = 3
+    # v5: Escalation chain — inject → block → escalate
+    # After this many injects without satisfaction, upgrade to block
+    escalate_after: int = 3  # inject count before escalating to block
 
     # v3: Decay window — if this many iterations pass without the guard
     # re-triggering (returning a non-None verdict), persistent state is reset.
@@ -150,26 +152,20 @@ class Guard(abc.ABC):
                 if not hasattr(self, '_inject_counts'):
                     self._inject_counts = {}
                     self._iterations_since_trigger = 0
-                    self._is_suppressed = False
                 _original(self, *args, **kw)
                 # Also ensure they exist AFTER (in case subclass clobbers)
                 if not hasattr(self, '_inject_counts'):
                     self._inject_counts = {}
                     self._iterations_since_trigger = 0
-                    self._is_suppressed = False
             cls.__init__ = patched_init
 
     def __init__(self):
-        # v3: Lifecycle tracking (managed by GuardRegistry)
-        self._inject_counts: dict[str, int] = {}  # category -> times fired
+        # v5: Lifecycle tracking (managed by GuardRegistry)
+        self._inject_counts: dict[str, int] = {}  # category -> times fired (for escalation)
         self._iterations_since_trigger: int = 0
-        self._is_suppressed: bool = False  # True = guard went silent after cooldown
 
     def should_activate(self, ctx: GuardContext) -> bool:
         """Check if this guard should run for the current context."""
-        # v3: Suppressed guards skip entirely until reset
-        if self._is_suppressed:
-            return False
         # Empty activate_on_states means "all states" (no filter)
         if self.activate_on_states and ctx.current_state not in self.activate_on_states:
             return False
@@ -198,7 +194,6 @@ class Guard(abc.ABC):
         """
         self._inject_counts.clear()
         self._iterations_since_trigger = 0
-        self._is_suppressed = False
 
     def check_pre(self, ctx: GuardContext) -> GuardVerdict | None:
         """Pre-execution check. Return block/inject to prevent or warn."""
@@ -230,6 +225,19 @@ class Guard(abc.ABC):
         """Called when a tool call was blocked externally (e.g., by another guard)."""
         pass
 
+    def was_inject_effective(self, ctx: GuardContext) -> bool | None:
+        """Called after each tool execution to check if a previous inject changed behavior.
+
+        Return:
+        - True: the agent responded to the inject (e.g., used memory after reminder)
+        - False: the agent ignored the inject (keeps doing unrelated things)
+        - None: can't tell yet / not applicable
+
+        Subclasses SHOULD override this to define their own effectiveness criteria.
+        Default: None (no opinion — won't mark effective or ineffective).
+        """
+        return None
+
     def reset_iteration(self):
         """Called at the start of each iteration (LLM+tool loop) within a turn.
 
@@ -245,6 +253,15 @@ class Guard(abc.ABC):
     # Backward compat: subclasses may override either name
     reset_turn = reset_iteration
 
+    def reset_new_turn(self):
+        """Called once at the start of a new turn (new user message).
+
+        Unlike reset_iteration (called per LLM+tool loop), this is called once
+        per user message. Guards that track cross-iteration patterns within a
+        turn should reset here so state doesn't leak between turns.
+        """
+        pass
+
     def set_shared_state(self, shared_state):
         """Optional: receive SharedState from GuardRegistry. Override to use."""
         pass
@@ -257,60 +274,32 @@ class Guard(abc.ABC):
         if category:
             self._inject_counts[category] = self._inject_counts.get(category, 0) + 1
 
-    def _should_suppress_inject(self, category: str = "") -> bool:
-        """Check if this inject category has exceeded its repeat limit."""
-        if not category or self.max_inject_repeats <= 0:
-            return False
+    def _get_escalation_level(self, category: str = "") -> str:
+        """Determine current escalation level for this category.
+
+        Returns:
+        - "inject": normal soft advisory (default)
+        - "block": inject has been ignored escalate_after times → block tool
+        - "escalate": block was overridden but behavior unchanged → hard escalate
+
+        The chain: inject × N → block → (override) → escalate
+        """
+        if self.escalate_after <= 0 or not category:
+            return "inject"
         count = self._inject_counts.get(category, 0)
-        return count >= self.max_inject_repeats
+        if count >= self.escalate_after * 2:
+            # Block was overridden but behavior didn't change
+            return "escalate"
+        elif count >= self.escalate_after:
+            # Inject was ignored repeatedly → upgrade to block
+            return "block"
+        return "inject"
 
     def _tick_idle(self):
         """Called each iteration when guard did NOT fire. Manages decay."""
         self._iterations_since_trigger += 1
         if self.decay_after_idle > 0 and self._iterations_since_trigger >= self.decay_after_idle:
             self.reset_state()
-
-    def dismiss_inject(self, category: str = ""):
-        """Dismiss a specific inject category — it will no longer fire.
-
-        Called when the LLM explicitly acknowledges/dismisses a guard's inject.
-        The guard's inject for this category is permanently suppressed until
-        reset_state() is called (via decay or override).
-        """
-        if category:
-            # Set count to max+1 to ensure suppression
-            self._inject_counts[category] = self.max_inject_repeats + 100
-        else:
-            # Dismiss ALL categories for this guard
-            self._is_suppressed = True
-
-    def check_dismiss_from_text(self, assistant_text: str) -> bool:
-        """Check if LLM's response dismisses this guard's injects.
-
-        Override in subclasses for guard-specific dismiss patterns.
-        Base implementation checks for generic dismiss signals referencing
-        this guard's name.
-
-        Returns True if dismissed.
-        """
-        if not assistant_text:
-            return False
-        text_lower = assistant_text.lower()
-        guard_name_lower = self.name.lower().replace("_", " ")
-
-        # Generic dismiss patterns
-        dismiss_signals = [
-            f"dismiss {guard_name_lower}",
-            f"ignore {guard_name_lower}",
-            f"suppress {guard_name_lower}",
-            f"stop {guard_name_lower}",
-            f"{guard_name_lower} not needed",
-            f"no need for {guard_name_lower}",
-        ]
-        if any(sig in text_lower for sig in dismiss_signals):
-            self.dismiss_inject()
-            return True
-        return False
 
 
 # Semantic categories for inject deduplication
@@ -344,8 +333,13 @@ def _infer_category(verdict: GuardVerdict) -> str:
 
 
 _OVERRIDE_HINT = (
-    "\n\n[To override: re-issue the same tool call with an added "
-    "\"_override_reason\" field in tool_args explaining why this action is justified.]"
+    "\n\n[To override this block: re-issue the EXACT same tool call, but add "
+    "\"_override_reason\" as an extra field in tool_args with a brief justification.\n"
+    "Example — if your blocked call was:\n"
+    "  tool: shell, args: {\"command\": \"rm -rf /tmp/old\"}\n"
+    "Then override with:\n"
+    "  tool: shell, args: {\"command\": \"rm -rf /tmp/old\", \"_override_reason\": \"Confirmed safe: only temp files, needed to free space\"}\n"
+    "The reason must explain WHY this action is justified despite the guard's concern.]"
 )
 
 
@@ -398,20 +392,8 @@ class GuardRegistry:
         first_reason = ""
         fired_guards: set[str] = set()
 
-        # v3: Scan assistant text for dismiss signals BEFORE running guards
-        assistant_text = getattr(ctx, 'assistant_text', "") or ""
-        if assistant_text:
-            for guard in self._guards:
-                if guard._is_suppressed:
-                    continue
-                guard.check_dismiss_from_text(assistant_text)
-
         for guard in self._guards:
             if not guard.should_activate(ctx):
-                continue
-
-            # v3: Skip if guard is fully suppressed (dismissed)
-            if guard._is_suppressed:
                 continue
 
             # v3: Check satisfaction before running the guard
@@ -429,8 +411,8 @@ class GuardRegistry:
             fired_guards.add(guard.name)
 
             if verdict.action in ("block", "escalate", "force_compact", "redirect"):
-                # Override mechanism: if guard is overridable and LLM provided a reason,
-                # let the guard decide whether to accept
+                # Override mechanism: only block is overridable.
+                # Escalate is the ultimate enforcement — no override path.
                 if (
                     verdict.action == "block"
                     and guard.overridable
@@ -459,36 +441,72 @@ class GuardRegistry:
                     if suppressed:
                         inject_categories_seen.update(suppressed)
 
-                # v2: Check effectiveness — if this inject has been repeatedly
-                # ineffective, escalate instead of repeating
-                if category and self._shared_state.inject_tracker.should_suppress(
-                    guard.name, category
-                ):
-                    escalation_msg = self._shared_state.inject_tracker.get_escalation_message(
-                        guard.name, category
+                # v5: Escalation uses category OR reason as tracking key
+                # Category is for dedup; escalation_key is for counting fires
+                escalation_key = category or verdict.reason or guard.name
+                escalation_level = guard._get_escalation_level(escalation_key)
+
+                if escalation_level == "escalate":
+                    # Final level: hard escalate, LLM cannot bypass
+                    esc_msg = (
+                        f"[{guard.name}] ESCALATED: {verdict.message}\n\n"
+                        f"This advisory has been ignored {guard.escalate_after * 2}+ times. "
+                        f"You MUST address it before continuing."
                     )
-                    # Replace the inject with an escalation
                     if first_hard_verdict is None:
                         first_hard_verdict = GuardVerdict.escalate(
-                            escalation_msg, reason=f"ineffective_inject_{guard.name}"
+                            esc_msg, reason=f"escalated_{guard.name}"
                         )
+                        first_hard_guard = guard
+                    # Record trigger (keeps counting)
+                    guard._record_trigger(escalation_key)
+                    fired_guards.add(guard.name)
                     continue
 
+                elif escalation_level == "block":
+                    # Mid level: block tool execution, LLM can override with reason
+                    block_msg = (
+                        f"[{guard.name}] BLOCKED: {verdict.message}\n\n"
+                        f"This advisory has been ignored {guard.escalate_after}+ times. "
+                        f"Tool call blocked until you address the concern."
+                    )
+                    block_verdict = GuardVerdict.block(
+                        block_msg, reason=f"escalated_block_{guard.name}"
+                    )
+                    # Check if LLM is overriding this escalated block
+                    if guard.overridable and ctx.override_reason:
+                        if guard.accept_override(ctx.override_reason, ctx):
+                            self._shared_state.record_override(guard.name, ctx.override_reason)
+                            display.guard_overridden(guard.name, ctx.override_reason)
+                            continue
+                    if first_hard_verdict is None:
+                        first_hard_verdict = block_verdict
+                        first_hard_guard = guard
+                    # Record trigger (keeps counting toward escalate)
+                    guard._record_trigger(escalation_key)
+                    fired_guards.add(guard.name)
+                    continue
+
+                # Normal inject level
                 inject_messages.append(verdict.message)
                 if not first_reason:
                     first_reason = verdict.reason
 
-                # Track in SharedState
+                # Record trigger to track escalation progress
+                guard._record_trigger(escalation_key)
+                fired_guards.add(guard.name)
+
+                # Track in SharedState for effectiveness monitoring
                 self._shared_state.inject_tracker.record_inject(
                     guard.name, category or verdict.reason, ctx.turn_count
                 )
 
-        # If there's a hard verdict, prepend inject messages and add override hint
+        # If there's a hard verdict, return it WITHOUT unrelated inject messages.
+        # Rationale: inject messages from other guards about unrelated concerns create
+        # confusing multi-signal noise. The block message itself is sufficient.
         if first_hard_verdict:
             # v3: Still tick lifecycle for idle guards
             self.tick_guard_lifecycle(fired_guards)
-            if inject_messages and first_hard_verdict.message:
-                first_hard_verdict.message = "\n\n".join(inject_messages) + "\n\n" + first_hard_verdict.message
             # Add override hint if the blocking guard is overridable
             first_hard_verdict.message = _maybe_add_override_hint(
                 first_hard_verdict, first_hard_guard, ctx
@@ -500,20 +518,6 @@ class GuardRegistry:
             # v3: Tick lifecycle for idle guards
             self.tick_guard_lifecycle(fired_guards)
             combined = "\n\n".join(inject_messages)
-            # v3: Add dismiss hint so LLM knows it can stop the inject
-            # Only add hint if any guard has fired more than once (repeated inject)
-            any_repeated = any(
-                sum(g._inject_counts.values()) > 1
-                for g in self._guards
-                if g.name in fired_guards
-            )
-            if any_repeated:
-                combined += (
-                    "\n\n[To dismiss these reminders: include "
-                    "\"_dismiss_guard\": \"<guard_name>\" in your next "
-                    "tool_args, or simply proceed — they will stop after "
-                    "2 repeats automatically.]"
-                )
             return GuardVerdict.inject(
                 combined,
                 reason=first_reason or "multi_guard_inject"
@@ -537,6 +541,17 @@ class GuardRegistry:
             is_read_only=ctx.tool_effects.is_read_only
         )
 
+        # v4: Universal effectiveness check — ask each guard if its inject worked
+        for guard in self._guards:
+            result = guard.was_inject_effective(ctx)
+            if result is not None:
+                self._shared_state.inject_tracker.mark_last_effective(
+                    guard.name, result
+                )
+                # v5: If effective, reset escalation counter — agent responded
+                if result is True:
+                    guard._inject_counts.clear()
+
         for guard in self._guards:
             if not guard.should_activate(ctx):
                 continue
@@ -545,7 +560,7 @@ class GuardRegistry:
                 continue
 
             if verdict.action in ("block", "escalate", "force_compact", "redirect"):
-                # Override mechanism (same as check_pre)
+                # Override mechanism (same as check_pre) — only block is overridable
                 if (
                     verdict.action == "block"
                     and guard.overridable
@@ -572,30 +587,45 @@ class GuardRegistry:
                     if suppressed:
                         inject_categories_seen.update(suppressed)
 
-                # v2: Check effectiveness — suppress repeatedly ineffective injects
-                if category and self._shared_state.inject_tracker.should_suppress(
-                    guard.name, category
-                ):
-                    escalation_msg = self._shared_state.inject_tracker.get_escalation_message(
-                        guard.name, category
+                # v5: Escalation uses category OR reason as tracking key
+                escalation_key = category or verdict.reason or guard.name
+                escalation_level = guard._get_escalation_level(escalation_key)
+                if escalation_level == "escalate":
+                    esc_msg = (
+                        f"[{guard.name}] ESCALATED: {verdict.message}\n\n"
+                        f"This advisory has been ignored repeatedly. "
+                        f"You MUST address it before continuing."
                     )
                     if first_hard_verdict is None:
                         first_hard_verdict = GuardVerdict.escalate(
-                            escalation_msg, reason=f"ineffective_inject_{guard.name}"
+                            esc_msg, reason=f"escalated_{guard.name}"
                         )
+                    guard._record_trigger(escalation_key)
+                    continue
+                elif escalation_level == "block":
+                    block_msg = (
+                        f"[{guard.name}] BLOCKED (post): {verdict.message}\n\n"
+                        f"This advisory has been ignored repeatedly."
+                    )
+                    if first_hard_verdict is None:
+                        first_hard_verdict = GuardVerdict.block(
+                            block_msg, reason=f"escalated_block_{guard.name}"
+                        )
+                    guard._record_trigger(escalation_key)
                     continue
 
                 inject_messages.append(verdict.message)
                 if not first_reason:
                     first_reason = verdict.reason
 
+                guard._record_trigger(escalation_key)
+
                 self._shared_state.inject_tracker.record_inject(
                     guard.name, category or verdict.reason, ctx.turn_count
                 )
 
         if first_hard_verdict:
-            if inject_messages and first_hard_verdict.message:
-                first_hard_verdict.message = "\n\n".join(inject_messages) + "\n\n" + first_hard_verdict.message
+            # Don't prepend unrelated inject messages — block message is sufficient
             first_hard_verdict.message = _maybe_add_override_hint(
                 first_hard_verdict, first_hard_guard, ctx
             )
@@ -628,6 +658,17 @@ class GuardRegistry:
         for guard in self._guards:
             # Call reset_turn — subclasses override this name
             guard.reset_turn()
+
+    def reset_new_turn(self):
+        """Reset per-turn state for all guards.
+
+        Called once at the start of a new turn (new user message). This resets
+        cross-iteration counters so state doesn't leak between user messages.
+        """
+        for guard in self._guards:
+            guard.reset_new_turn()
+        # Also reset shared state per-turn tracking
+        self._shared_state.inject_tracker.new_turn()
 
     # Backward compat alias
     reset_turn = reset_iteration

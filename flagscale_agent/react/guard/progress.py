@@ -46,7 +46,7 @@ class ProgressGuard(Guard):
         self._read_files: set = set()
         self._reread_count: int = 0
         self._shared_state = None
-        self._warned_this_session: bool = False
+        self._warned_this_turn: bool = False
 
     def set_shared_state(self, shared_state):
         """Receive SharedState from GuardRegistry."""
@@ -79,7 +79,7 @@ class ProgressGuard(Guard):
         if not ctx.tool_effects.is_read_only:
             self._read_files.clear()
             self._reread_count = 0
-            self._warned_this_session = False
+            self._warned_this_turn = False
             return None
 
         # v2: Check if LoopDetect or another guard already warned about reads this turn
@@ -129,8 +129,8 @@ class ProgressGuard(Guard):
                 category="read_stall",
             )
 
-        if consecutive_reads >= self._warn_threshold and not self._warned_this_session:
-            self._warned_this_session = True
+        if consecutive_reads >= self._warn_threshold and not self._warned_this_turn:
+            self._warned_this_turn = True
             if self._shared_state:
                 self._shared_state.issue_read_warning()
             return GuardVerdict.inject(
@@ -146,3 +146,14 @@ class ProgressGuard(Guard):
         # Progress tracking accumulates across iterations within a turn.
         # Counters are reset by productive tool calls in check_post.
         pass
+
+    def reset_new_turn(self):
+        """Reset at start of new user turn — fresh message, fresh slate.
+        
+        Note: _warned_this_turn (renamed) resets per turn so the guard can
+        warn again if the same pattern continues in a new turn.
+        _read_files and _reread_count are turn-scoped (a new message = new task context).
+        """
+        self._read_files.clear()
+        self._reread_count = 0
+        self._warned_this_turn = False

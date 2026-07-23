@@ -161,6 +161,22 @@ class CircuitBreakerGuard(Guard):
         # Increment iteration counter once per iteration (not per tool call)
         self._current_iteration += 1
 
+    def reset_state(self):
+        """v3: Full state reset — called on decay or override acceptance."""
+        super().reset_state()
+        self._error_counts.clear()
+        self._circuit_state.clear()
+        self._trip_iteration.clear()
+        self._last_error_category = None
+        self._open_block_count.clear()
+
+    def reset_new_turn(self):
+        """Reset per-turn state. Circuit breaker tracks errors across a task,
+        but iteration counter increments per turn to allow cooldown to expire."""
+        # Don't fully reset circuits — errors may persist across turns.
+        # But do increment iteration to allow cooldown to expire naturally.
+        self._current_iteration += 1
+
     def _classify_error(self, result: str, classify_fn=None) -> str | None:
         """Detect error and return a category for circuit grouping.
 

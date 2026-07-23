@@ -200,7 +200,12 @@ class ComprehensionGateGuard(Guard):
                 self._model_memory_key = key
 
         # Track failures in complex code context
-        if self._in_complex_context and ctx.tool_result:
+        # Only detect failures in execution results (shell), NOT in source code being read
+        if (
+            self._in_complex_context
+            and ctx.tool_result
+            and ctx.tool_name in ("shell", "monitor", "find_latest_log")
+        ):
             if self._is_complex_failure(ctx.tool_result):
                 self._failure_in_complex_code = True
                 self._impact_declared = False

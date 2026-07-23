@@ -253,7 +253,16 @@ class DebugDisciplineGuard(Guard):
         self._edits_since_failure = 0
 
     def reset_turn(self):
-        """Reset failure state each turn to prevent stale cross-session persistence."""
+        """Per-iteration reset. Keep failure state within a turn — debugging
+        is a multi-iteration process. Only clear per-iteration dedup if needed."""
+        pass
+
+    def reset_new_turn(self):
+        """New user message — clear debug mode. If user moved on, don't
+        keep enforcing hypothesis-first for a previous problem."""
         self._failure_observed = False
         self._hypothesis_declared = False
         self._edits_since_failure = 0
+        self._debug_prints_added = 0
+        self._last_debug_file = ""
+        self._modified_files.clear()

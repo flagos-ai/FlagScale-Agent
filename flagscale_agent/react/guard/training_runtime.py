@@ -354,6 +354,20 @@ class TrainingRuntimeGuard(Guard):
             self._turns_since_last_monitor += 1
             self._turns_since_last_gpu_check += 1
 
+    def reset_state(self):
+        """v3: Full state reset — called on decay or override acceptance."""
+        super().reset_state()
+        self._awaiting_monitor = False
+        self._monitor_gate_block_count = 0
+        self._consecutive_train_failures = 0
+        self._last_train_failure_reasons.clear()
+        self._source_reads_since_last_failure = 0
+
+    def reset_new_turn(self):
+        """Reset per-turn transient state. Training lifecycle state persists
+        across turns (training_started, launch history) but block counts reset."""
+        self._monitor_gate_block_count = 0
+
     @staticmethod
     def _is_read_only_shell_fast(cmd: str) -> bool:
         """Fast-path check for read-only shell commands (no LLM needed).

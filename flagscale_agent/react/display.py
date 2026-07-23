@@ -410,6 +410,8 @@ _compaction_suppressed = 0
 
 def context_compacted(from_tokens, to_tokens, compaction_num=None, ratio=None):
     global _last_compaction_to, _compaction_suppressed
+    # Clear any in-progress thinking animation so we print on a fresh line
+    thinking_done()
     # Suppress if change from last notification is < 5k tokens
     if abs(to_tokens - _last_compaction_to) < 5000 and _last_compaction_to > 0:
         _compaction_suppressed += 1
@@ -681,10 +683,12 @@ def guard_overridden(guard_name, reason):
 
 def guard_inject(message):
     """Display a guard inject message to the terminal (visible to user)."""
-    # Show inject messages with a distinct prefix so user can see guard activity
-    for line in message.strip().split('\n'):
-        if line.strip():
+    lines = [l for l in message.strip().split('\n') if l.strip()]
+    for i, line in enumerate(lines):
+        if i == 0:
             _print(f"  {dim('🛡')} {dim(line.strip())}")
+        else:
+            _print(f"      {dim(line.strip())}")
 
 
 def guard_block(message):
@@ -693,6 +697,17 @@ def guard_block(message):
     for line in message.strip().split('\n'):
         if line.strip():
             _print(f"  {red('🚫')} {line.strip()}")
+
+
+def guard_escalate(message):
+    """Display a guard escalate message to the terminal (visible to user).
+    
+    Escalate is stronger than inject but not a block — it demands attention
+    but doesn't prevent execution.
+    """
+    for line in message.strip().split('\n'):
+        if line.strip():
+            _print(f"  {yellow('⚠️')} {line.strip()}")
 
 
 def turn_summary(turn_num, elapsed, input_tokens, output_tokens):

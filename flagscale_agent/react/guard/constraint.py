@@ -151,3 +151,15 @@ class ConstraintGuard(Guard):
 
     def reset_turn(self):
         """Violations accumulate across iterations (session-level)."""
+        pass
+
+    def reset_state(self):
+        """v3: Full state reset — called on decay or override acceptance.
+        Resets violation counts but keeps constraints loaded."""
+        super().reset_state()
+        self._violations.clear()
+
+    def reset_new_turn(self):
+        """Violation counts persist across turns (constraints are session-level).
+        Only reset escalation risk — if agent overrode, let it try fresh."""
+        pass

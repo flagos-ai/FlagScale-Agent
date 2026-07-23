@@ -203,7 +203,7 @@ class TestGuardRegistry:
         assert reg.guards[1].priority == 20
 
     def test_check_pre_block_wins_with_inject_prepended(self):
-        """Block verdict takes precedence; inject messages are prepended for context."""
+        """Block verdict takes precedence; inject messages are NOT prepended (clean signal)."""
         reg = GuardRegistry()
         g1 = ConcreteGuard(verdict=GuardVerdict.block("blocked by g1"))
         g1.priority = 10
@@ -214,9 +214,9 @@ class TestGuardRegistry:
         ctx = GuardContext(current_state=AgentState.EXECUTING)
         verdict = reg.check_pre(ctx)
         assert verdict.action == "block"
-        # Inject message prepended to block message for full context
-        # v3: override hint is appended since guards are overridable by default
-        assert "injected by g2" in verdict.message
+        # v4: Inject messages from other guards are dropped when a block fires
+        # to avoid confusing multi-signal noise. Block message is self-sufficient.
+        assert "injected by g2" not in verdict.message
         assert "blocked by g1" in verdict.message
 
     def test_check_pre_block_only_no_inject(self):

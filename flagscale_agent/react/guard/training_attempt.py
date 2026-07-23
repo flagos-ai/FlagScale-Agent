@@ -218,12 +218,20 @@ class TrainingAttemptGuard(Guard):
         # Track source code reading (for unblocking)
         if self._is_blocked and ctx.tool_name == "read_file":
             path = ctx.tool_args.get("path", "")
-            if path.endswith(".py"):
+            if path.endswith((".py", ".yaml", ".yml", ".sh", ".conf")):
                 self._source_reads_since_block += 1
 
-        # Track hypothesis declaration (look for it in LLM text)
-        # Note: This is approximated by checking if the agent used inject/text
-        # The actual mechanism is in the system prompt enforcement
+        # Track hypothesis declaration from assistant text
+        if self._is_blocked and not self._hypothesis_declared and ctx.assistant_text:
+            text_lower = ctx.assistant_text.lower()
+            if ("hypothesis:" in text_lower or "**hypothesis**" in text_lower
+                    or "hypothesis**:" in text_lower
+                    or "root cause:" in text_lower or "root cause is" in text_lower
+                    or "根因" in text_lower or "假设：" in text_lower
+                    or "the issue is" in text_lower or "the problem is" in text_lower
+                    or "this fails because" in text_lower
+                    or "fix:" in text_lower):
+                self._hypothesis_declared = True
 
         # Detect training launch → start new attempt
         if ctx.tool_name == "shell":

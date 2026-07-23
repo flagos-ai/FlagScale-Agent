@@ -386,6 +386,22 @@ class LoopDetectGuard(Guard):
         # Clear per-iteration dedup cache, but keep history for cross-iteration detection
         self._tool_call_cache.clear()
 
+    def reset_new_turn(self):
+        """Reset all state at the start of a new user turn.
+
+        A new user message is a fresh context — previous tool call patterns
+        should not trigger loop detection in the new turn.
+        """
+        self._recent_tool_calls.clear()
+        self._tool_name_history.clear()
+        self._shell_cmd_history.clear()
+        self._total_tool_calls = 0
+        self._tool_call_cache.clear()
+        self._exact_loop_inject_count = 0
+        self._semantic_warned = False
+        self._semantic_warn_at = 0
+        self._semantic_warn_count = 0
+
     def reset_state(self):
         """v3: Full state reset — called on decay or override acceptance."""
         super().reset_state()
@@ -407,6 +423,5 @@ class LoopDetectGuard(Guard):
         for k, v in sorted(args.items()):
             if k in skip_keys:
                 continue
-            val = str(v)[:80]
-            key_parts.append(f"{k}={val}")
+            key_parts.append(f"{k}={v}")
         return "|".join(key_parts)

@@ -198,6 +198,25 @@ class InjectTracker:
         self._current_turn_categories.clear()
         self._turn_count += 1
 
+    def mark_last_effective(self, guard_name: str, effective: bool):
+        """Mark the most recent unrated inject from this guard as effective/ineffective.
+
+        Called by GuardRegistry after each tool execution, using the guard's own
+        was_inject_effective() result. This makes the escalation mechanism universal —
+        each guard defines its own effectiveness criteria.
+        """
+        # Find all keys for this guard and mark the last unrated entry
+        for key, history in self._history.items():
+            if key[0] != guard_name:
+                continue
+            # Walk backwards to find the most recent unrated entry
+            for entry in reversed(history):
+                if entry["effective"] is None:
+                    entry["effective"] = effective
+                    return
+                # Don't overwrite already-rated entries
+                break
+
 
 class SharedState:
     """Singleton-ish shared state owned by GuardRegistry, accessed by all guards."""
@@ -273,7 +292,6 @@ class SharedState:
         Only resets flags that should allow re-firing within the same turn.
         """
         self._read_warning_issued_this_turn = False
-        self.inject_tracker.new_turn()
 
     # Backward compat alias
     new_turn = new_iteration

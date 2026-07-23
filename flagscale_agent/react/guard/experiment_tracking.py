@@ -75,8 +75,8 @@ class ExperimentTrackingGuard(Guard):
     priority = 18  # After TrainingAttemptGuard (15), before TrainingRuntime (20)
     overridable = True  # LLM can always bypass with a reason
 
-    # v3: Inject at most 2 times before going silent
-    max_inject_repeats = 2
+    # v5: Escalate after 2 injects without satisfaction
+    escalate_after = 2
     # v3: Decay after 10 idle iterations (no launch detected)
     decay_after_idle = 10
 
@@ -149,9 +149,6 @@ class ExperimentTrackingGuard(Guard):
                             reason="experiment_not_recorded",
                         )
                     else:
-                        # v3: Check inject suppression before warning
-                        if self._should_suppress_inject("launch_without_recording"):
-                            return None  # Silently allow — we've warned enough
                         return GuardVerdict.inject(
                             "[ExperimentTracking] Launching training without "
                             "recording an experiment attempt. Consider calling "
@@ -196,10 +193,6 @@ class ExperimentTrackingGuard(Guard):
                 self._training_launched = False
                 self._result_pending = True
 
-                # v3: Check inject suppression before reminding
-                if self._should_suppress_inject("update_result"):
-                    return None
-
                 # Remind to update experiment (only if we know which one)
                 if self._last_experiment_name:
                     self._record_trigger("update_result")
@@ -221,4 +214,8 @@ class ExperimentTrackingGuard(Guard):
         # But if satisfied, clear inject state to prevent context pollution.
         if self._attempt_recorded and not self._result_pending:
             self._inject_counts.clear()
-            self._is_suppressed = False
+
+    def reset_new_turn(self):
+        """New user message: reset escalation counters.
+        Lifecycle state persists (attempt_recorded, result_pending)."""
+        self._unrecorded_launches = 0
