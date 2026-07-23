@@ -499,6 +499,8 @@ Rules:
 - Do NOT suggest skills for future steps that haven't started yet.
 - For simple operations (delete files, check status, list processes, read files), return empty list.
 - Maximum 2 skills per suggestion. If more seem relevant, pick only the most critical ones.
+- DISCUSSION vs EXECUTION: If the user is asking a question, discussing a concept, or reporting an observation (e.g., "精度有问题", "loss looks off", "how does porting work?"), do NOT suggest workflow skills. Only suggest workflow skills when the user explicitly requests an action (e.g., "做精度对齐", "port this model to Megatron", "align the precision between X and Y").
+- KEYWORD TRAP: Do not match on surface keywords alone. "精度" does not mean "run precision alignment workflow". "loss不对" does not mean "run model porting". Consider the user's INTENT, not just topic words.
 - Return ONLY a JSON array of skill names, e.g. ["train-env-setup"] or [].
 """
 
@@ -520,6 +522,7 @@ Rules:
 - Examples: if the agent just launched training → suggest "train-monitor"; if the agent is debugging OOM → suggest "train-monitor".
 - Do NOT suggest skills already loaded.
 - Be CONSERVATIVE: max 1 skill per suggestion. Only suggest when the need is obvious.
+- Do NOT suggest workflow skills (precision-alignment, model-porter, etc.) just because the agent read or discussed related topics. Only suggest them when the agent is actively PERFORMING that workflow (e.g., running checkpoint conversion, writing alignment scripts).
 - Return ONLY a JSON array of skill names, e.g. ["train-monitor"] or [].
 """
 

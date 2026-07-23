@@ -50,11 +50,12 @@ class KernelDeps:
     config: Any                            # AgentConfig
     display: Any                           # display module
     get_schemas_fn: Callable               # () -> list[dict]
-    inject_message_fn: Callable            # (msg: str) -> None
+    inject_message_fn: Callable            # (msg: str) -> None  [block/escalate only]
     append_tool_results_fn: Callable       # (results: list) -> None
     format_tool_result_fn: Callable        # (id, result) -> dict
     execute_tools_fn: Callable             # (tool_calls) -> list[str]
     is_context_limit_error_fn: Callable    # (exc) -> bool
+    append_advisory_fn: Callable | None = None  # (msg: str) -> None [soft inject → tool_result]
     call_llm_fn: Callable | None = None    # (messages, schemas) -> (response, usage)
     task_plan: Any = None                  # TaskPlan (optional)
     on_response_fn: Callable | None = None  # (response) -> None, called after LLM response appended
@@ -100,6 +101,7 @@ class AgentKernel:
         self._plan_auto_continue_count = 0  # Reset per turn to avoid poisoning
         self.fsm.transition(AgentState.EXECUTING, reason="new turn")
         d.judge.reset_turn()
+        d.guard_registry.reset_new_turn()
 
         _prev_handler = signal.getsignal(signal.SIGINT)
 
@@ -263,7 +265,8 @@ class AgentKernel:
                     if blocked_indices:
                         blocked_msg = (
                             "[BLOCKED BY GUARD] This tool call was prevented. "
-                            "See the injected message above for instructions."
+                            "Read the guard message injected above carefully — it contains "
+                            "override instructions with an example. Follow them exactly to proceed."
                         )
                         if len(blocked_indices) == len(tool_calls):
                             # All blocked
@@ -312,8 +315,8 @@ class AgentKernel:
 
                 # Apply post-guard verdicts AFTER tool results are appended,
                 # so inject messages don't break tool_call → tool_result pairing.
-                # v3: Inject messages are applied normally but with ADVISORY prefix
-                # (set in _inject_message) + max_inject_repeats prevents flooding.
+                # v4: post verdicts are advisory/escalate only (never block),
+                # so they don't stop the turn.
                 for verdict in post_verdicts:
                     self._apply_verdict(verdict, pre=False)
 
@@ -386,15 +389,6 @@ class AgentKernel:
         if tool_args and "_override_reason" in tool_args:
             override_reason = tool_args["_override_reason"]
             tool_args = {k: v for k, v in tool_args.items() if k != "_override_reason"}
-        # v3: Extract _dismiss_guard (LLM explicitly dismisses a guard's inject)
-        if tool_args and "_dismiss_guard" in tool_args:
-            dismiss_name = tool_args["_dismiss_guard"]
-            tool_args = {k: v for k, v in tool_args.items() if k != "_dismiss_guard"}
-            for guard in d.guard_registry.guards:
-                if guard.name == dismiss_name:
-                    guard.dismiss_inject()
-                    display.guard_inject(f"[{dismiss_name}] dismissed by LLM")
-                    break
         # Get last assistant text for guards that need to scan LLM responses
         assistant_text = self._get_last_assistant_text()
         return GuardContext(
@@ -412,21 +406,34 @@ class AgentKernel:
         )
 
     def _apply_verdict(self, verdict: GuardVerdict, pre: bool) -> bool:
-        """Apply a guard verdict. Returns True if the verdict is a 'block' action."""
+        """Apply a guard verdict. Returns True if this tool call should be blocked.
+
+        v5 semantics (escalation chain: inject → block → escalate):
+        - inject_msg: soft advisory appended to tool_result, turn continues
+        - block: prevent tool execution, LLM can override with reason
+        - escalate: prevent tool execution + independent message, NOT overridable
+        - force_compact: trigger compaction, turn continues
+        """
         d = self.deps
         if verdict.action == "block":
             d.inject_message_fn(verdict.message)
             display.guard_block(verdict.message)
             return True
-        elif verdict.action == "inject_msg":
+        elif verdict.action == "escalate":
+            # Ultimate enforcement — block tool + inject message, no override path.
             d.inject_message_fn(verdict.message)
+            display.guard_escalate(verdict.message)
+            return True
+        elif verdict.action == "inject_msg":
+            # v4: Soft advisory — append to last tool_result instead of
+            # creating a new user message. This avoids conversation pollution.
+            if d.append_advisory_fn:
+                d.append_advisory_fn(verdict.message)
+            else:
+                d.inject_message_fn(verdict.message)
             display.guard_inject(verdict.message)
         elif verdict.action == "force_compact":
             d.history.force_compact()
-        elif verdict.action == "escalate":
-            d.inject_message_fn(verdict.message)
-            display.guard_block(verdict.message)
-            self.fsm.transition(AgentState.REVIEWING, reason=verdict.reason)
         return False
 
     def _recover_context_overflow(self, exc, schemas):

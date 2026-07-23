@@ -151,4 +151,13 @@ class SafetyGuard(Guard):
         return None
 
     def reset_turn(self):
-        pass  # Safety/error state is session-level
+        pass  # Error state accumulates within a turn
+
+    def reset_new_turn(self):
+        """Decay consecutive errors on new user message.
+        
+        Halve the counter so cross-turn patterns still accumulate
+        but a fresh topic gets some breathing room.
+        """
+        self._consecutive_errors = self._consecutive_errors // 2
+        self._root_cause_recorded_since_error = False

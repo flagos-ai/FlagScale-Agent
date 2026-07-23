@@ -91,6 +91,9 @@ class CommandHandler:
             self.agent.history.force_compact(target_ratio=0.50)
             print("History compacted.")
             return True
+        elif cmd == "/session":
+            self._handle_session()
+            return True
         return False
 
     def _handle_skill(self, user_input: str):
@@ -172,6 +175,19 @@ class CommandHandler:
                 print("No active plan.")
             return
         print(f"Unknown /plan subcommand: {' '.join(parts[1:])}")
+
+    def _handle_session(self):
+        """Handle /session command — display current session info."""
+        agent = self.agent
+        created = time.strftime(
+            "%Y-%m-%d %H:%M:%S",
+            time.localtime(os.path.getctime(agent._session_dir))
+        ) if os.path.exists(agent._session_dir) else "unknown"
+        print(f"\n  Session ID:  {agent._session_id}")
+        print(f"  Directory:   {agent._session_dir}")
+        print(f"  Created:     {created}")
+        print(f"  Turns:       {agent.turn_count}")
+        print()
 
     def _handle_resume(self, user_input: str):
         """Handle /resume command - resume previous session.

@@ -145,3 +145,14 @@ class ExperimentGuard(Guard):
     def _cheap_trigger(cmd_lower: str) -> bool:
         """Phase 1: regex check for launch patterns. May have false positives."""
         return bool(_LAUNCH_RE.search(cmd_lower))
+
+    def reset_state(self):
+        """v3: Full state reset — called on decay or override acceptance."""
+        super().reset_state()
+        self._inject_count = 0
+        # Don't reset _experiment_created/_attempt_added — those reflect
+        # actual lifecycle state, not guard enforcement state.
+
+    def reset_new_turn(self):
+        """Reset block escalation counter per turn. Lifecycle state persists."""
+        self._inject_count = 0

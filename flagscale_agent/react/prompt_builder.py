@@ -14,17 +14,19 @@
 
 """System prompt builder for FlagScale Agent.
 
-Extracted from agent.py to reduce file size and improve modularity.
-Handles assembly of the system prompt from skills, scene, and runtime context.
+V2 redesign: builds a static prompt body (cache-friendly) with a tiny
+dashboard appended at the end. Memory and plan are NOT injected into the
+prompt — they are accessed on-demand via tools (memory_list, plan_status).
 """
 
 from __future__ import annotations
-
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict
 
 from flagscale_agent.react.prompt import (
-    SYSTEM_PROMPT_CORE, SYSTEM_PROMPT_OPTIONAL,
+    SYSTEM_PROMPT_STATIC,
+    SYSTEM_PROMPT_OPTIONAL,
+    DASHBOARD_TEMPLATE,
 )
 
 if TYPE_CHECKING:
@@ -33,16 +35,20 @@ if TYPE_CHECKING:
 
 
 class PromptBuilder:
-    """Builds and refreshes the system prompt for WorkerAgent.
-
-    Encapsulates all prompt assembly logic: skill summaries, critical rules,
-    situational context, and focused context injection.
-    """
+    """Assembles the system prompt from static template + optional sections + dashboard."""
 
     def __init__(self, skill_manager: "SkillManager", scene: "ScenePreset | None"):
         self._skill_manager = skill_manager
         self._scene = scene
         self._turn_count = 0
+
+    @property
+    def scene(self) -> "ScenePreset | None":
+        return self._scene
+
+    @scene.setter
+    def scene(self, value: "ScenePreset | None"):
+        self._scene = value
 
     def refresh(
         self,
@@ -50,100 +56,177 @@ class PromptBuilder:
         active_skill_content: dict[str, str],
         current_stage_id: str | None,
         shared_storage_paths: list[str],
+        tool_names: list[str] | None = None,
+        # Legacy params — accepted but ignored (removed from prompt injection)
         memory_context: str = "",
         plan_context: str = "",
-        tool_names: list[str] | None = None,
     ):
         """Build and set the system prompt on the history manager.
 
         Args:
             history: HistoryManager instance to set prompt on
             active_skill_content: {skill_name: content} for loaded skills
-            current_stage_id: Current workflow stage ID (for focused context)
+            current_stage_id: Current workflow stage ID (for focused skill context)
             shared_storage_paths: Detected shared filesystem paths
-            memory_context: Optional memory context string
-            plan_context: Optional plan context string
+            tool_names: List of available tool names
+            memory_context: IGNORED (kept for backward compat, not injected)
+            plan_context: IGNORED for prompt injection (used only for dashboard)
         """
         self._turn_count += 1
-        skills_summary = self._build_skills_summary()
-        cwd = os.getcwd()
-        tools_str = ", ".join(tool_names) if tool_names else "read_file, write_file, edit_file, shell, web_fetch, load_skill, memory_write, memory_read, memory_list, monitor, plan_create, plan_update, plan_status"
 
-        # Build optional sections based on scene constraints (data-driven)
+        # ── Tool names ──
+        tools_str = (
+            ", ".join(tool_names)
+            if tool_names
+            else "read_file, write_file, edit_file, shell, web_fetch, load_skill, "
+            "memory_write, memory_read, memory_list, monitor, plan_create, "
+            "plan_update, plan_status"
+        )
+
+        # ── Skills summary for header ──
+        skills_summary = self._build_skills_summary()
+
+        # ── Optional sections based on scene constraints ──
+        optional_sections = self._build_optional_sections(plan_context)
+
+        # ── Skill context (full or abbreviated based on turn count) ──
+        skill_context = self._build_skill_context(
+            active_skill_content, current_stage_id
+        )
+
+        # ── Critical rules extracted from skills ──
+        critical_rules = self._build_critical_rules(active_skill_content)
+
+        # ── Shared storage note ──
+        shared_storage_note = self._build_shared_storage_note(shared_storage_paths)
+
+        # ── Assemble static block ──
+        core = SYSTEM_PROMPT_STATIC.format(
+            cwd=os.getcwd(),
+            tools=tools_str,
+            skills=skills_summary,
+            critical_rules=critical_rules,
+            optional_sections=optional_sections + shared_storage_note,
+            skill_context=skill_context,
+        )
+
+        # ── Append dashboard at the very end ──
+        dashboard = self._build_dashboard(plan_context)
+        if dashboard:
+            core += DASHBOARD_TEMPLATE.format(dashboard_content=dashboard)
+
+        history.set_system_prompt(core)
+
+    def _build_optional_sections(self, plan_context: str) -> str:
+        """Select optional sections based on scene constraints."""
         optional_parts = []
+
+        # Scene-driven sections
+        scene_constraints = (
+            (self._scene.constraints or set()) if self._scene else set()
+        )
+
         CONSTRAINT_TO_SECTION = {
             "is_training": "experiment",
             "is_inference": "inference",
             "is_serving": "serving",
         }
-        scene_constraints = (self._scene.constraints or set()) if self._scene else set()
         for constraint, section_key in CONSTRAINT_TO_SECTION.items():
             if constraint in scene_constraints:
                 section = SYSTEM_PROMPT_OPTIONAL.get(section_key, "")
                 if section:
                     optional_parts.append(section)
-        # Also inject experiment workflow for training/inference tasks
+
+        # Experiment workflow for training/inference
         if "is_training" in scene_constraints or "is_inference" in scene_constraints:
             exp_section = SYSTEM_PROMPT_OPTIONAL.get("experiment", "")
             if exp_section and exp_section not in optional_parts:
                 optional_parts.append(exp_section)
-        # Planning section only when a plan exists (saves ~192 tokens otherwise)
+
+        # Planning section only when a plan exists
         if plan_context:
-            optional_parts.append(SYSTEM_PROMPT_OPTIONAL.get("planning", ""))
+            planning = SYSTEM_PROMPT_OPTIONAL.get("planning", "")
+            if planning:
+                optional_parts.append(planning)
+
+        # Always include these
         optional_parts.append(SYSTEM_PROMPT_OPTIONAL.get("memory_rules", ""))
         optional_parts.append(SYSTEM_PROMPT_OPTIONAL.get("decision", ""))
-        # User commands only on first 3 turns (saves ~172 tokens on subsequent turns)
+
+        # User commands only on first 3 turns
         if self._turn_count <= 3:
             optional_parts.append(SYSTEM_PROMPT_OPTIONAL.get("user_commands", ""))
-        optional_sections = "\n\n".join(p for p in optional_parts if p)
 
-        skill_context = ""
-        if active_skill_content:
-            skill_bodies = []
-            for name, content in active_skill_content.items():
-                # Use focused context if skill has context_injection rules
+        return "\n\n".join(p for p in optional_parts if p)
+
+    def _build_skill_context(
+        self, active_skill_content: Dict[str, str], current_stage_id: str | None
+    ) -> str:
+        """Build skill context block.
+
+        Strategy:
+        - Use focused context if skill has context_injection rules (stage-aware)
+        - First 5 turns after loading: full skill content
+        - After 5 turns: header only (critical rules extracted separately)
+        """
+        if not active_skill_content:
+            return ""
+
+        skill_bodies = []
+        for name, content in active_skill_content.items():
+            if self._turn_count <= 5:
+                # Early turns: full content (focused or raw)
                 focused = self._skill_manager.get_focused_context(
-                    name,
-                    stage_id=current_stage_id,
-                    tool_name=None,
+                    name, stage_id=current_stage_id, tool_name=None
                 )
-                if focused:
-                    skill_bodies.append(focused)
-                elif self._turn_count <= 5:
-                    # Full skill content only for first 5 turns
-                    skill_bodies.append(content)
-                else:
-                    # After turn 5: compact summary only (critical rules already extracted separately)
-                    # Include just the first 3 lines as a reminder of what the skill is
-                    lines = content.strip().split("\n")
-                    header = "\n".join(lines[:3])
-                    skill_bodies.append(f"{header}\n[... full content omitted after turn 5 to save tokens ...]")
-            skill_context = "\n\n".join(skill_bodies)
+                # get_focused_context returns full body when no injection rules,
+                # which is fine for early turns
+                skill_bodies.append(focused if focused else content)
+            else:
+                # After turn 5: compact header only
+                # Critical rules are already extracted separately
+                lines = content.strip().split("\n")
+                header = "\n".join(lines[:3])
+                skill_bodies.append(
+                    f"{header}\n[... use load_skill('{name}') for full content ...]"
+                )
 
-        critical_rules = self._build_critical_rules(active_skill_content)
-        situational = self._build_situational_context(shared_storage_paths)
+        return "\n\n".join(skill_bodies)
 
-        core = SYSTEM_PROMPT_CORE.format(
-            tools=tools_str,
-            skills=skills_summary,
-            cwd=cwd,
-            plan_context=plan_context,
-            memory_context=memory_context,
-            situational_context=situational,
-            optional_sections=optional_sections,
-            skill_context=skill_context,
-            critical_rules=critical_rules,
-        )
+    def _build_critical_rules(self, active_skill_content: dict[str, str]) -> str:
+        """Extract CRITICAL-level rules from loaded skills.
 
-        history.set_system_prompt(core)
+        Looks for content between `## CRITICAL` / `# CRITICAL` and the next heading.
+        Always included regardless of turn count.
+        """
+        if not active_skill_content:
+            return ""
+
+        critical_parts = []
+        for name, content in active_skill_content.items():
+            lines = content.split("\n")
+            capturing = False
+            captured = []
+            for line in lines:
+                if line.strip().lower().startswith(("## critical", "# critical")):
+                    capturing = True
+                    continue
+                elif capturing and line.strip().startswith("#"):
+                    break
+                elif capturing:
+                    captured.append(line)
+
+            if captured:
+                text = "\n".join(captured).strip()
+                if text:
+                    critical_parts.append(f"[{name} critical rules]\n{text}")
+
+        if not critical_parts:
+            return ""
+        return "\n\n".join(critical_parts) + "\n"
 
     def _build_skills_summary(self) -> str:
-        """Build a compact summary of all available skills.
-
-        Keywords are omitted from the prompt (they're used by judge for matching,
-        not needed in system prompt). Descriptions are capped at 80 chars.
-        Saves ~780 tokens per turn compared to including keywords.
-        """
+        """Build compact summary of all available skills for the header line."""
         try:
             available = self._skill_manager.list_skills()
             lines = []
@@ -155,45 +238,49 @@ class PromptBuilder:
         except Exception:
             return "(skills not available)"
 
-    def _build_critical_rules(self, active_skill_content: dict[str, str]) -> str:
-        """Extract CRITICAL-level rules from loaded skills.
+    def _build_dashboard(self, plan_context: str) -> str:
+        """Build the dashboard line for the end of the prompt.
 
-        These appear in the system prompt BEFORE the main skill content,
-        at a position of high attention weight.
+        Extracts plan title/step from plan_context if available.
+        Format: "Task: <title> | Step: N/M | Turn: <n>"
         """
-        blocks = []
-        for name, content in active_skill_content.items():
-            lines = content.split("\n")
-            capturing = False
-            captured = []
-            for line in lines:
-                if line.startswith("#") and "CRITICAL" in line.upper():
-                    capturing = True
-                    captured.append(line)
-                elif capturing:
-                    if line.startswith("#") and "CRITICAL" not in line.upper():
-                        capturing = False
-                        if captured:
-                            blocks.append("\n".join(captured))
-                            captured = []
-                    else:
-                        captured.append(line)
-            if captured:
-                blocks.append("\n".join(captured))
-        return "\n\n".join(blocks)
-
-    @staticmethod
-    def _build_situational_context(shared_storage_paths: list[str]) -> str:
-        """Build dynamic context about the runtime environment."""
+        import re
         parts = []
-        if shared_storage_paths:
-            parts.append(
-                "## Shared Storage\n\n"
-                "The following shared/network filesystem paths are available. "
-                "For multi-node training, conda environments and data should be "
-                "placed on shared storage so all nodes can access them.\n\n"
-                + "\n".join(f"- `{p}`" for p in shared_storage_paths)
-                + "\n\nWhen creating conda environments, use `--prefix` targeting "
-                "one of these paths instead of `-n <name>`.\n"
-            )
-        return "\n\n".join(parts)
+
+        if plan_context:
+            # Extract title from <active-plan title="...">
+            title_match = re.search(r'title="([^"]*)"', plan_context)
+            if title_match:
+                title = title_match.group(1).strip()
+                if title:
+                    parts.append(f"Task: {title}")
+
+            # Count total steps and find current step
+            step_lines = re.findall(r'\[.\] Step (\d+):', plan_context)
+            total = len(step_lines)
+            # Current step is the one with 🔄 or the first ⬜
+            doing_match = re.search(r'\[🔄\] Step (\d+):', plan_context)
+            pending_match = re.search(r'\[⬜\] Step (\d+):', plan_context)
+            if doing_match:
+                current = int(doing_match.group(1))
+                parts.append(f"Step: {current}/{total}")
+            elif pending_match:
+                current = int(pending_match.group(1))
+                parts.append(f"Step: {current}/{total}")
+
+        parts.append(f"Turn: {self._turn_count}")
+        return " | ".join(parts)
+
+    def _build_shared_storage_note(self, shared_storage_paths: list[str]) -> str:
+        """Build a note about shared storage paths for conda environments."""
+        if not shared_storage_paths:
+            return ""
+        return (
+            "\n\n## Shared Storage\n\nAvailable shared storage paths:\n"
+            + "\n".join(f"- `{p}`" for p in shared_storage_paths)
+            + "\n\nWhen creating conda environments, use `--prefix` targeting "
+            "one of these paths instead of `-n <name>`.\n"
+        )
+
+    # Keep old name for backward compatibility
+    build_shared_storage_note = _build_shared_storage_note

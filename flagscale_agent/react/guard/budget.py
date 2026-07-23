@@ -138,6 +138,17 @@ class BudgetGuard(Guard):
         # Budget is session-level, never resets per iteration
         pass
 
+    def reset_state(self):
+        """v3: Reset block escalation state. Budget totals are session-level
+        and never reset (that would defeat the purpose of budgeting)."""
+        super().reset_state()
+        self._exhausted_block_count = 0
+        # Don't reset _total_tokens, _total_tool_calls, or warning flags
+
+    def reset_new_turn(self):
+        """Budget is session-level — only reset block escalation counter."""
+        self._exhausted_block_count = 0
+
     @property
     def _token_percent(self) -> float:
         if self._max_tokens <= 0:

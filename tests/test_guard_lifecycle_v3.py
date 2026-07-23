@@ -108,16 +108,16 @@ class TestExperimentTrackingLifecycle:
         assert guard._unrecorded_launches == 0
         assert guard._attempt_recorded is False
 
-    def test_inject_suppression_after_max_repeats(self):
-        """Inject warnings should stop after max_inject_repeats."""
+    def test_inject_escalation_after_threshold(self):
+        """Inject upgrades to block after escalate_after fires."""
         guard = ExperimentTrackingGuard()
 
         # Fire inject warnings up to the limit
-        for i in range(guard.max_inject_repeats):
+        for i in range(guard.escalate_after):
             guard._record_trigger("launch_without_recording")
 
-        # Now it should be suppressed
-        assert guard._should_suppress_inject("launch_without_recording") is True
+        # Now it should be at "block" level
+        assert guard._get_escalation_level("launch_without_recording") == "block"
 
     def test_satisfaction_check(self):
         """Guard should report satisfied when attempt is recorded and no pending results."""
@@ -198,7 +198,6 @@ class TestGuardLifecycleBase:
         g = MyGuard()
         assert hasattr(g, '_inject_counts')
         assert hasattr(g, '_iterations_since_trigger')
-        assert hasattr(g, '_is_suppressed')
 
     def test_decay_resets_state(self):
         """After decay_after_idle iterations without firing, state resets."""
@@ -244,19 +243,27 @@ class TestGuardLifecycleBase:
         g.accept_override("good reason", ctx)
         assert g.block_count == 0
 
-    def test_inject_suppression(self):
-        """Inject messages are suppressed after max_inject_repeats."""
+    def test_inject_escalation_levels(self):
+        """Inject escalation: inject → block → escalate based on count."""
 
         class InjectGuard(Guard):
             name = "injector"
-            max_inject_repeats = 3
+            escalate_after = 3
 
         g = InjectGuard()
+        # Initially: inject level
+        assert g._get_escalation_level("my_category") == "inject"
+
+        # After 3 triggers: block level
         for _ in range(3):
             g._record_trigger("my_category")
+        assert g._get_escalation_level("my_category") == "block"
+        assert g._get_escalation_level("other_category") == "inject"
 
-        assert g._should_suppress_inject("my_category") is True
-        assert g._should_suppress_inject("other_category") is False
+        # After 6 triggers: escalate level
+        for _ in range(3):
+            g._record_trigger("my_category")
+        assert g._get_escalation_level("my_category") == "escalate"
 
 
 if __name__ == "__main__":

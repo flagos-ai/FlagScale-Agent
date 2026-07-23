@@ -31,12 +31,24 @@ from flagscale_agent.react.guard import Guard, GuardContext, GuardVerdict
 from flagscale_agent.react.guard.utils import get_judge_result, is_trusted
 from flagscale_agent.react.state_machine import AgentState
 
-# Lightweight error indicators — intentionally broad, just a gate to avoid
-# calling LLM on every successful tool result
+# Lightweight error indicators — gate to avoid calling LLM on every output.
+# Must be specific enough to avoid false positives on normal shell output.
+# These are checked against tool output that is already filtered to
+# execution-type tools (shell, edit_file, write_file, etc.)
 _ERROR_INDICATORS = (
-    "error", "traceback", "exception", "failed", "fatal",
-    "denied", "not found", "no such", "cannot", "killed",
-    "timeout", "refused", "oom", "cuda",
+    "traceback (most recent",   # Python traceback
+    "error:",                    # Generic error prefix
+    "fatal:",                    # Fatal errors
+    "exception:",               # Exception messages
+    "failed with exit code",    # Process failures
+    "permission denied",        # Access errors
+    "command not found",        # Missing commands
+    "no such file or directory",  # Missing paths
+    "killed",                   # OOM killer etc.
+    "segmentation fault",       # Segfault
+    "oom",                      # Out of memory
+    "cuda error",               # GPU errors
+    "nccl error",               # NCCL errors
 )
 
 
@@ -64,6 +76,12 @@ class ErrorClassifierGuard(Guard):
 
     def check_post(self, ctx: GuardContext) -> GuardVerdict | None:
         if not ctx.tool_result:
+            return None
+
+        # Skip read-only tools — their output is source code / file content,
+        # not execution results. Keywords like "error" in code are normal.
+        if ctx.tool_name in ("read_file", "memory_read", "memory_list",
+                             "plan_status", "web_fetch", "inspect_checkpoint"):
             return None
 
         text = ctx.tool_result

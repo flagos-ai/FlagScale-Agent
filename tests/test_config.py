@@ -114,4 +114,4 @@ class TestAgentConfig:
 
     def test_skill_dirs_default(self):
         cfg = AgentConfig()
-        assert len(cfg.skill_dirs) == 3
+        assert len(cfg.skill_dirs) == 2  # builtin + ~/.flagscale/skills
