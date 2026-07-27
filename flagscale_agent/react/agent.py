@@ -96,6 +96,7 @@ from flagscale_agent.react.guard.megatron_path import MegatronPathGuard
 from flagscale_agent.react.guard.debug_discipline import DebugDisciplineGuard
 from flagscale_agent.react.guard.file_tool import FileToolGuard
 from flagscale_agent.react.guard.memory_discipline import MemoryDisciplineGuard
+from flagscale_agent.react.guard.arg_type import ArgTypeGuard
 from flagscale_agent.react.constraint.cache import ConstraintCache
 from flagscale_agent.react.prompt_builder import PromptBuilder
 from flagscale_agent.react.tool_executor import ToolExecutor, tool_display_summary
@@ -310,6 +311,8 @@ class WorkerAgent:
         guard_registry = GuardRegistry()
         # Register native guards
         constraints = self.scene.constraints if self.scene else set()
+        # Arg type guard first — most fundamental, prevents crashes from malformed LLM args
+        guard_registry.register(ArgTypeGuard(tool_registry=self.tool_registry))
         guard_registry.register(SafetyGuard())
 
         # Reliability guards (P7)

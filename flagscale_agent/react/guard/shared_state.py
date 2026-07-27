@@ -96,6 +96,10 @@ class ReadStats:
         if tool_name == "read_file":
             path = args.get("path", "") or args.get("file_path", "")
             start_line = args.get("start_line")
+            # Guard only tracks stats — skip if start_line is not a valid int
+            # (type validation and LLM retry is handled by ToolRegistry._validate_args)
+            if start_line is not None and not isinstance(start_line, int):
+                start_line = None
             if path:
                 target = f"{path}:{start_line or 0}"
                 self.recent_read_targets.append(target)
