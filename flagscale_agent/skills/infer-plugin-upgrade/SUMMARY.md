@@ -24,8 +24,8 @@ validation -- Step 7 PR.
 - Validate on real NVIDIA GPU hardware before declaring done
 
 **High-risk areas to audit each upgrade**:
-- `vllm_fl/ops/fused_moe/layer.py` -- FusedMoE class vs factory, FusedTopKRouter signature
-- `vllm_fl/worker/model_runner.py` -- InputBatch params, get_model() wrapper handling, new proposer dispatch branches
+- MoE layer implementation -- class vs factory toggle, router constructor signature changes
+- `vllm_fl/worker/model_runner.py` -- core data structure params, new model wrapper types in `get_model()`, new proposer dispatch branches
 - `vllm_fl/ops/_C_ops_schemas.py` -- diff registered schemas vs installed ops with check_ops.py
 - Any `from vllm.X import Y` -- symbol may have moved to a different module
 

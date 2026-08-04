@@ -147,9 +147,9 @@ Key distinction: FlagGems covers compute kernels (matmul, attention, elementwise
 `_C_cache_ops` -- those are vLLM's paged KV cache management ops and must be implemented in the plugin.
 
 Missing ops fall into two categories:
-- **Generic cache ops** (e.g., `reshape_and_cache`, `copy_blocks`): must be present for any model to run.
+- **Generic cache ops** (needed by all models to manage paged KV cache): must be present for any model to run.
   If missing, the plugin is broken for this vllm version.
-- **Model-specific ops** (e.g., `concat_and_cache_mla` for a specific model's attention variant): only
+- **Model-specific ops** (needed only by a particular attention variant or architecture): only
   blocks that model. Other models run fine without them.
 
 ### 1d. Scan for new features that require plugin glue
@@ -159,10 +159,10 @@ until you add the glue code. For each minor bump, actively scan for the followin
 by reading both the vLLM changelog and the actual source diff:
 
 **New execution paths the plugin must route through:**
-Check whether vLLM added new wrapper classes around `nn.Module` (e.g. graph wrappers, quantization
-wrappers). The plugin's `get_model()` and `load_model()` must handle any new wrapper type -- if
-they don't, callers receive the wrapper instead of the raw model, causing subtle failures that
-don't produce errors at import time.
+Check whether vLLM added new wrapper classes around `nn.Module` (such as graph wrappers or
+quantization wrappers). The plugin's `get_model()` and `load_model()` must handle any new wrapper
+type -- if they don't, callers receive the wrapper instead of the raw model, causing subtle failures
+that don't produce errors at import time.
 
 ```bash
 # Find new wrapper classes that wrap nn.Module
@@ -215,11 +215,11 @@ new vllm source side by side before writing any fix:
 
 | Plugin file | What to audit in new vllm | Why it commonly breaks |
 |---|---|---|
-| `vllm_fl/ops/fused_moe/layer.py` | Is `FusedMoE` still a class or now a factory? What is `FusedTopKRouter.__init__` signature? | vllm toggles between class and factory; subclassing or kwarg forwarding breaks silently |
-| `vllm_fl/worker/model_runner.py` | `InputBatch.__init__` params, `use_uniform_kv_cache` signature, `WorkerProc` entry point name, new wrapper classes in `get_model()` | Plugin often lags behind by 1-2 vllm versions; new params appear or old ones are removed |
+| MoE layer implementation | Is the MoE class still directly subclassable or is it now a factory? What did the router's `__init__` signature change to? | vllm toggles between class and factory; subclassing or kwarg forwarding breaks silently |
+| `vllm_fl/worker/model_runner.py` | Core data structure constructor params (input batch, attention metadata), deprecated method signatures, new model wrapper types that `get_model()` must unwrap, new execution dispatch branches | Plugin often lags behind by 1-2 vllm versions; new params appear or old ones are removed |
 | `vllm_fl/ops/_C_ops_schemas.py` | Run check_ops.py (Step 1c) to diff registered schemas vs installed ops | vllm reorganizes C extensions; model-specific ops may never be in base vllm |
 | Any file with `from vllm.X import Y` | Does that import path still exist in new vllm? | vllm moves symbols between modules frequently |
-| `vllm_fl/worker/` distributed code | `parallel_state` init API, `world_size`/`rank` call signatures | Distributed init API evolves across versions |
+| `vllm_fl/worker/` distributed code | Distributed init API, process group call signatures | Distributed init API evolves across versions |
 
 The specific breakages depend entirely on the version gap. Do not assume the same bugs will
 appear across upgrades -- read the actual error, trace it to the changed vllm code, then fix.
@@ -299,7 +299,7 @@ A KV cache op is declared in `vllm_fl/ops/_C_ops_schemas.py` but has no NVIDIA b
 - Generic cache op (needed by all models): must implement it -- the plugin is broken without it
 - Model-specific op: only blocks that model, implement when adding support for that model
 
-For implementation: reference upstream vllm's `_custom_ops.py` for the C extension wrapper pattern.
+For implementation: reference upstream vllm's C extension wrapper conventions for the correct pattern.
 For model-specific ops, check other hardware backends in the plugin for algorithmic reference.
 
 Verify fix:
@@ -360,10 +360,10 @@ Run at minimum one model per category, in order of increasing complexity:
 
 | Category | Why |
 |---|---|
-| Dense LLM (e.g., Qwen, LLaMA) | Base case, no MoE or special ops |
-| MoE LLM (e.g., Qwen-MoE, Mixtral) | Exercises FusedMoE plugin path |
+| Dense LLM | Base case, no MoE or special ops |
+| MoE LLM | Exercises the MoE layer plugin path |
 | Mamba/Hybrid | Exercises CUDA graph with non-attention layers |
-| VLM (e.g., Gemma, SmolVLM) | Exercises multimodal pipeline |
+| VLM (multimodal) | Exercises multimodal pipeline and encoder cache |
 | Dense LLM + speculative decoding | Exercises drafter dispatch, spec decode input batch paths, and any new proposer routing added in the new vllm version |
 
 For each model:
@@ -378,40 +378,45 @@ ssh <host> "docker exec \
 
 Monitor: `monitor(file=<log_file>, success_pattern='Generated text:|Output:', fail_pattern='ERROR|Traceback', duration=600)`
 
-### 4c. Hardware-specific failure patterns on NVIDIA A800/A100
+### 4c. Hardware-specific failures
 
-These are documented from past upgrades as reference. New upgrades may encounter different issues.
+These failures won't surface until you run on real hardware. When a model run fails here but unit
+tests passed, the root cause is typically one of three categories:
 
-**fp8e4nv on sm<89 (A800, A100)**
+**Quantization kernel / dtype incompatibility**
 
-Triton rejects `torch.float8_e4m3fn` on GPUs with `sm_major < 9`.
+Symptom: kernel errors or type errors inside quantization code, often from Triton or CUDA ops.
 
-Symptom: `triton.runtime.errors.OutOfResources` or `TypeError` in fp8 quantization code.
+Diagnosis: check whether the dtype or quantization format is supported on this specific GPU generation.
+Some dtypes require a minimum compute capability. When the hardware is below that threshold, the
+code must fall back to a compatible dtype.
 
-Fix location: `vllm/model_executor/layers/quantization/utils/fp8_utils.py` (note: vllm source, prefer
-upstreaming to vllm rather than keeping as a local patch):
-```python
-# TODO: remove when triton supports fp8e4nv on sm<89
-if dtype == torch.float8_e4m3fn and torch.cuda.get_device_capability()[0] < 9:
-    dtype = torch.float8_e5m2
-```
+Fix approach: add a hardware capability check before the unsupported dtype is used. Mark the fix
+with a TODO if the underlying library is expected to add support later, and prefer upstreaming
+such fixes to the dependency rather than keeping them as local patches.
 
-**FlagGems mm shmem overflow**
+**FlagGems kernel resource overflow**
 
-Symptom: `triton.runtime.errors.OutOfResources: out of resource: shared memory, Required: 196608, Hardware limit: 166912`
+Symptom: Triton out-of-resource errors (shared memory or register file) during FlagGems kernel
+execution.
 
-Root cause: FlagGems mm autotune configs exceed A800's shared memory limit (166912 bytes).
+Diagnosis: the autotune config for a FlagGems op contains block size combinations that exceed the
+hardware resource limits of this GPU. Limits vary by GPU model.
 
-Fix: in FlagGems `tune_configs.yaml`, remove autotune entries where the product of BLOCK sizes
-exceeds the hardware limit.
+Fix approach: remove or constrain autotune configurations that exceed the hardware resource budget.
+The fix lives in FlagGems config, not in the plugin.
 
-**FlagGems broadcast_to CUDA graph bug**
+**CUDA graph capture incompatibility**
 
-Symptom: `RuntimeError: Cannot copy between CPU and CUDA tensors during CUDA graph capture unless
-the CPU tensor is pinned`
+Symptom: errors during CUDA graph capture involving CPU-GPU tensor interactions, wrong device
+placement, or operations that are illegal inside a graph capture context.
 
-Fix: wrap `torch.tensor(...)` calls in `broadcast_to.py` with `pin_memory=True` when device is CUDA.
-Reference: https://github.com/FlagOpen/FlagGems/pull/4472
+Diagnosis: an op inside the capture window performs an illegal action (e.g., CPU tensor allocation,
+synchronous device-to-host copy, or pinned memory violation).
+
+Fix approach: ensure tensors created during capture-time paths use pinned memory or are pre-allocated
+outside the capture. When the bug is in a dependency (FlagGems, vLLM), file upstream; add a local
+workaround with a TODO referencing the upstream issue.
 
 ---
 
@@ -490,13 +495,13 @@ PR commit message format:
 ```
 feat(plugin): upgrade vllm-plugin-FL compatibility to vllm X.Y.Z
 
-- <one line per fix, e.g. "fix FusedMoE recursion by capturing _OrigFusedMoE before patching">
-- <fix InputBatch kwargs mismatch with inspect-based shim>
-- <remove stale cache_dtype kwarg from use_uniform_kv_cache call>
+- <one line per breakage fix, e.g. "fix MoE layer recursion by capturing original class before patching">
+- <fix data structure constructor kwargs mismatch with inspect-based shim>
+- <remove stale kwarg from KV cache initialization call>
 - <add glue for <new feature> introduced in vllm X.Y.Z>
 
 Tested: unit tests (N passed, M pre-existing failures documented in known_failures.txt)
-Offline inference: NVIDIA A800 -- Dense, MoE, Mamba, VLM, speculative decoding
+Offline inference: <hardware> -- Dense, MoE, Mamba, VLM, speculative decoding
 Models validated: <list>
 ```
 
