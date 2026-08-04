@@ -15,9 +15,8 @@ keywords:
 - moore-threads
 - musa
 - iluvatar
-- sunrise
+- tianshu
 - hygon
-- ppu
 - plugin
 - pr
 requires:
@@ -254,6 +253,10 @@ ssh <ssh_host> "docker exec <container> python3 -c \
 3. **One category at a time**: group related changes, verify import, then continue
 4. **Import check after each batch**: `python3 -c "from vllm_fl.models.X import Y; print('OK')"`
 5. **Never rewrite from scratch**: if tempted to rewrite, stop and read more upstream code first
+
+---
+
+
 
 ---
 

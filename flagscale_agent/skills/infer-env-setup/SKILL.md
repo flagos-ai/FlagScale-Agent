@@ -14,6 +14,13 @@ keywords:
 - ssh
 - flaggems
 - plugin
+- metax
+- ascend
+- moore-threads
+- musa
+- iluvatar
+- tianshu
+- hygon
 requires:
 - workspace-layout
 suggests:
@@ -164,77 +171,6 @@ memory_write('<backend>_log_dir', '/workspace/adapt-logs')
 ### MetaX C550
 
 ```bash
-# 1. Pull image (if not present)
-ssh <ssh_host> "docker pull <metax-vllm-image>:<tag>"
-
-# 2. Create container
-ssh <ssh_host> "docker run -d \
-  --name vllm_fl_adapt \
-  --network host \
-  --device /dev/mxcd0 --device /dev/mxcd1 \
-  -v /workspace:/workspace \
-  <metax-vllm-image>:<tag> sleep infinity"
-
-# 3. Verify devices inside container
-ssh <ssh_host> "docker exec vllm_fl_adapt mx-smi"
-```
-
-### Ascend 910B
-
-```bash
-ssh <ssh_host> "docker run -d \
-  --name vllm_fl_adapt \
-  --network host \
-  --device /dev/davinci0 \
-  -v /workspace:/workspace \
-  <ascend-vllm-image>:<tag> sleep infinity"
-```
-
-### Moore Threads S4000
-
-```bash
-ssh <ssh_host> "docker run -d \
-  --name vllm_fl_adapt \
-  --network host \
-  --device /dev/musa0 \
-  -v /workspace:/workspace \
-  <mthreads-vllm-image>:<tag> sleep infinity"
-```
-
-### Adding a New Backend
-
-Copy the MetaX template above; replace:
-- `--device` with the backend's device nodes
-- image name/tag with the backend's official vLLM image
-- monitoring command (`mx-smi` → backend equivalent)
-
----
-  echo '=== workspace layout ===' && ls -la /workspace/ 2>/dev/null | head -20"
-```
-
-This gives you: connectivity, hardware type/count/memory, device occupancy, disk space, existing containers, available images, and existing adapt dirs.
-
-**After the probe, immediately record to memory:**
-
-```
-memory_write('<backend>_ssh_host', '<ssh_host>')
-memory_write('<backend>_container_name', '<container_name>')
-memory_write('<backend>_workspace_root', '/workspace/adapt/<backend>-vllm-<version>')
-memory_write('<backend>_model_path', '/workspace/models/<model_name>')
-memory_write('<backend>_log_dir', '/workspace/adapt-logs')
-```
-
-**Never guess paths. Always read from memory or re-probe.**
-
-If SSH fails, ask the user to check their `~/.ssh/config` or provide full connection details (host, port, user, key file).
-
----
-
-## Container Setup
-
-### MetaX C550
-
-```bash
 # 1. Check existing containers
 ssh <ssh_host> "docker ps -a | grep vllm"
 
@@ -283,10 +219,16 @@ ssh <ssh_host> "docker run -d \
 ssh <ssh_host> "docker exec <container> npu-smi info"
 ```
 
-### Moore Threads S4000
+### Moore Threads S4000/S5000 (MUSA)
 
 ```bash
-# Create container with MUSA device mounts
+# 1. Check existing containers
+ssh <ssh_host> "docker ps -a | grep vllm"
+
+# 2. If stopped container exists, start and reuse it
+ssh <ssh_host> "docker start <container_name>"
+
+# 3. If no container exists, create one
 ssh <ssh_host> "docker run -d \
   --name vllm_fl_adapt_mt \
   --network host \
@@ -296,8 +238,108 @@ ssh <ssh_host> "docker run -d \
   <mt_vllm_image> \
   sleep infinity"
 
-# Verify MUSA devices
+# 4. Verify MUSA devices
 ssh <ssh_host> "docker exec <container> mthreads-gmi"
+```
+
+Device occupancy check for Moore Threads:
+```bash
+ssh <ssh_host> "docker exec <container> mthreads-gmi | grep -E 'Used|Proc'"
+```
+
+File transfer — `scp` to host path that is bind-mounted into the container:
+```bash
+scp localfile <ssh_host>:/data/wlx/filename
+# Immediately visible inside container at the corresponding mount path
+```
+
+### Iluvatar 天数 (CoreX / tianshu)
+
+```bash
+# 1. Check existing containers
+ssh tianshu "docker ps -a | grep vllm"
+
+# 2. If stopped container exists, start and reuse it
+ssh tianshu "docker start <container_name>"
+
+# 3. If no container exists, create one
+#    --init is required: tini as PID 1 reaps zombie worker processes
+#    Mount only the three runtime .so files, not the entire corex directory
+ssh tianshu "docker run -d \
+  --name vllm_fl_adapt \
+  --network host \
+  --init \
+  --device /dev/iluvatar0 --device /dev/iluvatar1 \
+  --device /dev/iluvatar2 --device /dev/iluvatar3 \
+  --device /dev/iluvatar4 --device /dev/iluvatar5 \
+  --device /dev/iluvatar6 --device /dev/iluvatar7 \
+  --device /dev/ixdnn \
+  -v /mnt/share/wlx:/workspace \
+  -v /usr/local/corex-4.5.0/lib64/libcuda.so.1:/usr/local/corex-4.5.0/lib64/libcuda.so.1 \
+  -v /usr/local/corex-4.5.0/lib64/libcuda.so:/usr/local/corex-4.5.0/lib64/libcuda.so \
+  -v /usr/local/corex-4.5.0/lib64/libixml.so:/usr/local/corex-4.5.0/lib64/libixml.so \
+  --shm-size 64g \
+  dev-community-acr-registry.cn-shanghai.cr.aliyuncs.com/dev-community/dev-community:vllm-py3.12-corex.4.5.0-ubuntu24.04 \
+  sleep infinity"
+
+# 4. Verify devices inside container
+ssh tianshu "docker exec <container> ixsmi"
+```
+
+Device occupancy check for Iluvatar:
+```bash
+ssh tianshu "docker exec <container> ixsmi | grep -E 'Used|Proc'"
+```
+
+**JumpServer exec pattern** — tianshu's JumpServer blocks interactive TTY and tmux. Use background exec + log polling for all long-running commands:
+```bash
+# Launch in background, redirect output to log file
+ssh tianshu "docker exec -d <container> sh -c \
+  'cmd > /workspace/adapt-logs/out.log 2>&1'"
+
+# Poll progress with short-output commands (safe for JumpServer)
+ssh tianshu "docker exec <container> tail -20 /workspace/adapt-logs/out.log"
+ssh tianshu "docker exec <container> wc -l /workspace/adapt-logs/out.log"
+```
+
+File transfer — JumpServer blocks heredoc and scp piping. Use git pull via NFS:
+```bash
+# On local: commit and push changes
+git push origin <branch>
+
+# On tianshu: pull inside container
+ssh tianshu "docker exec <container> bash -c \
+  'cd /workspace/adapt/<backend>-vllm-<version>/vllm-plugin-FL && git pull'"
+```
+
+### Hygon DCU
+
+```bash
+# 1. Check existing containers
+ssh <ssh_host> "docker ps -a | grep vllm"
+
+# 2. If stopped container exists, start and reuse it
+ssh <ssh_host> "docker start <container_name>"
+
+# 3. If no container exists, create one
+ssh <ssh_host> "docker run -d \
+  --name hygon-vllm-<version> \
+  --network host \
+  --device /dev/dri \
+  --device /dev/kfd \
+  -v /data:/data \
+  --shm-size 64g \
+  --group-add video \
+  <hygon_vllm_image> \
+  sleep infinity"
+
+# 4. Verify devices inside container
+ssh <ssh_host> "docker exec <container> hy-smi"
+```
+
+Device occupancy check for Hygon DCU:
+```bash
+ssh <ssh_host> "docker exec <container> hy-smi | grep -E 'Used|Proc'"
 ```
 
 ### Adding a New Backend
@@ -428,20 +470,13 @@ This directory is used by `infer-hw-adapt` to store test and inference logs.
 | `MODEL_PATH` | Model weights location | `/workspace/models/Qwen3-8B` |
 | `TP_SIZE` | Tensor parallel size | `2` |
 | `PP_SIZE` | Pipeline parallel size | `1` |
-| `GEMS_VENDOR` | FlagGems hardware vendor | `metax` (MetaX only) |
-
----
-
-## Related Skills
-
-- `infer-hw-adapt` — hardware adaptation testing, patching, and PR submission
-- `infer-model-adapt` — migrate a new model into vllm-plugin-FL
-- `ops-discipline` — shell safety and environment awareness
-- `workspace-layout` — shared storage paths for models and artifacts
-
----
-Related skills (load if needed): `ops-discipline`
-| `GEMS_VENDOR` | FlagGems hardware vendor | `metax` (MetaX), `ascend` (Ascend) |
+| `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` | Timeout for model execute call; increase for long graph capture | `7200` (Moore Threads graph mode) |
+| `GEMS_VENDOR` | FlagGems hardware vendor | `metax` (MetaX), `hygon` (Hygon DCU), `ascend` (Ascend) |
+| `PYTORCH_ROCM_ARCH` | DCU GPU architecture for kernel compilation | `gfx936` (Hygon DCU only) |
+| `ROCM_PATH` | triton hcu compiler search path | `/opt/dtk` (Hygon DCU only) |
+| `AMDGCN_USE_BUFFER_OPS` | Disable buffer ops to work around clang 17 limitation | `0` (Hygon DCU only) |
+| `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` | Extend model execution timeout — needed during graph capture on MUSA | `7200` (Moore Threads) |
+| `VLLM_ALLOW_LONG_MAX_MODEL_LEN` | Allow models with very long max sequence length | `1` |
 
 ---
 
@@ -451,6 +486,3 @@ Related skills (load if needed): `ops-discipline`
 - `infer-model-adapt` — port a new model into vllm-plugin-FL (use after environment is set up)
 - `ops-discipline` — shell safety and environment awareness
 - `workspace-layout` — shared storage paths for models and artifacts
-
----
-Related skills (load if needed): `ops-discipline`
