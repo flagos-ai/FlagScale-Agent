@@ -31,6 +31,12 @@ triggers:
 
 Run before ANY work. Never skip. All paths must be probed -- never assumed.
 
+Before starting, create a rollback point:
+```bash
+ssh <host> "docker exec <container> bash -c 'cd <plugin_root> && git stash'"
+```
+If the upgrade fails at any point, restore with `git stash pop`.
+
 ### 0a. SSH connection and container check
 
 ```bash
@@ -39,7 +45,7 @@ ssh <host> "hostname && docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Sta
 
 Identify the running container for vllm-plugin-FL work. If no container exists, set one up following `infer-env-setup`.
 
-### 0b. Locate plugin and vllm roots
+### 0b. Locate plugin and vllm roots, detect version gap
 
 ```bash
 ssh <host> "docker exec <container> bash -c '
@@ -47,38 +53,38 @@ ssh <host> "docker exec <container> bash -c '
   python3 -c \"import vllm; print(vllm.__version__)\" &&
   echo === plugin location === &&
   python3 -c \"import vllm_fl; print(vllm_fl.__file__)\" &&
-  echo === plugin pyproject === &&
-  find / -path \"*/vllm-plugin-FL/pyproject.toml\" 2>/dev/null | head -3 &&
+  echo === plugin pyproject (declared compatible version) === &&
+  find / -path \"*/vllm-plugin-FL/pyproject.toml\" 2>/dev/null | head -3 | xargs grep -E \"vllm|version\" &&
   echo === vllm source root === &&
   python3 -c \"import vllm, os; print(os.path.dirname(vllm.__file__))\"
 '"
 ```
 
-Record to memory immediately:
-```
-memory_write('nvidia_vllm_version', 'X.Y.Z')
-memory_write('nvidia_plugin_root', '<discovered_plugin_root>')
-memory_write('nvidia_vllm_root', '<discovered_vllm_root>')
-memory_write('nvidia_container', '<container_name>')
-memory_write('nvidia_log_dir', '<log_dir>')
-```
-
-### 0c. Detect version gap
-
-```bash
-ssh <host> "docker exec <container> bash -c '
-  cat <plugin_root>/pyproject.toml | grep -E \"vllm|version\" &&
-  python3 -c \"import vllm; print(vllm.__version__)\"
-'"
-```
-
 If installed vllm version != plugin declared compatible version, version gap is confirmed -- proceed with upgrade.
+
+Record all discovered paths to memory immediately:
+```python
+memory_write(key='fact/infer/nvidia_vllm_version', type='fact',
+  content='值: X.Y.Z\n验证命令: python3 -c "import vllm; print(vllm.__version__)"')
+memory_write(key='fact/infer/nvidia_plugin_root', type='fact',
+  content='值: <discovered_plugin_root>')
+memory_write(key='fact/infer/nvidia_vllm_root', type='fact',
+  content='值: <discovered_vllm_root>')
+memory_write(key='fact/infer/nvidia_container', type='fact',
+  content='值: <container_name>')
+memory_write(key='fact/infer/nvidia_log_dir', type='fact',
+  content='值: <log_dir>')
+```
 
 ---
 
-## Step 1: API Diff Analysis
+## Step 1: Change Analysis
 
-Before touching any code, enumerate what changed between old and new vLLM versions.
+A vLLM minor bump brings two kinds of changes. Both require attention.
+Missing either one leaves the plugin silently incomplete or broken.
+
+**Breakages** surface as errors (ImportError, TypeError, AttributeError).
+**New features** are silent -- the plugin simply won't support them.
 
 ### 1a. Find plugin files that import from vllm directly
 
@@ -98,14 +104,20 @@ ssh <host> "docker exec \
   2>&1 | tee <log_dir>/unit_baseline_$(date +%Y%m%d_%H%M%S).log"
 ```
 
-Collect all ImportError, AttributeError, TypeError -- these are the API breakages to fix.
+Collect all ImportError, AttributeError, TypeError -- these are the API breakages to fix in Step 2.
+Record the pass/fail counts as baseline; any new failure introduced by your fixes is a regression.
+
+Pre-existing failures (present before the upgrade) are acceptable -- document them in
+`<log_dir>/known_failures.txt` and reference this file in the PR description.
 
 ### 1c. Check _C_cache_ops op availability
 
-Write a probe script to find which plugin-declared ops are missing from installed vLLM:
+Write a probe script, copy it into the container, then run it:
 
-```python
-# check_ops.py -- run inside container with VLLM_PLUGINS=fl and plugin on PYTHONPATH
+```bash
+# Write the probe script locally
+cat > /tmp/check_ops.py << 'EOF'
+# check_ops.py -- diff plugin-declared ops vs installed vLLM ops
 import torch, re, sys
 
 native_ops = set(dir(torch.ops._C_cache_ops)) | set(dir(torch.ops._C))
@@ -119,6 +131,16 @@ print(f'Plugin schemas missing from native vllm ({len(missing)}):')
 for n in sorted(missing): print(' ', n)
 print(f'\nPlugin schemas present in native vllm ({len(present)}):')
 for n in sorted(present): print(' ', n)
+EOF
+
+# Copy into container and run
+ssh <host> "docker cp /tmp/check_ops.py <container>:/tmp/check_ops.py && \
+  docker exec \
+    -e VLLM_PLUGINS=fl \
+    -e PYTHONPATH=<plugin_root> \
+    <container> \
+    python3 /tmp/check_ops.py \
+  2>&1 | tee <log_dir>/check_ops_$(date +%Y%m%d_%H%M%S).log"
 ```
 
 Key distinction: FlagGems covers compute kernels (matmul, attention, elementwise). It does NOT cover
@@ -130,20 +152,76 @@ Missing ops fall into two categories:
 - **Model-specific ops** (e.g., `concat_and_cache_mla` for a specific model's attention variant): only
   blocks that model. Other models run fine without them.
 
-### 1d. Breakage-prone areas to audit
+### 1d. Scan for new features that require plugin glue
 
-Every vLLM minor bump changes something. Before writing any fix, audit these areas by reading both the
-plugin code and the new vllm source side by side:
+Breakages surface as errors; new vLLM features are silent. The plugin simply won't support them
+until you add the glue code. For each minor bump, actively scan for the following categories
+by reading both the vLLM changelog and the actual source diff:
+
+**New execution paths the plugin must route through:**
+Check whether vLLM added new wrapper classes around `nn.Module` (e.g. graph wrappers, quantization
+wrappers). The plugin's `get_model()` and `load_model()` must handle any new wrapper type -- if
+they don't, callers receive the wrapper instead of the raw model, causing subtle failures that
+don't produce errors at import time.
+
+```bash
+# Find new wrapper classes that wrap nn.Module
+ssh <host> "docker exec <container> grep -rn 'class.*Wrapper\|class.*Graph' \
+  <vllm_root>/vllm/compilation/ <vllm_root>/vllm/worker/ --include='*.py' -l"
+```
+
+**New env vars that gate new execution modes:**
+vLLM adds env vars to enable new features. If the plugin's worker or compilation code doesn't
+check these vars, the feature is silently unavailable even when the user sets them.
+
+```bash
+# Find new env vars in vllm that affect execution
+ssh <host> "docker exec <container> grep -rn 'os.environ.get\|envs\.' \
+  <vllm_root>/vllm/compilation/ <vllm_root>/vllm/worker/ --include='*.py' | \
+  grep -v '\.pyc'"
+```
+
+**New speculative decoding proposer types:**
+The plugin's drafter dispatch must include every proposer class vLLM introduces. A missing branch
+typically doesn't raise an error immediately -- it either falls through to the wrong code path or
+silently disables spec decode.
+
+```bash
+# Find proposer classes in new vllm
+ssh <host> "docker exec <container> grep -rn 'class.*Proposer' \
+  <vllm_root>/vllm/v1/spec_decode/ --include='*.py'"
+# Compare against what the plugin's model_runner.py handles
+ssh <host> "docker exec <container> grep -n 'Proposer\|proposer' \
+  <plugin_root>/vllm_fl/worker/model_runner.py"
+```
+
+**New fields in core data structures:**
+Structures like `InputBatch`, `CommonAttentionMetadata`, `ModelRunnerOutput` gain new fields in
+every minor release. Check whether the plugin initializes or passes these correctly.
+
+```bash
+# Diff InputBatch fields between plugin and vllm
+ssh <host> "docker exec <container> bash -c '
+  grep -n \"def __init__\|self\\.\" <vllm_root>/vllm/v1/worker/gpu_input_batch.py | head -40
+  echo ---
+  grep -n \"def __init__\|self\\.\" <plugin_root>/vllm_fl/worker/model_runner.py | head -40
+'"
+```
+
+### 1e. Breakage-prone areas to audit
+
+Every vLLM minor bump changes something in these areas. Read both the plugin code and the
+new vllm source side by side before writing any fix:
 
 | Plugin file | What to audit in new vllm | Why it commonly breaks |
 |---|---|---|
 | `vllm_fl/ops/fused_moe/layer.py` | Is `FusedMoE` still a class or now a factory? What is `FusedTopKRouter.__init__` signature? | vllm toggles between class and factory; subclassing or kwarg forwarding breaks silently |
-| `vllm_fl/worker/model_runner.py` | `InputBatch.__init__` params, `use_uniform_kv_cache` signature, `WorkerProc` entry point name | Plugin often lags behind by 1-2 vllm versions; new params appear or old ones are removed |
+| `vllm_fl/worker/model_runner.py` | `InputBatch.__init__` params, `use_uniform_kv_cache` signature, `WorkerProc` entry point name, new wrapper classes in `get_model()` | Plugin often lags behind by 1-2 vllm versions; new params appear or old ones are removed |
 | `vllm_fl/ops/_C_ops_schemas.py` | Run check_ops.py (Step 1c) to diff registered schemas vs installed ops | vllm reorganizes C extensions; model-specific ops may never be in base vllm |
 | Any file with `from vllm.X import Y` | Does that import path still exist in new vllm? | vllm moves symbols between modules frequently |
 | `vllm_fl/worker/` distributed code | `parallel_state` init API, `world_size`/`rank` call signatures | Distributed init API evolves across versions |
 
-The specific breakages you encounter depend entirely on the version gap. Do not assume the same bugs will
+The specific breakages depend entirely on the version gap. Do not assume the same bugs will
 appear across upgrades -- read the actual error, trace it to the changed vllm code, then fix.
 
 ---
@@ -154,7 +232,7 @@ The workflow for every breakage is the same:
 1. Read the error traceback -- identify which plugin file and line calls into vllm
 2. Read the new vllm source at that call site to understand what changed
 3. Apply the minimal fix
-4. Verify with an import check or targeted test before moving to the next error
+4. **Verify the fix immediately** before moving to the next error (see verification commands below)
 
 **Fix strategies by error type**:
 
@@ -171,6 +249,12 @@ Options:
 - Remove the stale kwarg if it was genuinely dropped upstream
 - Use `inspect.signature()` to filter kwargs dynamically if the plugin must support multiple vllm versions
 
+Verify fix:
+```bash
+ssh <host> "docker exec -e VLLM_PLUGINS=fl -e PYTHONPATH=<plugin_root> <container> \
+  python3 -c 'from vllm_fl.<module> import <ClassName>; print(\"OK\")'  "
+```
+
 ### ImportError or AttributeError on import
 
 A symbol moved between vllm modules.
@@ -182,6 +266,12 @@ ssh <host> "docker exec <container> grep -r 'class <Name>\|def <name>' \
 ```
 
 Update the import path in the plugin file. Never add `sys.path` hacks or guessing `try/except` imports.
+
+Verify fix:
+```bash
+ssh <host> "docker exec -e VLLM_PLUGINS=fl -e PYTHONPATH=<plugin_root> <container> \
+  python3 -c 'from vllm_fl.<module> import <Name>; print(\"OK\")'  "
+```
 
 ### RecursionError or infinite loop in __init__
 
@@ -196,6 +286,12 @@ class SomeClassFL(_Orig):
         _Orig.__init__(self, ...)   # explicit call, not through patched name
 ```
 
+Verify fix:
+```bash
+ssh <host> "docker exec -e VLLM_PLUGINS=fl -e PYTHONPATH=<plugin_root> <container> \
+  python3 -c 'from vllm_fl.<module> import <ClassName>; obj = <ClassName>(...); print(\"OK\")'  "
+```
+
 ### AttributeError: _C_cache_ops has no attribute X
 
 A KV cache op is declared in `vllm_fl/ops/_C_ops_schemas.py` but has no NVIDIA backend implementation.
@@ -205,6 +301,12 @@ A KV cache op is declared in `vllm_fl/ops/_C_ops_schemas.py` but has no NVIDIA b
 
 For implementation: reference upstream vllm's `_custom_ops.py` for the C extension wrapper pattern.
 For model-specific ops, check other hardware backends in the plugin for algorithmic reference.
+
+Verify fix:
+```bash
+ssh <host> "docker exec -e VLLM_PLUGINS=fl -e PYTHONPATH=<plugin_root> <container> \
+  python3 /tmp/check_ops.py"
+```
 
 ---
 
@@ -221,15 +323,17 @@ ssh <host> "docker exec \
   2>&1 | tee <log_dir>/unit_after_fix_$(date +%Y%m%d_%H%M%S).log"
 ```
 
-Compare pass/fail counts against the baseline from Step 1b.
-- Acceptable: pre-existing failures that were present before the upgrade (document these)
-- Not acceptable: new failures introduced by the upgrade fixes
+Compare pass/fail counts against the baseline from Step 1b:
+- **Acceptable**: pre-existing failures documented in `<log_dir>/known_failures.txt`
+- **Not acceptable**: new failures introduced by your fixes
+
+If new failures appear, do not proceed -- diagnose and fix before moving to Step 4.
 
 ---
 
 ## Step 4: Offline Inference Validation (NVIDIA)
 
-Validate on real GPU hardware. Run at minimum one model per architecture type.
+Validate on real GPU hardware. Run at minimum one model per coverage category.
 
 ### 4a. Probe environment before running
 
@@ -252,14 +356,15 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 ### 4b. Model coverage matrix
 
-Run at minimum one model per architecture type, in order of increasing complexity:
+Run at minimum one model per category, in order of increasing complexity:
 
-| Architecture | Why |
+| Category | Why |
 |---|---|
 | Dense LLM (e.g., Qwen, LLaMA) | Base case, no MoE or special ops |
 | MoE LLM (e.g., Qwen-MoE, Mixtral) | Exercises FusedMoE plugin path |
 | Mamba/Hybrid | Exercises CUDA graph with non-attention layers |
 | VLM (e.g., Gemma, SmolVLM) | Exercises multimodal pipeline |
+| Dense LLM + speculative decoding | Exercises drafter dispatch, spec decode input batch paths, and any new proposer routing added in the new vllm version |
 
 For each model:
 ```bash
@@ -325,29 +430,47 @@ ssh <host> "docker exec \
 ```
 
 Check:
-1. FlagGems ops are being called (not falling back to torch)
+1. FlagGems ops are being dispatched (not falling back to torch)
 2. No silent errors swallowed by FlagGems error handling
-3. Output tokens are correct (compare against a non-FlagGems run if suspicious)
+
+**If FlagGems ops are falling back to torch**: this is a known risk on every upgrade. Decide by impact:
+- If the fallback is for a non-critical op (e.g. elementwise) and output is correct: document in PR,
+  file a follow-up issue, do not block the upgrade.
+- If the fallback is for a performance-critical op (e.g. matmul, attention): investigate root cause
+  before declaring the upgrade done. Throughput regression may be significant.
+
+**Verify output correctness when fallback is suspected**:
+Run the same prompt with and without `VLLM_PLUGINS=fl` and compare the first-token outputs.
+Divergence indicates a correctness bug, not just a performance issue.
 
 ---
 
 ## Step 6: Serving Validation
 
-```bash
-ssh <host> "docker exec -d \
-  -e VLLM_PLUGINS=fl \
-  -e PYTHONPATH=<plugin_root> \
-  <container> \
-  python3 -m vllm.entrypoints.openai.api_server \
-  --model <model_path> \
-  --port 8000 \
-  2>&1 | tee <log_dir>/serve_<model>_$(date +%Y%m%d_%H%M%S).log &"
+Start the server inside the container (not with `docker exec -d`, which swallows stdout):
 
-# Wait for server ready, then test
-sleep 30
+```bash
+# Launch server inside container, writing logs to a file
+ssh <host> "docker exec <container> bash -c '
+  nohup python3 -m vllm.entrypoints.openai.api_server \
+    --model <model_path> --port 8000 \
+    > <log_dir>/serve_<model>_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+  echo \$! > /tmp/vllm_server.pid && echo Server PID: \$!
+'"
+
+# Wait for server ready with health polling (handles slow model loading)
+ssh <host> "docker exec <container> bash -c '
+  for i in \$(seq 1 60); do
+    curl -sf http://localhost:8000/health && echo && break
+    echo \"Waiting... (\$i/60)\" && sleep 5
+  done
+'"
+
+# Test inference
 ssh <host> "curl -s http://localhost:8000/v1/completions \
   -H 'Content-Type: application/json' \
-  -d '{\"model\": \"<model_path>\", \"prompt\": \"Hello\", \"max_tokens\": 20}' | python3 -m json.tool"
+  -d '{\"model\": \"<model_path>\", \"prompt\": \"Hello\", \"max_tokens\": 20}' \
+  | python3 -m json.tool"
 ```
 
 Check: response contains `choices[0].text` with actual tokens (not empty, not error).
@@ -370,8 +493,10 @@ feat(plugin): upgrade vllm-plugin-FL compatibility to vllm X.Y.Z
 - <one line per fix, e.g. "fix FusedMoE recursion by capturing _OrigFusedMoE before patching">
 - <fix InputBatch kwargs mismatch with inspect-based shim>
 - <remove stale cache_dtype kwarg from use_uniform_kv_cache call>
+- <add glue for <new feature> introduced in vllm X.Y.Z>
 
-Tested: unit tests (N passed, M pre-existing failures), offline inference on NVIDIA A800
+Tested: unit tests (N passed, M pre-existing failures documented in known_failures.txt)
+Offline inference: NVIDIA A800 -- Dense, MoE, Mamba, VLM, speculative decoding
 Models validated: <list>
 ```
 
@@ -386,13 +511,17 @@ ssh <host> "docker exec -e VLLM_PLUGINS=fl -e PYTHONPATH=<plugin_root> <containe
 
 # Check which ops are missing
 ssh <host> "docker exec -e VLLM_PLUGINS=fl -e PYTHONPATH=<plugin_root> <container> \
-  python3 check_ops.py"
+  python3 /tmp/check_ops.py"
 
 # Check CUDA graph capture failures
 ssh <host> "docker exec <container> grep -a 'graph capture\|cudaGraphCapture\|CUDA graph' <log> | tail -10"
 
 # Check GPU processes before relaunch
 ssh <host> "docker exec <container> nvidia-smi --query-compute-apps=pid,used_memory,name --format=csv,noheader"
+
+# Quick import check after any fix
+ssh <host> "docker exec -e VLLM_PLUGINS=fl -e PYTHONPATH=<plugin_root> <container> \
+  python3 -c 'import vllm_fl; print(\"plugin import OK\")'"
 ```
 
 ---
@@ -404,7 +533,3 @@ ssh <host> "docker exec <container> nvidia-smi --query-compute-apps=pid,used_mem
 - `infer-model-adapt` -- port a new model into the plugin
 - `debug-strategy` -- systematic debugging when stuck
 - `ops-discipline` -- shell safety and environment awareness
-appear across upgrades -- read the actual error, trace it to the changed vllm code, then fix.
-
----
-
