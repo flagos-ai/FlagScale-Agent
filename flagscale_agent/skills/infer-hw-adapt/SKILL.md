@@ -15,6 +15,7 @@ keywords:
 - moore-threads
 - musa
 - iluvatar
+- tianshu
 - sunrise
 - hygon
 - ppu
@@ -237,6 +238,92 @@ ssh <ssh_host> "docker exec <container> python3 -c \
 3. **One category at a time**: group related changes, verify import, then continue
 4. **Import check after each batch**: `python3 -c "from vllm_fl.models.X import Y; print('OK')"`
 5. **Never rewrite from scratch**: if tempted to rewrite, stop and read more upstream code first
+
+---
+
+## Backend-Specific Command Patterns
+
+The test stage commands are identical across backends. What differs is **how you wrap them** — the SSH target, device tool for health checks, and any environment variables required before running tests.
+
+### MetaX C550
+
+```bash
+# Health check
+ssh <ssh_host> "docker exec <container> mx-smi"
+
+# Run tests (standard pattern — no special wrapping needed)
+ssh <ssh_host> "docker exec <container> bash -c '
+  cd /workspace/adapt/metax-vllm-<version>/vllm-plugin-FL &&
+  VLLM_PLUGINS=fl pytest tests/unit_tests/ -x -v \
+  2>&1 | tee /workspace/adapt-logs/unit_$(date +%Y%m%d_%H%M%S).log'"
+```
+
+### Ascend 910B
+
+```bash
+# Health check
+ssh <ssh_host> "docker exec <container> npu-smi info"
+
+# Run tests
+ssh <ssh_host> "docker exec <container> bash -c '
+  cd /workspace/adapt/ascend-vllm-<version>/vllm-plugin-FL &&
+  VLLM_PLUGINS=fl pytest tests/unit_tests/ -x -v \
+  2>&1 | tee /workspace/adapt-logs/unit_$(date +%Y%m%d_%H%M%S).log'"
+```
+
+### Moore Threads S4000/S5000 (MUSA)
+
+```bash
+# Health check
+ssh <ssh_host> "docker exec <container> mthreads-gmi"
+
+# Run tests — set timeout env var before graph-mode tests
+ssh <ssh_host> "docker exec <container> bash -c '
+  cd /workspace/adapt/mt-vllm-<version>/vllm-plugin-FL &&
+  VLLM_PLUGINS=fl VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=7200 \
+  pytest tests/unit_tests/ -x -v \
+  2>&1 | tee /workspace/adapt-logs/unit_$(date +%Y%m%d_%H%M%S).log'"
+
+# File transfer: scp to host /data (shared with container)
+scp localfile <ssh_host>:/data/wlx/filename
+```
+
+### Hygon DCU
+
+```bash
+# Health check
+ssh <ssh_host> "docker exec <container> hy-smi"
+
+# Run tests — PYTORCH_ROCM_ARCH and ROCM_PATH required for kernel compilation
+ssh <ssh_host> "docker exec <container> bash -c '
+  cd /workspace/adapt/hygon-vllm-<version>/vllm-plugin-FL &&
+  PYTORCH_ROCM_ARCH=gfx936 ROCM_PATH=/opt/dtk VLLM_PLUGINS=fl \
+  pytest tests/unit_tests/ -x -v \
+  2>&1 | tee /workspace/adapt-logs/unit_$(date +%Y%m%d_%H%M%S).log'"
+```
+
+### Iluvatar 天数 (CoreX / tianshu)
+
+JumpServer blocks interactive TTY and tmux. Use background exec + log polling instead of streaming output.
+
+```bash
+# Health check
+ssh tianshu "docker exec <container> ixsmi"
+
+# Run tests — background exec, poll log instead of streaming
+ssh tianshu "docker exec -d <container> sh -c '
+  cd /workspace/adapt/iluvatar-vllm-<version>/vllm-plugin-FL &&
+  VLLM_PLUGINS=fl pytest tests/unit_tests/ -x -v \
+  > /workspace/adapt-logs/unit_$(date +%Y%m%d_%H%M%S).log 2>&1'"
+
+# Poll progress (safe for JumpServer — short output)
+ssh tianshu "docker exec <container> tail -20 /workspace/adapt-logs/unit_<timestamp>.log"
+ssh tianshu "docker exec <container> wc -l /workspace/adapt-logs/unit_<timestamp>.log"
+
+# File transfer: push to git on local, pull inside container via NFS
+ssh tianshu "docker exec <container> bash -c \
+  'cd /workspace/adapt/iluvatar-vllm-<version>/vllm-plugin-FL && git pull'"
+```
 
 ---
 
