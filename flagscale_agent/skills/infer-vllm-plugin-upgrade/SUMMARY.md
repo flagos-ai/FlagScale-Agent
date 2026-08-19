@@ -14,7 +14,7 @@
  limitations under the License.
  -->
 
-# Infer-Plugin-Upgrade — Summary
+# Infer-vLLM-Plugin-Upgrade — Summary
 
 Upgrade vllm-plugin-FL to a new vLLM version on NVIDIA hardware.
 
