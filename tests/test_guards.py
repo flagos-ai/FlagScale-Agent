@@ -352,3 +352,59 @@ class TestTrainingMonitorGuard:
         assert verdict is None
         next_ctx = _ctx("shell", {"command": "ls"})
         assert g.check_pre(next_ctx) is None
+
+    def test_empty_tool_name_not_blocked(self):
+        """Pre-iteration synthetic check (tool_name='') must not be blocked.
+        This prevents the infinite loop where kernel.py continues without
+        calling the LLM."""
+        g = TrainingMonitorGuard()
+        # Simulate successful launch
+        launch_ctx = _ctx("shell", {"command": "python3 run.py --config-path=conf --config-name=config action=run"})
+        g.check_post(launch_ctx)
+        # Pre-iteration check with empty tool_name should pass
+        pre_iter_ctx = _ctx("", {})
+        assert g.check_pre(pre_iter_ctx) is None
+        # But actual tool calls should still be blocked
+        shell_ctx = _ctx("shell", {"command": "ls"})
+        verdict = g.check_pre(shell_ctx)
+        assert verdict is not None
+        assert verdict.action == "block"
+
+    def test_failed_launch_not_detected(self):
+        """If the launch command fails (error in output), don't set _launch_detected."""
+        g = TrainingMonitorGuard()
+        launch_ctx = _ctx(
+            "shell",
+            {"command": "python3 run.py --config-path=conf --config-name=config_bad action=run"},
+            tool_result="Cannot find primary config 'config_bad'. Check that it's in your config search path.\n"
+        )
+        g.check_post(launch_ctx)
+        # Should NOT be blocked since launch failed
+        next_ctx = _ctx("shell", {"command": "ls"})
+        assert g.check_pre(next_ctx) is None
+
+    def test_failed_launch_traceback(self):
+        """Traceback in output indicates failure."""
+        g = TrainingMonitorGuard()
+        launch_ctx = _ctx(
+            "shell",
+            {"command": "python3 run.py --config-path=conf --config-name=config action=run"},
+            tool_result="Traceback (most recent call last):\n  File \"run.py\", line 1\nImportError: No module named 'megatron'\n"
+        )
+        g.check_post(launch_ctx)
+        next_ctx = _ctx("shell", {"command": "ls"})
+        assert g.check_pre(next_ctx) is None
+
+    def test_successful_launch_still_detected(self):
+        """Normal output (no error patterns) should still trigger detection."""
+        g = TrainingMonitorGuard()
+        launch_ctx = _ctx(
+            "shell",
+            {"command": "python3 run.py --config-path=conf --config-name=config action=run"},
+            tool_result="Training started on 8 GPUs\nOutput dir: /workspace/outputs\n"
+        )
+        g.check_post(launch_ctx)
+        next_ctx = _ctx("shell", {"command": "ls"})
+        verdict = g.check_pre(next_ctx)
+        assert verdict is not None
+        assert verdict.action == "block"

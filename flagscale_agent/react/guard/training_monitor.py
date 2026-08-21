@@ -22,6 +22,33 @@ from flagscale_agent.react.guard import Guard, GuardContext, GuardVerdict
 from flagscale_agent.react.guard.utils import _is_flagscale_launch_command
 
 
+# Error patterns that indicate the launch command failed
+_FAILURE_PATTERNS = (
+    "Cannot find primary config",
+    "Error:",
+    "Traceback (most recent call last)",
+    "FileNotFoundError",
+    "ModuleNotFoundError",
+    "ImportError",
+    "No such file or directory",
+    "command not found",
+    "Permission denied",
+    "OmegaConf.errors",
+    "hydra.errors",
+)
+
+
+def _command_failed(result: str) -> bool:
+    """Heuristic: detect if a shell command output indicates failure."""
+    if not result:
+        return False
+    # Check for common error indicators
+    for pattern in _FAILURE_PATTERNS:
+        if pattern in result:
+            return True
+    return False
+
+
 class TrainingMonitorGuard(Guard):
     """Block non-monitor calls after training launch."""
 
@@ -37,7 +64,12 @@ class TrainingMonitorGuard(Guard):
         if ctx.tool_name == "shell":
             cmd = ctx.tool_args.get("command", "")
             if isinstance(cmd, str) and _is_flagscale_launch_command(cmd):
-                self._launch_detected = True
+                # Only set launch_detected if command did not obviously fail
+                result = ctx.tool_result or ""
+                if isinstance(result, str) and _command_failed(result):
+                    pass  # Don't flag failed launches
+                else:
+                    self._launch_detected = True
         elif ctx.tool_name == "flagscale_train_monitor":
             self._launch_detected = False  # Cleared
         return None
@@ -45,6 +77,12 @@ class TrainingMonitorGuard(Guard):
     def check_pre(self, ctx: GuardContext) -> GuardVerdict | None:
         """Block non-monitor calls after launch."""
         if not self._launch_detected:
+            return None
+
+        # Skip the pre-iteration synthetic check (tool_name="").
+        # Only gate actual tool calls. The LLM must be allowed to run so it
+        # can see the guard message and respond with flagscale_train_monitor.
+        if not ctx.tool_name:
             return None
 
         if ctx.tool_name == "flagscale_train_monitor":
