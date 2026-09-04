@@ -39,7 +39,6 @@ EXPECTED_SKILLS = {
     "workspace-layout",
     "train-parallel-strategy",
     "debug-strategy",
-    "te-upstream-sync",
     "infer-env-setup",
     "infer-hw-adapt",
     "infer-model-adapt",
