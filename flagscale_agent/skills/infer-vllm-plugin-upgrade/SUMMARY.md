@@ -27,8 +27,10 @@ Upgrade vllm-plugin-FL to a new vLLM version on NVIDIA hardware.
 - A minor bump brings breakages (errors) and silent behavioral shifts (require audit)
 - Fix by error type in strict order: ImportError -> RecursionError -> TypeError -> AttributeError -> model-specific
 - One patch per failure with per-fix verification before moving to next
-- Never modify vLLM source -- all patches go through `vllm_fl/` plugin files only
+- Never modify vLLM source -- runtime fixes go through `vllm_fl/`, with
+  plugin-owned tests and metadata updated only when required
 - Validate on real NVIDIA GPU hardware before declaring done
-- Squash all commits into one clean commit before PR
+- Preserve unrelated work and rewrite history only when explicitly requested
 
-**Constraints**: no vLLM source modification, one-patch-at-a-time discipline, test stage order enforcement, squash before PR.
+**Constraints**: no vLLM source modification, one-patch-at-a-time discipline,
+test stage order enforcement, and repository-state preservation.

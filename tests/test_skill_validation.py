@@ -39,11 +39,13 @@ EXPECTED_SKILLS = {
     "workspace-layout",
     "train-parallel-strategy",
     "debug-strategy",
+    "te-upstream-sync",
     "infer-env-setup",
     "infer-hw-adapt",
     "infer-model-adapt",
     "infer-precision-check",
-    "infer-plugin-upgrade",
+    "infer-vllm-plugin-upgrade",
+    "infer-sglang-plugin-upgrade",
 }
 
 REQUIRED_FRONTMATTER_FIELDS = {"name", "description"}

@@ -37,12 +37,14 @@ Before starting the upgrade, ensure the environment is ready (via `infer-env-set
 ## Critical Rules
 
 1. **Auto-detect versions first** -- never assume plugin or vLLM version. Always read from installed packages and pyproject.toml.
-2. **Never modify vLLM source** -- all fixes go through `vllm_fl/` plugin files only.
+2. **Never modify vLLM source** -- runtime fixes belong in `vllm_fl/`;
+   plugin-owned tests and dependency metadata may change when required.
 3. **One patch per failure** -- fix, re-test, then move to the next error. Never batch unverified fixes.
 4. **Fix order matters**: imports -> class/factory API -> signature kwargs -> op schemas -> model-specific.
 5. **NVIDIA GPU is ground truth** -- validate every fix on real hardware before declaring done.
 6. **Stream and persist logs** -- use `2>&1 | tee <log_dir>/<stage>_<timestamp>.log`.
-7. **Squash before PR** -- all upgrade commits squashed into one clean commit.
+7. **Preserve repository history** -- squash only when repository policy or the
+   user requests it; never rewrite shared history without authorization.
 
 ---
 
@@ -68,10 +70,9 @@ memory_write('<prefix>_vllm_root', '<discovered_vllm_root>')
 
 If installed vLLM version != plugin declared compatible version, version gap is confirmed -- proceed.
 
-Create a rollback point before any changes:
-```bash
-ssh <host> "docker exec <container> bash -c 'cd <plugin_root> && git stash'"
-```
+Inspect `git status --short --branch` before editing. Preserve unrelated work
+and do not stash, reset, or clean the worktree without explicit authorization.
+Use a dedicated topic branch when possible and commit only task-owned files.
 
 **Never guess paths. Always read from memory or re-probe.**
 
@@ -237,9 +238,15 @@ Check: response contains non-empty generated text.
 Before opening a PR:
 
 1. **Review all changes**: ensure no debug prints, temporary patches, or commented-out code remain.
-2. **Verify no vLLM source files were modified**: only `vllm_fl/` files should appear in the diff.
-3. **Squash all commits** into one clean commit.
-4. **Run unit tests one final time** on the squashed commit.
+2. **Verify no vLLM source files were modified**: the diff may contain
+   plugin-owned runtime code, tests, dependency metadata, and requested docs,
+   but no edits to the installed or vendored upstream vLLM package.
+3. **Check repository state**: preserve unrelated changes and ensure only
+   task-owned files are staged.
+4. **Run unit tests one final time** on the exact commit that will be submitted.
+
+Squash only when repository policy or the user requests it. Do not rewrite
+shared history without explicit authorization.
 
 Commit message format:
 ```
@@ -275,7 +282,8 @@ gh pr create --title "feat(plugin): upgrade to vLLM <version>" --body-file <body
 1. Read FULL error output -- multiple issues may coexist
 2. If stuck after 2 attempts on same error -> step back, read vLLM changelog or git log for the breaking commit
 3. If the upgrade breaks too many things -> consider incremental approach (one minor version at a time)
-4. Restore rollback point if needed: `git stash pop`
+4. If rollback is needed, revert only task-owned changes using the recorded
+   branch/commit state; do not overwrite unrelated work
 
 ---
 
