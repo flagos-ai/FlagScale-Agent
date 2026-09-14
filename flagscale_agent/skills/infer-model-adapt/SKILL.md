@@ -323,13 +323,13 @@ When patching a copied model file, apply these import rules:
 ## Related Skills
 
 - `infer-env-setup` — environment setup (SSH, container, vLLM + plugin install)
-- `infer-hw-adapt` — hardware backend adaptation after plugin version upgrades
+- `infer-vllm-hw-adapt` — vLLM hardware backend adaptation after plugin version upgrades
 - `debug-strategy` — systematic debugging when tests fail repeatedly
 - `ops-discipline` — shell safety, environment awareness, and command discipline
 - `workspace-layout` — shared storage paths for models and adaptation artifacts
 
 ---
-Related skills (load if needed): `infer-hw-adapt`, `debug-strategy`, `ops-discipline`
+Related skills (load if needed): `infer-vllm-hw-adapt`, `debug-strategy`, `ops-discipline`
 ### Step 4: Identify Model Identity
 
 Get the exact model_type and class name from the model's HF config:
@@ -578,13 +578,13 @@ When in doubt: check if the module exists in `vllm_fl/` first; if yes use `vllm_
 ## Related Skills
 
 - `infer-env-setup` — environment setup (SSH, container, installation)
-- `infer-hw-adapt` — hardware backend adaptation after plugin version upgrades
+- `infer-vllm-hw-adapt` — vLLM hardware backend adaptation after plugin version upgrades
 - `debug-strategy` — systematic debugging when tests fail repeatedly
 - `ops-discipline` — shell safety, environment awareness, and command discipline
 - `workspace-layout` — shared storage paths for models and adaptation artifacts
 
 ---
-Related skills (load if needed): `infer-hw-adapt`, `debug-strategy`, `ops-discipline`
+Related skills (load if needed): `infer-vllm-hw-adapt`, `debug-strategy`, `ops-discipline`
 Acceptance criteria:
 - First 15 tokens must match GT exactly (greedy decode, temperature=0)
 - Divergence at token 16+ is acceptable (numerical noise from different hardware)
@@ -645,10 +645,10 @@ FlagGems missing ops (for upstream):
 ## Related Skills
 
 - `infer-env-setup` — environment setup (SSH, container, installation)
-- `infer-hw-adapt` — hardware backend adaptation after plugin version upgrades
+- `infer-vllm-hw-adapt` — vLLM hardware backend adaptation after plugin version upgrades
 - `debug-strategy` — systematic debugging when tests fail repeatedly
 - `ops-discipline` — shell safety, environment awareness, and command discipline
 - `workspace-layout` — shared storage paths for models and adaptation artifacts
 
 ---
-Related skills (load if needed): `infer-hw-adapt`, `debug-strategy`, `ops-discipline`
+Related skills (load if needed): `infer-vllm-hw-adapt`, `debug-strategy`, `ops-discipline`

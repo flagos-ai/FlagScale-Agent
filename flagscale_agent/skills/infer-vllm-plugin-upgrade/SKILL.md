@@ -264,7 +264,7 @@ Never claim a backend was validated when it only received import-path changes.
 ## Related Skills
 
 - `infer-env-setup` for provisioning the runtime.
-- `infer-hw-adapt` for deeper vendor-backend implementation after the shared vLLM
+- `infer-vllm-hw-adapt` for deeper vendor-backend implementation after the shared vLLM
   upgrade is established.
 - `infer-model-adapt` when only a new model or architecture is being added.
 - `infer-precision-check` for detailed numerical comparison.

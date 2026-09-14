@@ -1,7 +1,7 @@
 ---
 description: Set up inference environment for vllm-plugin-FL on hardware backends.
   Covers SSH connection, Docker container creation, CPU-only vLLM install, plugin
-  editable install, FlagGems install, and import verification. Use before infer-hw-adapt
+  editable install, FlagGems install, and import verification. Use before infer-vllm-hw-adapt
   or infer-model-adapt.
 name: infer-env-setup
 ---
@@ -377,7 +377,7 @@ ssh <ssh_host> "docker exec <container> python3 -c \
   \"import torch; print(f'torch {torch.__version__}, devices: {torch.cuda.device_count()}')\""
 ```
 
-All four imports must succeed before proceeding to `infer-hw-adapt` or `infer-model-adapt`.
+All four imports must succeed before proceeding to `infer-vllm-hw-adapt` or `infer-model-adapt`.
 
 ### Step 8: Create adapt-logs directory
 
@@ -385,7 +385,7 @@ All four imports must succeed before proceeding to `infer-hw-adapt` or `infer-mo
 ssh <ssh_host> "docker exec <container> mkdir -p /workspace/adapt-logs"
 ```
 
-This directory is used by `infer-hw-adapt` to store test and inference logs.
+This directory is used by `infer-vllm-hw-adapt` to store test and inference logs.
 
 ---
 
@@ -410,7 +410,7 @@ This directory is used by `infer-hw-adapt` to store test and inference logs.
 
 ## Related Skills
 
-- `infer-hw-adapt` — hardware adaptation testing, patching, and PR submission (use after environment is set up)
+- `infer-vllm-hw-adapt` — vLLM hardware adaptation testing, patching, and PR submission (use after environment is set up)
 - `infer-model-adapt` — port a new model into vllm-plugin-FL (use after environment is set up)
 - `ops-discipline` — shell safety and environment awareness
 - `workspace-layout` — shared storage paths for models and artifacts

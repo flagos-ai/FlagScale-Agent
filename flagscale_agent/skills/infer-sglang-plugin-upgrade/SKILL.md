@@ -36,7 +36,7 @@ Use this skill when the plugin's SGLang pin must move, or when an upstream
 SGLang upgrade breaks imports, registration, fused ops, platform APIs, CUDA
 Graph, FLA, disaggregation, or serving.
 
-Use `infer-model-adapt` for a model-only port and `infer-hw-adapt` for a
+Use `infer-model-adapt` for a model-only port and `infer-sglang-hw-adapt` for a
 non-NVIDIA backend. MUSA and Ascend upgrades are separate passes unless the user
 explicitly includes them.
 
@@ -355,7 +355,7 @@ The upgrade is complete only when:
 - `infer-env-setup` — reuse SSH, container, occupancy, tmux, and logging
   discipline, not its vLLM-specific install commands.
 - `infer-vllm-plugin-upgrade` — analogous workflow, not SGLang API truth.
-- `infer-hw-adapt` — follow after NVIDIA for another backend.
+- `infer-sglang-hw-adapt` — follow after NVIDIA for another backend.
 - `infer-model-adapt` — use when a model needs a separate port.
 - `debug-strategy` — use after repeated failed hypotheses.
 - `ops-discipline` — shell safety, state checks, and persistent logs.

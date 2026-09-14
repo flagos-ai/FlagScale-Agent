@@ -20,7 +20,7 @@ FlagScale-Agent 是一个专注于大规模分布式训练、推理和服务基�
 
 **为什么选择 FlagScale-Agent？**
 
-- **领域专业化** — 内置 18 个技能和 13 个知识域，涵盖 Megatron-LM、TransformerEngine、NCCL、FlashAttention 等
+- **领域专业化** — 内置 20 个技能和 13 个知识域，涵盖 Megatron-LM、TransformerEngine、NCCL、FlashAttention 等
 - **自主且安全** — 多层 Guard 系统（inject/block/escalate 机制）防止失控执行
 - **持久化智能** — 跨会话记忆系统（fact/pitfall/insight）积累发现和经验教训
 - **结构化执行** — 带验收标准和验证关卡的计划系统确保质量
@@ -119,7 +119,8 @@ Guard 系统有三种工作模式：
 **推理技能：**
 - `infer-env-setup` — 配置 vllm-plugin-FL 推理环境
 - `infer-model-adapt` — 适配新模型到 vllm-plugin-FL
-- `infer-hw-adapt` — 移植 vllm-plugin-FL 到新硬件后端
+- `infer-vllm-hw-adapt` — 移植 vllm-plugin-FL 到新硬件后端
+- `infer-sglang-hw-adapt` — 移植 sglang-plugin-FL 到新硬件后端
 - `infer-plugin-upgrade` — 升级 vllm-plugin-FL 到新 vLLM 版本
 - `infer-precision-check` — 验证推理输出正确性
 

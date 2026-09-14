@@ -38,7 +38,7 @@ Standardized correctness gate for vllm-plugin-FL on any hardware backend.
 | Checkpoint | Trigger |
 |---|---|
 | Model porting (Step 13 in infer-model-adapt) | After offline inference passes |
-| Hardware adaptation (Stage 4 in infer-hw-adapt) | After functional tests pass |
+| Hardware adaptation (Stage 4 in infer-vllm-hw-adapt) | After functional tests pass |
 | Plugin version upgrade | After unit + functional tests pass |
 | Any suspicious output divergence | Immediately on user report |
 | Before PR submission | Always — final correctness gate |
@@ -474,9 +474,9 @@ TP:      <tp_size>
 
 - `infer-env-setup` — environment setup (SSH, container, installation)
 - `infer-model-adapt` — port a new model into vllm-plugin-FL (calls this skill at Step 13)
-- `infer-hw-adapt` — hardware backend adaptation (calls this skill at Stage 4)
+- `infer-vllm-hw-adapt` — vLLM hardware backend adaptation (calls this skill during validation)
 - `debug-strategy` — systematic debugging when precision failures repeat
 - `ops-discipline` — shell safety, log persistence, environment awareness
 
 ---
-Related skills (load if needed): `debug-strategy`, `infer-hw-adapt`, `infer-model-adapt`
+Related skills (load if needed): `debug-strategy`, `infer-vllm-hw-adapt`, `infer-model-adapt`
