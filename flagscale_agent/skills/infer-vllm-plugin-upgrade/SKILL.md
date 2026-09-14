@@ -1,8 +1,8 @@
 ---
-description: Upgrade vllm-plugin-FL to a new vLLM version on NVIDIA hardware. Covers
-  version detection, API diff analysis, targeted fixes, and validation across unit
-  tests, offline inference, and serving. Applies to any vLLM minor version bump (e.g.,
-  0.20.x to 0.24.x).
+description: Upgrade vllm-plugin-FL to a newer vLLM release by reconciling upstream
+  API and architecture changes while preserving FL dispatch and hardware backends.
+  Use for version bumps, post-upgrade compatibility failures, or upgrade planning;
+  use infer-model-adapt when only a new model is being ported.
 name: infer-vllm-plugin-upgrade
 ---
 
@@ -22,276 +22,251 @@ name: infer-vllm-plugin-upgrade
  limitations under the License.
  -->
 
-# Plugin Upgrade to New vLLM Version
+# Upgrade vllm-plugin-FL
 
-Upgrade vllm-plugin-FL to a new vLLM version on NVIDIA hardware. A minor bump brings two kinds of changes: breakages (surface as import/type/attribute errors) and silent behavioral shifts (require proactive audit of high-risk areas).
+Treat a vLLM bump as an upstream reconciliation, not a sequence of import fixes.
+The result must preserve plugin behavior, remove compatibility code that upstream
+has made obsolete, and provide evidence on every hardware path claimed by the PR.
 
-## Prerequisites
+## Invariants
 
-Before starting the upgrade, ensure the environment is ready (via `infer-env-setup`):
-- SSH connection to NVIDIA GPU machine confirmed
-- Docker container running with correct image and GPU mounts
-- vLLM installed, vllm-plugin-FL in editable mode
-- All imports verified (`import vllm`, `import vllm_fl`)
+- Resolve the current plugin base, target vLLM tag or commit, repository roots,
+  runtime environment, and exact dependency tuple before editing.
+- Never edit the upstream or installed vLLM package. Change only plugin-owned
+  runtime code, tests, dependency metadata, documentation, and CI when required.
+- Preserve FL dispatch, platform abstraction, vendor backends, custom ops,
+  FlagGems integration, graph capture, I/O dumping, and FL environment controls.
+- Keep device calls behind vLLM/FL platform abstractions. Do not replace them with
+  unconditional `torch.cuda` calls on code shared by non-CUDA backends.
+- Preserve unrelated work. Do not stash, reset, clean, rewrite shared history, or
+  squash unless repository policy or the user explicitly requires it.
+- A passing import or unit suite is not completion. Runtime claims require real
+  inference on the named hardware and the exact submitted commit.
 
-## Critical Rules
+## 1. Establish the upgrade contract
 
-1. **Auto-detect versions first** -- never assume plugin or vLLM version. Always read from installed packages and pyproject.toml.
-2. **Never modify vLLM source** -- runtime fixes belong in `vllm_fl/`;
-   plugin-owned tests and dependency metadata may change when required.
-3. **One patch per failure** -- fix, re-test, then move to the next error. Never batch unverified fixes.
-4. **Fix order matters**: imports -> class/factory API -> signature kwargs -> op schemas -> model-specific.
-5. **NVIDIA GPU is ground truth** -- validate every fix on real hardware before declaring done.
-6. **Stream and persist logs** -- use `2>&1 | tee <log_dir>/<stage>_<timestamp>.log`.
-7. **Preserve repository history** -- squash only when repository policy or the
-   user requests it; never rewrite shared history without authorization.
-
----
-
-## Stage 0: Workspace Orientation and Version Detection (MANDATORY)
-
-Run before ANY work. Never skip. All paths must be probed -- never assumed.
+Inspect the repository and runtime instead of assuming paths or versions:
 
 ```bash
-ssh <host> "docker exec <container> bash -c '
-  python3 -c \"import vllm; print(vllm.__version__)\" &&
-  python3 -c \"import vllm_fl; print(vllm_fl.__file__)\" &&
-  find / -path \"*/vllm-plugin-FL/pyproject.toml\" 2>/dev/null | head -3 | xargs grep -E \"vllm|version\" &&
-  python3 -c \"import vllm, os; print(os.path.dirname(vllm.__file__))\"
-'"
+git status --short --branch
+git log -1 --oneline
+grep -n "vllm" pyproject.toml
+python3 -c "import vllm; print(vllm.__version__, vllm.__file__)"
+python3 -c "import vllm_fl; print(vllm_fl.__file__)"
 ```
 
-Immediately record to memory:
+Record:
+
+- current plugin base and target vLLM tag/commit;
+- plugin, upstream vLLM, model, log, and test paths;
+- target hardware and whether execution is local, SSH, containerized, or CI;
+- vLLM, Python, PyTorch, accelerator runtime, compiler, FlagTree/Triton,
+  FlagGems, flashinfer, and plugin revisions;
+- requested scope: plan only, NVIDIA reference upgrade, vendor adaptation, or
+  all supported hardware.
+
+Use a tested dependency tuple. A nominal vLLM version is insufficient because
+compiler and operator behavior can change with PyTorch, Triton/FlagTree,
+FlagGems, flashinfer, or the accelerator runtime. Detect duplicate or shadowed
+packages, especially a standalone Triton installed alongside FlagTree.
+
+For NVIDIA, prefer the official vLLM image or matching wheel as the reference
+environment. For backends that cannot install vLLM's CUDA extension, build the
+same target vLLM source with `VLLM_TARGET_DEVICE=empty`, then install the plugin
+without dependencies. Keep each vendor runtime in a separate environment or
+branch and validate it independently; NVIDIA success is not evidence for Ascend,
+MetaX, MUSA, Hygon, Sunrise, or another backend.
+
+If the request is planning-only, complete Sections 1-3 and return a concrete
+file-by-file plan, risk register, environment matrix, and verification matrix.
+Do not change code.
+
+## 2. Read the history and measure the delta
+
+Before patching, read both codebases and the closest earlier upgrade PRs. Find
+the commits between the old and target vLLM versions that affect plugin-owned
+integration points. Measure large diffs before reading them and inspect them in
+bounded chunks.
+
+Prioritize these surfaces:
+
+1. platform registration and device capability APIs;
+2. compilation and CUDA Graph wrappers;
+3. worker initialization, memory accounting, and KV-cache sizing;
+4. model-runner selection and execution paths;
+5. custom-op registration, schemas, FLA, attention, and fused MoE;
+6. dispatch configuration, vendor patches, and I/O dumping;
+7. plugin model/config/patch registrations;
+8. tests, packaging, environment setup, and CI.
+
+For each surface, capture:
+
+- upstream files/classes that changed, moved, split, or disappeared;
+- plugin overrides and hooks that must survive;
+- new upstream behavior that the plugin should inherit;
+- compatibility code that may now be redundant;
+- targeted tests and runtime paths needed to prove the adaptation.
+
+Do not infer compatibility from matching names. Inspect signatures, factories,
+abstract methods, op schemas, enum registration, output types, and initialization
+order. Major transitions can include worker/model-runner splits, V1/V2 runner
+selection, class-to-factory changes, and fused-MoE routing changes.
+
+## 3. Baseline and plan before editing
+
+Run the best available baseline against the current plugin and target runtime.
+Persist full logs outside the repository or in an ignored task directory. At a
+minimum, collect import results and the full unit-test failure list. When a
+known-good old environment exists, keep its results separate from target-runtime
+failures.
+
+Build an ordered implementation plan with one checkpoint per component. The
+usual dependency order is:
+
+```text
+platform -> compilation -> worker -> model runner -> ops/dispatch
+         -> obsolete compatibility cleanup -> registration -> packaging/CI
 ```
-memory_write('<prefix>_vllm_version', '<version>')
-memory_write('<prefix>_plugin_root', '<discovered_plugin_root>')
-memory_write('<prefix>_vllm_root', '<discovered_vllm_root>')
-```
 
-If installed vLLM version != plugin declared compatible version, version gap is confirmed -- proceed.
+The plan must also identify independent hardware passes. Start with a reference
+backend when it helps isolate framework API changes, but do not silently broaden
+the requested scope to every vendor.
 
-Inspect `git status --short --branch` before editing. Preserve unrelated work
-and do not stash, reset, or clean the worktree without explicit authorization.
-Use a dedicated topic branch when possible and commit only task-owned files.
+## 4. Reconcile upstream and reapply FL behavior
 
-**Never guess paths. Always read from memory or re-probe.**
+For files substantially derived from upstream, use copy-then-patch:
 
----
+1. save or diff the current plugin file and catalogue every FL-specific block;
+2. start from the target upstream implementation or structure;
+3. add a source/tag header when the repository uses that convention;
+4. reapply each required FL customization deliberately;
+5. compare again to confirm that no customization disappeared accidentally.
 
-## Stage 1: Change Analysis
+For smaller wrappers, make focused changes. Diagnose from target upstream code
+first:
 
-Before touching any code, enumerate what broke and what's new.
+- moved symbol: locate its target definition and update the import;
+- class/factory transition: inspect the returned object and preserve the
+  unpatched original before registering a replacement;
+- signature or output change: compare definitions and all call sites;
+- custom op failure: compare schemas and the live `torch.ops` namespace;
+- graph failure: compare capture modes, wrapper lifecycle, and memory-pool APIs;
+- worker failure: compare device initialization, memory statistics, cache config,
+  distributed state, and scheduler/model-runner output contracts.
 
-### 1a. Unit test baseline -- find all current failures
+After each component, run imports and focused tests before moving downstream.
+Batch mechanically related edits when appropriate; the meaningful requirement is
+a small, attributable verification cycle, not one commit per traceback.
+
+### Runner and operator compatibility
+
+If the target vLLM has multiple runner generations, define explicit selection
+rules. Validate the upstream-default runner and retain an older-compatible path
+only for architectures that still require it. Test selection itself so a model
+cannot silently take the wrong path.
+
+Verify native and FL-dispatched paths separately where both are supported.
+Explicit operator or attention selection must be honored rather than overwritten
+by a default. Derive FlagGems allow/deny entries from reproducible failures on the
+target dependency tuple; minimize the list and keep a native/vendor fallback.
+
+### Remove code that upstream now owns
+
+For every plugin model, config, or patch considered for deletion:
+
+1. prove the target vLLM or Transformers version implements and registers it;
+2. search the plugin for imports, registration, tests, and documentation;
+3. delete the obsolete implementation and its obsolete tests together;
+4. keep or add coverage proving the upstream path is selected;
+5. run a dangling-import search after cleanup.
+
+Do not retain dead compatibility code merely because it imports successfully, and
+do not delete vendor patches that have only superficially similar upstream code.
+
+## 5. Validate the exact compatibility claims
+
+Use a matrix selected from changed code paths. A substantial upgrade normally
+needs:
+
+- plugin import and component import checks;
+- full unit suite, compared with the recorded baseline;
+- vanilla vLLM versus plugin output on a small deterministic prompt;
+- dense and MoE models when fused-MoE or dispatch changed;
+- eager and compiled/graph execution when compilation changed;
+- every runner generation or architecture-specific path retained by the plugin;
+- explicit FlagGems/operator routing and native fallback when dispatch changed;
+- I/O-dump smoke coverage when runner hooks changed;
+- offline generation that finishes with a non-empty, coherent result;
+- OpenAI-compatible serving health plus at least one completed request;
+- longer decode, concurrency, tensor parallelism, or multimodal coverage when the
+  corresponding scheduler, cache, distributed, or input path changed.
+
+Use model paths and tensor parallel sizes that fit the actual machine. Never call
+a run successful merely because weights loaded or the server opened a port. For a
+generation gate, require completion and a simple deterministic content assertion.
+
+On non-NVIDIA hardware, first prove the `empty` vLLM and plugin imports, then the
+vendor platform/worker/model runner, and finally real device inference. If a
+container cannot see devices, distinguish a host/container permission problem
+from a plugin defect. Privileged containers or broader device mounts require the
+user's authorization; without hardware access, report the runtime gate as blocked
+rather than passed.
+
+## 6. Integrate CI and finalize
+
+When CI is in scope, verify the whole path rather than editing only a version pin:
+
+- setup scripts assert the intended vLLM and dependency tuple;
+- the selected runner labels and model paths exist;
+- referenced images are pullable and their tags/digests match the validated image;
+- automatic and manual vendor workflows reflect scarce-hardware policy;
+- generated wheels install with `--no-build-isolation --no-deps` where required;
+- runtime E2E jobs exercise the plugin rather than only importing it.
+
+Rebase or merge the latest target base before final verification when repository
+policy requires it. Resolve conflicts semantically: re-check upstream-derived
+files and rerun affected tests. Do not present pre-rebase results as current-HEAD
+merge gates.
+
+Before pushing:
 
 ```bash
-ssh <host> "docker exec -e VLLM_PLUGINS=fl <container> bash -c '
-  cd <plugin_root> &&
-  python3 -m pytest tests/unit_tests/ --tb=short -q \
-  2>&1 | tee <log_dir>/unit_baseline.log
-'"
+git diff --check
+git status --short --branch
+git diff --name-status <target-base>...HEAD
 ```
 
-Capture the full failure list. Categorize each by error type:
-- `ImportError` / `ModuleNotFoundError` -- moved symbols
-- `TypeError` -- stale kwargs or signature change
-- `RecursionError` -- class vs factory confusion in patching
-- `AttributeError` -- removed attributes or missing op registrations
+Remove task scripts, credentials, model outputs, and standalone diagnostics from
+the diff unless explicitly requested. Push only task-owned commits.
 
-### 1b. Identify plugin files that import from vLLM
+The PR report must separate:
 
-```bash
-ssh <host> "docker exec <container> grep -rn 'from vllm\|import vllm' \
-  <plugin_root>/vllm_fl/ --include='*.py' -l"
-```
+- target base and exact plugin commit;
+- runtime/dependency tuple and hardware;
+- code and compatibility cleanup;
+- current-HEAD passing evidence;
+- older supporting evidence;
+- untested backends and remaining blockers;
+- intentional out-of-scope work.
 
-Each of these files is a potential breakage point. Cross-reference with the error list from 1a.
+Never claim a backend was validated when it only received import-path changes.
 
-### 1c. Audit high-risk areas
+## Recovery
 
-Even if tests pass, proactively check areas that frequently change across vLLM bumps:
-- Plugin override points (worker, model_runner, scheduler)
-- Op registration/schema files
-- Any class the plugin subclasses or monkey-patches
-
-Compare the plugin's assumptions against the new vLLM code:
-```bash
-ssh <host> "docker exec <container> bash -c '
-  diff <(grep -n \"def <function>\" <vllm_root>/vllm/<module>.py) \
-       <(grep -n \"def <function>\" <plugin_root>/vllm_fl/<module>.py)
-'"
-```
-
----
-
-## Stage 2: Fix API Breakages
-
-Fix in strict order. Each fix gets its own verify cycle.
-
-### Fix methodology
-
-1. **Imports** -- trace the moved symbol with `grep -rn "class X\|def X" <vllm_root>/vllm/`, update the import path in `vllm_fl/`.
-
-2. **Class/factory API** -- if plugin patches a class that vLLM replaced with a factory (or vice versa), capture the original before patching. Use `type(obj)` and `inspect.getmro()` to understand the new structure.
-
-3. **Signature kwargs** -- use `inspect.signature()` to compare old vs new function signatures. Add/remove kwargs in plugin's override accordingly.
-
-4. **Op schemas** -- compare plugin's registered ops against actual `torch.ops` namespace. Update schema definitions to match.
-
-5. **Model-specific** -- only after all generic fixes. Test with the specific model that fails.
-
-### Per-fix verification pattern
-
-After EVERY single fix:
-```bash
-# Quick import check
-ssh <host> "docker exec -e VLLM_PLUGINS=fl <container> \
-  python3 -c 'import vllm_fl; print(\"plugin import OK\")'"
-
-# Targeted test (if the fix addresses a specific test)
-ssh <host> "docker exec -e VLLM_PLUGINS=fl <container> \
-  python3 -m pytest <plugin_root>/tests/unit_tests/<specific_test>.py -x -v \
-  2>&1 | tail -20"
-```
-
-Never proceed to the next fix without confirming the current one passes.
-
----
-
-## Stage 3: Unit Test Verification
-
-After all fixes from Stage 2, run the full unit test suite:
-
-```bash
-ssh <host> "docker exec -e VLLM_PLUGINS=fl <container> bash -c '
-  cd <plugin_root> &&
-  python3 -m pytest tests/unit_tests/ --tb=short -q \
-  2>&1 | tee <log_dir>/unit_final.log
-'"
-```
-
-Compare against the baseline from Stage 1a:
-- All NEW failures from the upgrade must be fixed (zero regression)
-- Pre-existing failures (present before upgrade) are acceptable -- document them
-- If a test was passing before and fails now, it MUST be fixed before proceeding
-
----
-
-## Stage 4: Offline Inference Validation
-
-Test with at least one representative model to verify full forward pass works.
-
-```bash
-ssh <host> "docker exec -e VLLM_PLUGINS=fl <container> bash -c '
-  python3 -c \"
-from vllm import LLM, SamplingParams
-llm = LLM(model=\\\"<model_path>\\\", tensor_parallel_size=<tp>)
-outputs = llm.generate([\\\"Hello, my name is\\\"], SamplingParams(temperature=0, max_tokens=50))
-for o in outputs:
-    print(f\\\"Output: {o.outputs[0].text}\\\")
-\" 2>&1 | tee <log_dir>/offline.log'"
-```
-
-Check: output contains coherent text (not empty, not garbled, not repeated tokens).
-
-If the plugin supports multiple model architectures, test each category that has dedicated plugin code paths.
-
----
-
-## Stage 5: Serving Validation
-
-Final validation -- the plugin must work in the full serving stack.
-
-```bash
-# Launch server
-ssh <host> "docker exec -e VLLM_PLUGINS=fl <container> bash -c '
-  python3 -m vllm.entrypoints.openai.api_server \
-    --model <model_path> --tensor-parallel-size <tp> \
-    --host 0.0.0.0 --port 8000 \
-    > <log_dir>/serve.log 2>&1 &
-  echo \$!
-'"
-
-# Wait for ready
-ssh <host> "docker exec <container> bash -c '
-  for i in \$(seq 1 60); do
-    curl -sf http://localhost:8000/health && break
-    sleep 5
-  done
-'"
-
-# Test completion
-ssh <host> "curl -s http://localhost:8000/v1/completions \
-  -H 'Content-Type: application/json' \
-  -d '{\"model\": \"<model_path>\", \"prompt\": \"Hello\", \"max_tokens\": 20}'"
-
-# Cleanup
-ssh <host> "docker exec <container> pkill -f api_server"
-```
-
-Check: response contains non-empty generated text.
-
----
-
-## Stage 6: PR Submission
-
-Before opening a PR:
-
-1. **Review all changes**: ensure no debug prints, temporary patches, or commented-out code remain.
-2. **Verify no vLLM source files were modified**: the diff may contain
-   plugin-owned runtime code, tests, dependency metadata, and requested docs,
-   but no edits to the installed or vendored upstream vLLM package.
-3. **Check repository state**: preserve unrelated changes and ensure only
-   task-owned files are staged.
-4. **Run unit tests one final time** on the exact commit that will be submitted.
-
-Squash only when repository policy or the user requests it. Do not rewrite
-shared history without explicit authorization.
-
-Commit message format:
-```
-feat(plugin): upgrade vllm-plugin-FL compatibility to vLLM <version>
-
-- <one line per fix, describing what broke and how it was resolved>
-
-Tested: unit tests, offline inference, serving on NVIDIA
-Models validated: <list>
-```
-
-Push and open PR:
-```bash
-git -C <plugin_root> push origin <branch> -u
-gh pr create --title "feat(plugin): upgrade to vLLM <version>" --body-file <body_file> --base main
-```
-
----
-
-## Error Diagnosis Guide
-
-| Error Type | Likely Cause | Diagnosis Approach |
-|-----------|-------------|-------------------|
-| `ImportError` | Symbol moved to different module | `grep -rn "class X\|def X" <vllm_root>/vllm/` |
-| `TypeError: unexpected keyword` | Function signature changed | `python3 -c "import inspect, vllm.<mod>; print(inspect.signature(...))"` |
-| `RecursionError` | Plugin patches class that became factory | Check `type()` of the object before patching |
-| `AttributeError` | Attribute removed or renamed | Read the new vLLM source for the class |
-| Tests pass but inference garbled | Silent behavioral change | Compare output with vanilla vLLM (no plugin) |
-| Server hangs on request | Async/scheduling API change | Check server logs, compare with vanilla vLLM |
-
-### Recovery discipline
-
-1. Read FULL error output -- multiple issues may coexist
-2. If stuck after 2 attempts on same error -> step back, read vLLM changelog or git log for the breaking commit
-3. If the upgrade breaks too many things -> consider incremental approach (one minor version at a time)
-4. If rollback is needed, revert only task-owned changes using the recorded
-   branch/commit state; do not overwrite unrelated work
-
----
+- Reproduce a failure with vanilla vLLM before blaming the plugin.
+- After two unsuccessful fixes to the same symptom, return to the relevant target
+  upstream implementation and the introducing commit instead of stacking guesses.
+- If the version gap is too large to reason about safely, use intermediate tags
+  for analysis or implementation checkpoints, but still validate the final target.
+- Preserve logs and commit identifiers so work can resume without rerunning proven
+  stages. Revert only task-owned changes when backing out.
 
 ## Related Skills
 
-- `infer-env-setup` -- set up the container and environment from scratch
-- `infer-hw-adapt` -- hardware-specific backend adaptation (non-NVIDIA)
-- `infer-model-adapt` -- port a new model into the plugin
-- `infer-precision-check` -- verify inference output correctness
-- `debug-strategy` -- systematic debugging when stuck
-- `ops-discipline` -- shell safety and environment awareness
+- `infer-env-setup` for provisioning the runtime.
+- `infer-hw-adapt` for deeper vendor-backend implementation after the shared vLLM
+  upgrade is established.
+- `infer-model-adapt` when only a new model or architecture is being added.
+- `infer-precision-check` for detailed numerical comparison.
+- `debug-strategy` and `ops-discipline` for systematic diagnosis and safe remote
+  execution.
