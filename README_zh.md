@@ -8,7 +8,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-0.1.0-green.svg)](https://github.com/FlagOpen/FlagScale-Agent)
+[![Version](https://img.shields.io/badge/version-0.1.0-green.svg)](https://github.com/flagos-ai/FlagScale-Agent)
 
 </div>
 
@@ -38,7 +38,7 @@ FlagScale-Agent 是一个专注于大规模分布式训练、推理和服务基�
 ### 安装
 
 ```bash
-git clone https://github.com/FlagOpen/FlagScale-Agent.git
+git clone https://github.com/flagos-ai/FlagScale-Agent.git
 cd FlagScale-Agent
 pip install -e .
 ```
@@ -634,8 +634,8 @@ FlagScale-Agent/
 
 ## 📬 联系
 
-- **GitHub Issues：** [https://github.com/FlagOpen/FlagScale-Agent/issues](https://github.com/FlagOpen/FlagScale-Agent/issues)
-- **讨论区：** [https://github.com/FlagOpen/FlagScale-Agent/discussions](https://github.com/FlagOpen/FlagScale-Agent/discussions)
+- **GitHub Issues：** [https://github.com/flagos-ai/FlagScale-Agent/issues](https://github.com/flagos-ai/FlagScale-Agent/issues)
+- **讨论区：** [https://github.com/flagos-ai/FlagScale-Agent/discussions](https://github.com/flagos-ai/FlagScale-Agent/discussions)
 
 ---
 
