@@ -45,6 +45,8 @@ runtime matrix -> rebase, rerun merge gates, and report auditable evidence.
   registers it, then verify no dangling references remain.
 - Separate current-HEAD evidence from pre-rebase supporting evidence and list
   untested hardware honestly.
+- Final acceptance requires the unfiltered `tests/run.py` matrix for the target
+  platform/device: every discovered case must execute and pass.
 
 **Constraints**: never modify upstream vLLM, never hardcode CUDA device calls in
 shared paths, preserve unrelated work, install the plugin without changing the

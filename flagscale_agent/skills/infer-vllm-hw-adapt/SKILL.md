@@ -125,6 +125,22 @@ Select a matrix from the affected paths. A substantial adaptation normally needs
 - explicit verification of dispatch choices and bounded fallbacks;
 - teardown checks so successful runs do not leave task-owned processes.
 
+The backend is accepted only after the vllm-plugin-FL unified runner completes
+every case enabled for the target platform/device. Inventory the exact case list
+with `--dry-run`, then run without scope/task/model/case filters:
+
+```bash
+python tests/run.py --platform <platform> --device <device> --dry-run
+python tests/run.py --platform <platform> --device <device>
+```
+
+The discovered and executed case sets must match, and every case must pass.
+Missing weights/assets, unsupported-feature or automatic skips, unstarted cases,
+and infrastructure timeouts block acceptance. Report discovered, executed,
+passed, failed, skipped, and blocked counts with each non-pass case named.
+Focused tests are debugging evidence only and do not replace the complete tool
+matrix.
+
 Model loading, worker initialization, or HTTP readiness alone is not a pass.
 Require completed generation and a simple deterministic assertion. Record exact
 model, TP, dtype/quantization, graph mode, dependency tuple, commit, exit code,

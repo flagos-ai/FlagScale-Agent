@@ -30,4 +30,5 @@ backend CI -> report current-HEAD evidence and blockers.
 **Key constraints**: never patch vLLM source, never hardcode CUDA in shared paths,
 gate vendor shims narrowly, preserve observable fallbacks, install without
 replacing dependencies, and never claim a hardware pass without completed
-generation on that hardware.
+generation on that hardware. Full acceptance also requires every case discovered
+by the target platform/device's unfiltered `tests/run.py` invocation to pass.

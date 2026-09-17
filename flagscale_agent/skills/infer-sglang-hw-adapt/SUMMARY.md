@@ -30,4 +30,5 @@ applicable -> integrate resource-aware CI -> report exact-head evidence.
 **Key constraints**: preserve original examples and assertions, keep fallbacks
 explicit, distinguish decode from prefill graph claims, separate image-pull
 failures from test results, and never use historical or cached-image evidence as
-a substitute for current-head real-device validation.
+a substitute for current-head real-device validation. Every compatible example,
+enabled benchmark case, and the documented sustained pressure profile must pass.

@@ -288,6 +288,36 @@ throughput is a functional observation, not a benchmark claim.
 
 ---
 
+### Mandatory examples and stress acceptance
+
+Repository examples and stress testing are release gates, not optional supporting
+evidence. Inventory the runnable scripts documented for the target platform under
+`examples/` (excluding helper modules such as files prefixed with `_`). Run every
+declared-compatible example without removing prompts, baselines, assertions, or
+phases. This includes offline, concurrent, MTP, and multinode examples when those
+capabilities are advertised for the target platform. Missing models, assets,
+hosts, or devices block acceptance rather than turning the example into a pass.
+
+Run the repository benchmark matrix through the unified tool, including every
+enabled throughput, latency, and serving case:
+
+```bash
+python tests/run.py --platform <platform> --device <device> --scope benchmark
+```
+
+Benchmark smoke validates entrypoints only. Also run a sustained serving pressure
+test using the repository/user-approved profile. Record model, TP/PP, graph mode,
+input/output lengths, concurrency or request rate, request count and duration,
+throughput, p50/p95/p99 latency, successful/failed requests, timeouts, OOMs, and
+server/worker health. If no profile exists, define it in the validation record
+before running; do not relabel a tiny dummy-weight smoke as pressure-test success.
+
+Acceptance requires all applicable examples, all enabled benchmark cases, and the
+sustained pressure profile to finish successfully on the exact submitted commit.
+Report discovered, executed, passed, failed, skipped, and blocked items by name.
+
+---
+
 ## Stage 6: Final Review and PR
 
 ```bash
@@ -333,6 +363,10 @@ The upgrade is complete only when:
 - affected dense/hybrid and MoE paths pass;
 - serving, streaming, long decode, concurrency, and intended CUDA Graph pass on
   real NVIDIA hardware;
+- every target-platform example passes unchanged;
+- every enabled throughput, latency, and serve benchmark case passes;
+- the documented sustained pressure profile completes without errors, timeouts,
+  OOMs, or unhealthy workers;
 - the final run uses normal plugin defaults;
 - the diff and PR description match requested scope.
 

@@ -43,6 +43,8 @@ validation → Stage 6 final review and PR.
   Graph on representative dense/hybrid and MoE paths;
 - keep docs and containerfiles outside the diff unless explicitly requested.
 
-**Completion gate**: no new unit regressions, no temporary diagnostic overrides,
-representative models pass on NVIDIA, and the PR reports exact dependencies,
-model/TP/graph coverage, fallbacks, and untested follow-ups.
+**Completion gate**: no new unit regressions or temporary diagnostic overrides;
+representative models, every target-platform example, every enabled throughput,
+latency, and serve benchmark case, and a documented sustained pressure profile
+pass on NVIDIA; the PR reports exact dependencies, model/TP/graph coverage,
+fallbacks, and untested follow-ups.

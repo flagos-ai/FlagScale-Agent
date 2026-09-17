@@ -205,6 +205,27 @@ Use model paths and tensor parallel sizes that fit the actual machine. Never cal
 a run successful merely because weights loaded or the server opened a port. For a
 generation gate, require completion and a simple deterministic content assertion.
 
+### Mandatory unified-runner acceptance
+
+The final vllm-plugin-FL acceptance gate is the repository's unified test tool,
+`tests/run.py`. First run it with `--dry-run` for the target platform/device and
+save the complete discovered case list. Then run the same platform/device without
+`--task`, `--model`, `--case`, `--cases`, or a narrowed `--scope` so every enabled
+unit, functional, inference, and serving case declared by the platform YAML runs:
+
+```bash
+python tests/run.py --platform <platform> --device <device> --dry-run
+python tests/run.py --platform <platform> --device <device>
+```
+
+Completion requires every discovered case to execute and pass. A missing model or
+asset, auto-skip, unsupported-feature skip, filtered matrix, unstarted downstream
+case, or infrastructure timeout is not a pass for full acceptance. Fix the
+environment/configuration or report the gate blocked. Record discovered,
+executed, passed, failed, skipped, and blocked counts plus the names of every
+non-pass case. Focused pytest or filtered `run.py` commands remain useful during
+development, but cannot replace this final unfiltered run.
+
 On non-NVIDIA hardware, first prove the `empty` vLLM and plugin imports, then the
 vendor platform/worker/model runner, and finally real device inference. If a
 container cannot see devices, distinguish a host/container permission problem

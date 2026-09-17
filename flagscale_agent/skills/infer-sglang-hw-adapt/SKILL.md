@@ -114,6 +114,30 @@ includes:
 - cleanup checks for server, worker, and communication processes;
 - benchmark entrypoint smoke, clearly separated from controlled performance.
 
+Hardware acceptance additionally requires all runnable examples declared
+compatible with the backend and a real pressure test. Inventory documented
+scripts under `examples/` and run each unchanged; helper modules are not cases.
+Offline, concurrent, MTP, and multinode examples are mandatory when the backend
+claims those capabilities. Missing models, image assets, hosts, or devices block
+acceptance rather than justifying a pass or silent skip.
+
+Run every enabled throughput, latency, and serving benchmark case through:
+
+```bash
+python tests/run.py --platform <platform> --device <device> --scope benchmark
+```
+
+Then run a sustained serving pressure profile, not only the dummy-weight benchmark
+smoke. Record model, TP/PP, graph mode, input/output lengths, concurrency or
+request rate, request count/duration, throughput, p50/p95/p99 latency, failures,
+timeouts, OOMs, and worker health. Use a repository or user-approved profile; if
+none exists, define it explicitly in the validation record before execution.
+
+The final report must list discovered, executed, passed, failed, skipped, and
+blocked examples/benchmark/pressure cases by name. Every applicable example and
+enabled benchmark must pass, and the pressure run must finish without request
+errors, timeouts, OOMs, hangs, or unhealthy workers.
+
 For multimodal tests, verify the referenced assets exist before starting a long
 run. For multi-node tests, use matching code, dependencies, model paths, network
 interfaces, and reachable ports on every host; require success from every role.
