@@ -1,0 +1,21 @@
+# know-ascend-operators
+# Ascend算子优化知识：FlagScale/Megatron/TE实际分派、公共接口与梯度语义、Triton/Ascend C热点实验和性能边界
+
+# To read a section: load_knowledge(name='know-ascend-operators', doc='<path below>', start_line=<L>, end_line=<L>)
+# Do NOT pass these doc paths to read_file — they are knowledge-internal.
+
+## ascend_operators/operator-optimization.md (72 lines)
+L3: Ascend 算子调用成本与接口语义
+  L7: 热点耗时来自哪里
+  L21: 可形成优化假设的机制
+  L33: 公共接口、后端与仓库边界
+  L47: 训练接口中容易遗漏的语义
+  L61: 三层性能口径
+
+## ascend_operators/kernel-experiments.md (58 lines)
+L3: Ascend kernel 的资源与性能机制
+  L7: 执行资源与瓶颈
+  L13: 可形成优化假设的机制
+  L26: Tiling 与片上资源活跃量
+  L34: 自动调优的作用与边界
+  L42: 正确性与测量边界

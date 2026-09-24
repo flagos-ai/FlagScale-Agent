@@ -1,0 +1,17 @@
+# know-ascend-profiling
+# Ascend性能采集与分析知识：torch_npu profiler生命周期、导出字段、step与时钟关联、设备任务区间及通信/Host归因边界
+
+# To read a section: load_knowledge(name='know-ascend-profiling', doc='<path below>', start_line=<L>, end_line=<L>)
+# Do NOT pass these doc paths to read_file — they are knowledge-internal.
+
+## ascend_profiling/collection-and-analysis.md (102 lines)
+L3: NPU profiling 的采集机制与分析依据
+  L7: 采集机制
+    L15: 采集参数与 timeline 的影响
+      L19: `profile(...)`：框架与设备事件
+      L32: `schedule(...)`：采集范围
+      L42: `experimental_config`：层级与硬件指标
+      L56: 回调、落盘与时序扰动
+  L64: 数据含义
+  L80: 统计口径
+  L93: 归因依据

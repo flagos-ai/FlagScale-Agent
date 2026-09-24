@@ -38,6 +38,8 @@ EXPECTED_SKILLS = {
     "ops-discipline",
     "workspace-layout",
     "train-parallel-strategy",
+    "train-ascend-performance-tuning",
+    "train-ascend-profiling",
     "debug-strategy",
     "infer-env-setup",
     "infer-vllm-hw-adapt",

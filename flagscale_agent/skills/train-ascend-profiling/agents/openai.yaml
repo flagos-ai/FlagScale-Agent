@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ascend Training Profiling"
+  short_description: "Collect and analyze Ascend training profiles to locate device idle time, communication, and operator bottlenecks"
+  default_prompt: "Use $train-ascend-profiling to analyze existing Ascend training performance data, provide verifiable bottleneck evidence, and suggest the next experiment."

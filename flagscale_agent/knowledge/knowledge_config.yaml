@@ -198,3 +198,30 @@ know-linear-attention:
   description: "线性注意力FLA：GDN/GLA layer集成、chunk分块与WY三角解、递推状态kernel(chunk_delta_h)、门控cumsum、autograd管线、CP状态接力、dispatch/autotune缓存、平台坑表与调优"
   docs:
     - linear_attention/01_fla_source_analysis.md
+
+know-ascend-training:
+  description: "Ascend训练调优知识：显存、计算效率、通信开销的候选空间与权衡，并行/重计算/融合/图模式机制、配置约束及测量和恢复语义"
+  docs:
+    - ascend_training/stack-capabilities.md
+    - ascend_training/search-space.md
+    - ascend_training/batch-and-accumulation.md
+    - ascend_training/parallelism.md
+    - ascend_training/communication.md
+    - ascend_training/recompute.md
+    - ascend_training/memory-and-sharding.md
+    - ascend_training/data-and-host.md
+    - ascend_training/graph-execution.md
+    - ascend_training/measurement-and-records.md
+    - ascend_training/state-and-resume.md
+    - ascend_training/native-tuner.md
+
+know-ascend-profiling:
+  description: "Ascend性能采集与分析知识：torch_npu profiler生命周期、导出字段、step与时钟关联、设备任务区间及通信/Host归因边界"
+  docs:
+    - ascend_profiling/collection-and-analysis.md
+
+know-ascend-operators:
+  description: "Ascend算子优化知识：FlagScale/Megatron/TE实际分派、公共接口与梯度语义、Triton/Ascend C热点实验和性能边界"
+  docs:
+    - ascend_operators/operator-optimization.md
+    - ascend_operators/kernel-experiments.md

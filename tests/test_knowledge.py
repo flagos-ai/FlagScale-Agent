@@ -59,8 +59,8 @@ class TestKnowledgeManager:
         km = KnowledgeManager()
         assert km.root.exists()
         # 17 base groups + know-moe-training (MoE pretraining perf survey)
-        # + know-linear-attention (FLA source analysis)
-        assert len(km.available_groups) == 19
+        # + know-linear-attention (FLA source analysis) + 3 Ascend groups
+        assert len(km.available_groups) == 22
 
     def test_init_custom_dir(self, knowledge_dir):
         """Test initialization with custom directory."""
@@ -232,3 +232,83 @@ class TestLoadKnowledgeTool:
         result = tool.execute(name="know-test-group", doc="wrong/path.md")
         assert "not in group" in result
         assert "test_repo/01_test.md" in result  # lists available docs
+
+
+ASCEND_KNOWLEDGE_GROUPS = (
+    "know-ascend-training",
+    "know-ascend-profiling",
+    "know-ascend-operators",
+)
+
+
+@pytest.fixture(scope="module")
+def builtin_knowledge():
+    """Use shipped content to catch registration and stale-index failures."""
+    from flagscale_agent.knowledge import KnowledgeManager
+    from flagscale_agent.react.tools.load_knowledge import LoadKnowledgeTool
+
+    manager = KnowledgeManager()
+    config = yaml.safe_load(manager.config_path.read_text(encoding="utf-8"))
+    return manager, LoadKnowledgeTool(manager), config
+
+
+class TestAscendKnowledgeIntegration:
+    @pytest.mark.parametrize("group_name", ASCEND_KNOWLEDGE_GROUPS)
+    def test_group_is_discoverable(self, builtin_knowledge, group_name):
+        manager, tool, config = builtin_knowledge
+        assert group_name in manager.available_groups
+        assert group_name in tool.execute(name="list")
+        assert config[group_name]["description"].strip()
+        docs = manager.get_group_docs(group_name)
+        assert docs
+        assert len(docs) == len(set(docs))
+
+    def test_every_registered_document_exists(self, builtin_knowledge):
+        manager, _, _ = builtin_knowledge
+        for group_name in manager.available_groups:
+            for doc in manager.get_group_docs(group_name):
+                path = manager.docs_path / doc
+                assert path.is_file(), f"{group_name}: missing {doc}"
+                assert path.read_text(encoding="utf-8").strip(), f"{group_name}: empty {doc}"
+
+    @pytest.mark.parametrize("group_name", ASCEND_KNOWLEDGE_GROUPS)
+    def test_default_index_matches_current_documents(self, builtin_knowledge, group_name):
+        from flagscale_agent.knowledge.generate_index import generate_index_for_group
+
+        manager, tool, config = builtin_knowledge
+        index_path = manager.indexes_path / f"{group_name}.idx"
+        assert index_path.is_file()
+        shipped_index = index_path.read_text(encoding="utf-8")
+        assert shipped_index.strip()
+        assert tool.execute(name=group_name) == shipped_index
+        regenerated = generate_index_for_group(
+            group_name,
+            config[group_name],
+            str(manager.docs_path),
+            sources=config.get("_sources", {}),
+        )
+        assert shipped_index == regenerated
+
+    @pytest.mark.parametrize("group_name", ASCEND_KNOWLEDGE_GROUPS)
+    def test_document_and_line_range_are_readable(self, builtin_knowledge, group_name):
+        manager, tool, _ = builtin_knowledge
+        docs = manager.get_group_docs(group_name)
+        assert docs
+        for doc in docs:
+            lines = (manager.docs_path / doc).read_text(encoding="utf-8").splitlines()
+            assert len(lines) >= 3, doc
+            full_result = tool.execute(name=group_name, doc=doc)
+            assert full_result.split("===\n", 1)[1] == "\n".join(lines)
+
+            # Read an interior span, including its final line, from the real document.
+            start_line = max(2, len(lines) // 3)
+            end_line = min(len(lines), start_line + 2)
+            section = tool.execute(
+                name=group_name,
+                doc=doc,
+                start_line=start_line,
+                end_line=end_line,
+            )
+            assert section.split("===\n", 1)[1] == "\n".join(
+                lines[start_line - 1:end_line]
+            )

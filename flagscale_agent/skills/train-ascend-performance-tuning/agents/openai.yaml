@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ascend Training Performance Tuning"
+  short_description: "Tune Ascend training within a budget using memory, compute, and communication experiments"
+  default_prompt: "Use $train-ascend-performance-tuning to choose methods and explore combinations based on the training run's memory use, compute efficiency, and communication overhead. Stay within the available resources and budget, then deliver a retested configuration and conclusions."
