@@ -85,7 +85,7 @@ Training Loop: for batch in loader: ...
 
 **并行集成说明**：
 - **DP (Data Parallel)**：Energon 的 `WorkerConfig(rank, world_size)` 直接对应 DP rank/size。底层 WebDataset 的 shard 分配（sharder.py）确保各 DP rank 读取不重叠的 shard 子集。
-- **TP (Tensor Parallel)**：Energon 不感知 TP。Megatron 侧通过 `broadcast_data()` (megatron/training/utils.py) 将 TP rank=0 获取的 batch 广播到整个 TP 组。
+- **TP (Tensor Parallel)**：Energon 不感知 TP。Megatron 侧通过 `broadcast_data()` (megatron/core/tensor_parallel/data.py) 将 TP rank=0 获取的 batch 广播到整个 TP 组。
 - **PP (Pipeline Parallel)**：Energon 不感知 PP。Megatron 侧仅在 `pre_process=True` 的 PP stage（第一个 stage）调用 data loader，其余 stage 通过流水线接收激活值。
 
 
@@ -248,7 +248,7 @@ WorkerConfig 的 `rank` 和 `world_size` 对应 DP rank/size。WebDataset sharde
 
 ### 6.2 TP — 张量并行（Megatron 侧 broadcast_data）
 
-Energon 不感知 TP。在 Megatron 的 get_batch() 中，仅 TP rank=0 的进程从 DataLoader 获取数据，然后通过 `broadcast_data()` (megatron/training/utils.py) 广播到整个 TP 组的其他 rank。
+Energon 不感知 TP。在 Megatron 的 get_batch() 中，仅 TP rank=0 的进程从 DataLoader 获取数据，然后通过 `broadcast_data()` (megatron/core/tensor_parallel/data.py) 广播到整个 TP 组的其他 rank。
 
 ### 6.3 PP — 流水线并行（Megatron 侧 pre/post_process）
 
@@ -336,7 +336,7 @@ def get_batch(data_iterator):
 
 WorkerConfig 的 `rank`/`world_size` 对应 DP rank/size。Sharder（sharder.py）按 `global_worker_id` 分配 shard，各 DP rank 读取不重叠数据。
 
-### 9.2 TP broadcast_data（Megatron megatron/training/utils.py）
+### 9.2 TP broadcast_data（Megatron megatron/core/tensor_parallel/data.py）
 
 TP 组内仅 rank=0 持有数据，`broadcast_data()` 广播 tensor dict 到组内所有 rank，避免重复 IO。
 

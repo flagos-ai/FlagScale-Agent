@@ -14,9 +14,17 @@
 
 """Plan update tool — modify task plan steps and status."""
 
+from __future__ import annotations
+
 import re
 
 from flagscale_agent.react.tools.base import Tool
+
+_THINKING_ECHO = (
+    "Model recorded — it is now your working theory. What does it PREDICT for "
+    "your next move, and what is the cheapest observation that could kill it? "
+    "Run that."
+)
 
 
 # Pattern to extract integer from strings like "step_1", "step 2", "Step_3", "#4"
@@ -54,8 +62,8 @@ class PlanUpdateTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["step_done", "step_doing", "step_skip", "add_steps", "update_acceptance", "complete", "abandon", "deactivate", "reactivate", "batch"],
-                "description": "What to do: step_done/step_doing/step_skip (update a step), add_steps (insert new steps), update_acceptance (modify step acceptance criteria), complete/abandon (finish the plan), deactivate (pause current plan), reactivate (resume a paused plan by id), batch (update multiple steps at once).",
+                "enum": ["step_done", "step_doing", "step_skip", "add_steps", "update_acceptance", "complete", "abandon", "deactivate", "reactivate", "batch", "set_thinking"],
+                "description": "What to do: step_done/step_doing/step_skip (update a step), add_steps (insert new steps), update_acceptance (modify step acceptance criteria), complete/abandon (finish the plan), deactivate (pause current plan), reactivate (resume a paused plan by id), batch (update multiple steps at once), set_thinking (rewrite the plan-level problem model — pass the new model in the 'thinking' field).",
             },
             "step_id": {
                 "type": "integer",
@@ -101,6 +109,26 @@ class PlanUpdateTool(Tool):
                 "type": "string",
                 "description": "Plan ID to reactivate (for reactivate action).",
             },
+            "thinking": {
+                "type": "string",
+                "description": (
+                    "Rewrite the plan-level problem MODEL — your current theory of the "
+                    "task: the bottleneck, the load-bearing hypothesis, the evidence, and "
+                    "a FALSIFIABLE prediction for the next move ('if I change X, metric "
+                    "should reach ~Y'). Overwrites the previous model (it is the CURRENT "
+                    "understanding, not a log). Can be passed with action='set_thinking' "
+                    "on its own, or alongside any other action (e.g. step_done + an updated "
+                    "model). This is the HOME for deep/deliberate reasoning — when you catch "
+                    "yourself about to try yet another quick tweak, write the model here "
+                    "first: what is actually limiting the result, and what does your next "
+                    "move PREDICT? A shallow retry that cannot state a new prediction is the "
+                    "signal to stop and rebuild the model, not act again."
+                ),
+            },
+            "_override_reason": {
+                "type": "string",
+                "description": "Override a guard block with a justification (min 5 chars). Some guard checks (step_done premise re-check, batch marking a step done, task completion re-check) block until you re-issue the same call with this field explaining why proceeding is justified. The reason is recorded, not content-checked.",
+            },
         },
         "required": ["action"],
     }
@@ -110,7 +138,13 @@ class PlanUpdateTool(Tool):
 
     def execute(self, **kwargs) -> str:
         action = kwargs["action"]
+        thinking = kwargs.get("thinking")
         try:
+            if action == "set_thinking":
+                if not thinking or not str(thinking).strip():
+                    return "ERROR: thinking text required for set_thinking."
+                self._plan.set_thinking(str(thinking))
+                return self._plan.summary() + "\n\n" + _THINKING_ECHO
             if action == "step_done":
                 step_id = _parse_step_id(kwargs.get("step_id"))
                 if not step_id:
@@ -174,6 +208,13 @@ class PlanUpdateTool(Tool):
                         self._plan.update_step(sid, status_map[status], u.get("notes", ""))
             else:
                 return f"ERROR: Unknown action '{action}'."
-            return self._plan.summary()
+            # thinking may accompany any action (e.g. step_done + updated model).
+            # A recorded model earns its keep only by generating the next
+            # falsifiable observation — echo the challenge when one is recorded.
+            echo = ""
+            if thinking and str(thinking).strip():
+                self._plan.set_thinking(str(thinking))
+                echo = "\n\n" + _THINKING_ECHO
+            return self._plan.summary() + echo
         except Exception as e:
             return f"ERROR: {e}"

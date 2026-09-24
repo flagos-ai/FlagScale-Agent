@@ -128,6 +128,16 @@ def tool_display_summary(tool_name: str, arguments: dict) -> str:
         return str(indexes)
     if tool_name == "recall":
         return f"index={arguments.get('index', '?')}"
+    if tool_name == "shell_jobs":
+        action = arguments.get("action", "")
+        job_id = arguments.get("job_id", "")
+        summary = action or "?"
+        if job_id:
+            summary += f" {job_id}"
+        if action == "wait":
+            timeout = arguments.get("timeout", 60)
+            summary += f" (≤{timeout}s)"
+        return summary
     return ""
 
 

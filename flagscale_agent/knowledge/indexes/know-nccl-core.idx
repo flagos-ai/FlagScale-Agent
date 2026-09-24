@@ -2,6 +2,9 @@
 # NCCL核心：整体架构、拓扑检测算法、channel/ring/tree路径选择
 # Source: NCCL @ docs-only
 
+# To read a section: load_knowledge(name='know-nccl-core', doc='<path below>', start_line=<L>, end_line=<L>)
+# Do NOT pass these doc paths to read_file — they are knowledge-internal.
+
 ## nccl/00_topology_detection_guide.md (557 lines)
 L1: 第0章：集群通信拓扑检测方法论
   L3: 1. 为什么需要拓扑检测？

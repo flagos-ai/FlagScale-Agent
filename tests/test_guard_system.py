@@ -107,83 +107,30 @@ def make_ctx(tool_name="", tool_args=None, tool_result=""):
 
 
 class TestMemoryEvolution:
-    """Tests for memory self-evolution mechanism in MemoryDisciplineGuard."""
+    """MemoryDisciplineGuard no longer fires at completion time — that was moved
+    to VerificationGuard's _TEXT_COMPLETE_HYGIENE gate. These tests verify the
+    new behavior: text-only (no tool_name) always returns None."""
 
-    def test_evolution_reminder_on_task_complete_without_review(self):
-        """If agent emits TASK_COMPLETE without any memory_list, remind to review."""
+    def test_text_complete_returns_none(self):
+        """text-only [TASK_COMPLETE] → None (completion check moved to VerificationGuard)."""
         guard = MemoryDisciplineGuard()
-
-        # Simulate assistant text with TASK_COMPLETE, no tool call
         ctx = MagicMock(spec=GuardContext)
         ctx.tool_name = ""
         ctx.tool_args = {}
         ctx.tool_result = ""
         ctx.assistant_text = "Done. [TASK_COMPLETE]"
         ctx.classify_fn = None
+        assert guard.check_pre(ctx) is None
 
-        result = guard.check_pre(ctx)
-        assert result is not None
-        assert "TASK_COMPLETE" in result.message
-        assert "memory_list" in result.message
-        assert guard._evolution_reminded is True
-
-    def test_no_evolution_reminder_if_memory_reviewed(self):
-        """If agent already did memory_list, no evolution reminder on TASK_COMPLETE."""
+    def test_no_evolution_reminded_attribute(self):
+        """_evolution_reminded no longer exists on the guard."""
         guard = MemoryDisciplineGuard()
+        assert not hasattr(guard, "_evolution_reminded")
 
-        # Simulate a memory_list call
-        ctx = MagicMock(spec=GuardContext)
-        ctx.tool_name = "memory_list"
-        ctx.tool_args = {}
-        ctx.tool_result = "entries..."
-        ctx.assistant_text = ""
-        ctx.classify_fn = None
-        guard.check_pre(ctx)
-
-        assert guard._has_memory_review is True
-
-        # Now TASK_COMPLETE — no reminder needed
-        ctx2 = MagicMock(spec=GuardContext)
-        ctx2.tool_name = ""
-        ctx2.tool_args = {}
-        ctx2.tool_result = ""
-        ctx2.assistant_text = "All done [TASK_COMPLETE]"
-        ctx2.classify_fn = None
-
-        result = guard.check_pre(ctx2)
-        assert result is None
-
-    def test_evolution_reminder_fires_only_once(self):
-        """Evolution reminder should fire at most once per session."""
+    def test_no_has_memory_review_attribute(self):
+        """_has_memory_review no longer exists on the guard."""
         guard = MemoryDisciplineGuard()
-
-        ctx = MagicMock(spec=GuardContext)
-        ctx.tool_name = ""
-        ctx.tool_args = {}
-        ctx.tool_result = ""
-        ctx.assistant_text = "[TASK_COMPLETE]"
-        ctx.classify_fn = None
-
-        result1 = guard.check_pre(ctx)
-        assert result1 is not None
-
-        # Second time — no reminder
-        result2 = guard.check_pre(ctx)
-        assert result2 is None
-
-    def test_memory_read_also_counts_as_review(self):
-        """memory_read should also mark _has_memory_review."""
-        guard = MemoryDisciplineGuard()
-
-        ctx = MagicMock(spec=GuardContext)
-        ctx.tool_name = "memory_read"
-        ctx.tool_args = {"key": "fact/cluster/ssh_port"}
-        ctx.tool_result = "content..."
-        ctx.assistant_text = ""
-        ctx.classify_fn = None
-        guard.check_pre(ctx)
-
-        assert guard._has_memory_review is True
+        assert not hasattr(guard, "_has_memory_review")
 
 
 # ── Override Hint Tests ──

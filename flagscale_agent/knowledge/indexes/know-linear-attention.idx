@@ -1,0 +1,55 @@
+# know-linear-attention
+# 线性注意力FLA：GDN/GLA layer集成、chunk分块与WY三角解、递推状态kernel(chunk_delta_h)、门控cumsum、autograd管线、CP状态接力、dispatch/autotune缓存、平台坑表与调优
+# Source: flash-linear-attention @ main-2026-09
+
+# To read a section: load_knowledge(name='know-linear-attention', doc='<path below>', start_line=<L>, end_line=<L>)
+# Do NOT pass these doc paths to read_file — they are knowledge-internal.
+
+## linear_attention/01_fla_source_analysis.md (470 lines)
+L1: Flash-Linear-Attention 源码分析：线性注意力的 chunk 并行与状态递推机制
+  L10: 1. 库定位与总体架构
+    L12: 1.1 FLA 是什么
+    L23: 1.2 分块化思想（为什么是 chunk=64）
+    L43: 1.3 仓库布局与数据流总图
+  L76: 2. Layer 集成路径（`fla/layers`）
+    L78: 2.1 GatedDeltaNet（`layers/gated_deltanet.py`，368 行）
+    L112: 2.2 GLA（`layers/gla.py`，305 行）
+    L122: 2.3 共享缓存协议
+    L126: 2.4 modules/ 共享组件（两个 layer 都依赖）
+  L138: 3. GDN 前向管线（`ops/gated_delta_rule/chunk.py`）
+    L140: 3.1 管线总览
+    L155: 3.2 反向管线（L126-251）
+    L170: 3.3 autograd 依赖图
+  L185: 4. WY 表示：chunk 内三角方程组的解（`ops/*/wy_fast.py` + `chunk_scaled_dot_kkt` + `solve_tril`）
+    L195: 4.1 kkt：构造严格下三角系统（`common/chunk_scaled_dot_kkt.py`，kernel L33 / wrapper L84）
+    L206: 4.2 solve_tril：BT×BT 下三角块求逆（`ops/utils/solve_tril.py`）
+    L216: 4.3 recompute_w_u（`delta_rule/wy_fast.py`，kernel L38）
+    L227: 4.4 融合版：kkt+solve_tril+recompute_w_u 一个 kernel（`gated_delta_rule/chunk_fwd.py`）
+  L237: 5. 门控 chunk cumsum（`ops/utils/cumsum.py`）
+  L253: 6. 状态递推：`chunk_fwd_h` / `chunk_bwd_dhu`（`ops/common/chunk_delta_h.py`，全库心脏）
+    L257: 6.1 fwd kernel（L59-349）：寄存器内 tile 递推
+    L272: 6.2 bwd kernel（L370-684）：逆序 dh 递推
+    L283: 6.3 平台差异与 autotune（真实注释，L27-30）
+L286: TODO: Triton mainline fixes a Blackwell tl.dot recurrence race.
+L287: Keep this kernel on num_warps=2 for Blackwell until Triton 3.8 is released
+L288: Intel needs more warps than NVIDIA here: 8 warps is ~1.5x faster than the best
+  L297: 7. 读出与反向：`chunk_o` 家族（`ops/common/chunk_o.py`）
+    L299: 7.1 fwd kernel（L64-161）
+    L311: 7.2 bwd_dqkwg（L180-350）
+    L315: 7.3 dv_local（delta 专用）
+    L319: 7.4 GVA 梯度归并
+  L325: 8. Context Parallelism（`ops/cp/`）
+    L329: 8.1 通信层（`ops/cp/comm.py`，169 行）
+    L334: 8.2 序列切分与负载均衡（`ops/cp/context.py`，240 行）
+  L349: 9. 基础设施三件套：dispatch / cache / 数学工具
+    L351: 9.1 后端 dispatch（`ops/backends/__init__.py`）
+    L368: 9.2 autotune 持久缓存（`ops/utils/cache.py`）
+    L383: 9.3 数学与发行版差异（`ops/utils/op.py`）
+  L392: 10. 平台适配与已知坑（逐条带源码锚点）
+  L413: 11. 与 FlashAttention / DeepEP 的机制对照
+  L431: 12. 调优顺序与工程建议
+    L433: 12.1 出问题时的排查优先级
+    L444: 12.2 chunk_size 选择
+    L450: 12.3 生产配置建议
+    L459: 12.4 与 FlagScale 的结合点
+  L467: 附：本次分析的方法论备注

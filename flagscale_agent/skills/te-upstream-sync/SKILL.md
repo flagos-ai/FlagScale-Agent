@@ -62,6 +62,13 @@ FlagScale plugin backends or regressing upstream fixes.
     not the upstream target. Use `git commit-tree -p {fork}` (Stage 8). Skipping this
     causes GitHub to find an ancient merge-base and report hundreds of false conflicts
     on the PR. See `pitfall/te_upstream/pr_conflict_reparent_fix`.
+11. **Test set is diff-driven, never handed-in** -- the tests that must run are
+    derived from `{base}..{target}` (Stage 7b), independent of any list someone
+    provides. Treat any handed-in list as a *candidate*, then reconcile it against
+    the diff-derived expected set. "No regression" may NOT be concluded while the
+    (expected − collected) difference set is non-empty and unwaived. This rule exists
+    because a handed-in 4-file list once hid an 891-failure `test_fused_router.py`
+    that the sync had directly broken. See `pitfall/te_fl/v217_routing_map_format_plugin_sync`.
 
 ---
 
@@ -154,10 +161,75 @@ comm -23 \
 cat "$ART/cuda-impl-gaps.txt"   # every line here = missing method in cuda.py
 ```
 
-For each gap: implement the method in `cuda.py` following the existing pattern
-(`tex = self._get_tex(); return tex.<binding>(...)`). Also check for **new parameters**
-on existing bindings by diffing `pybind.cpp` `{base}..{target}` -- a new `py::arg` on
-an existing `.def()` must be added to the corresponding `cuda.py` method signature too.
+**Two false-positive classes to filter before treating a gap as real** (both
+observed in the v2.17 sync -- the raw `comm -23` reported them but neither needs a
+`cuda.py` method):
+
+1. **C++ class-member `.def`s.** `.def("copy_into_buffer", &CommOverlap::copy_into_buffer)`
+   binds a *method on a bound C++ class* (`CommOverlap`, `CommOverlapP2P`, ...), not a
+   module-level op. These are reached as `obj.copy_into_buffer(...)` on the class
+   instance the plugin already exposes (`TEFLModule.__init__` binds `self.CommOverlap =
+   CommOverlap`), so they never route through op dispatch and need no wrapper. Detect
+   them: a `.def(` whose second arg is `&Namespace::method` (pointer-to-member) rather
+   than a lambda/free function. Grep the *surrounding* `.def` line, not just the name.
+2. **Pure C++ query/util helpers** re-exported by the
+   `NVTE_DECLARE_COMMON_PYBIND11_HANDLES` macro (`pybind_helper.h`) --
+   e.g. `ubuf_built_with_mpi`, `device_supports_multicast`, `get_stream_priority_range`.
+   Upstream code (`module/base.py`) calls these as `tex.<fn>()`, but the plugin's
+   `TEFLModule.__getattr__` only resolves names registered as OpManager ops, so these
+   raise `AttributeError: Operator '<fn>' not found` at *collection* time (breaks
+   `tests/pytorch/distributed/test_comm_gemm_overlap.py` and
+   `test_fusible_ops_with_userbuffers.py`). This is a pre-existing plugin gap, not a
+   sync regression -- fix by explicitly passing these query fns through in
+   `TEFLModule` (bind them in `__init__` or special-case in `__getattr__`), NOT by
+   adding a `cuda.py` op. See `pitfall/te_fl/plugin_unregistered_util_funcs_comm_gemm`.
+
+For each *remaining* real gap: implement the method in `cuda.py` following the existing
+pattern (`tex = self._get_tex(); return tex.<binding>(...)`).
+
+**Signature drift -- both added AND removed params.** Diff `pybind.cpp`
+`{base}..{target}` for every `.def()` whose `py::arg` list changed. Upstream commonly
+does BOTH in one release: append a new arg (e.g. `routing_map_format`) to some ops and
+**remove** leading args from others (e.g. drop `num_tokens, num_experts` from `*_bwd`).
+Reconcile each `cuda.py` method signature AND its call-through positional order against
+the `py::arg` list -- a removed param left in the plugin signature raises
+`TypeError: takes N positional args but M given` only when the op is *called*, never at
+import, so unit tests for that op are the only thing that catches it (see Stage 7).
+
+```bash
+git -C "$REPO" diff {base} {target} -- \
+  transformer_engine/pytorch/csrc/extensions/pybind.cpp \
+  | grep -E '^[+-].*(m\.def|py::arg)' > "$ART/binding-arg-drift.txt"
+```
+
+**Enum / symbol re-exports (import-time crashers).** A Python module may re-export a
+C++ enum via the `tex` proxy, e.g. `router.py`: `RoutingMapFormat = tex.NVTERoutingMapFormat`.
+If upstream `{target}` added a new enum in a header and pybind, the FlagScale plugin's
+`tex` proxy (`plugin/core/ops.py`) must (a) define a mirroring `IntEnum`, (b) bind it in
+the proxy `__init__`, and (c) list it in `__dir__`. A missing enum makes the proxy's
+`__getattr__` treat it as an *operator* lookup and raise `AttributeError` **at import of
+the re-exporting module** -- so any test file that does not import that module will never
+see it. Detect new enums and confirm each is mirrored:
+
+```bash
+# New enums pybind REGISTERS in target. Note two traps this command handles:
+#   (1) the repo mixes `py::enum_<>` and `pybind11::enum_<>` spellings -- match both;
+#   (2) enum types may carry a namespace (e.g. transformer_engine::pytorch::FP8FwdTensors)
+#       -- strip it and keep only the class name.
+# Scope to the registration file (pybind.cpp), NOT the whole csrc/ dir, otherwise
+# every static_cast<Enum> use site becomes noise.
+grep -hoE '(py|pybind11)::enum_<\s*[A-Za-z0-9_:]+' \
+  "$REPO"/transformer_engine/pytorch/csrc/extensions/pybind.cpp \
+  | sed -E 's/.*[<:]([A-Za-z0-9_]+)$/\1/' | sort -u > "$ART/pybind-enums.txt"
+# Enums the plugin tex proxy mirrors. NOTE: `grep -oE 'class X(IntEnum)'` prints the
+# whole match, so `awk '{print $2}'` would yield `X(IntEnum)` (with the paren suffix)
+# and every enum would falsely show as a gap. Use sed to capture just the class name.
+grep -oE 'class [A-Za-z0-9_]+\(IntEnum\)' \
+  "$REPO"/transformer_engine/plugin/core/ops.py \
+  | sed -E 's/class ([A-Za-z0-9_]+)\(IntEnum\)/\1/' | sort -u > "$ART/plugin-enums.txt"
+comm -23 "$ART/pybind-enums.txt" "$ART/plugin-enums.txt" > "$ART/enum-gaps.txt"
+cat "$ART/enum-gaps.txt"   # each line = enum to mirror in plugin/core/ops.py
+```
 
 ## Stage 4: Preserve runtime patches
 
@@ -218,13 +290,107 @@ V1's helper docs drifted from reality; here we detect drift automatically.
 Only NVIDIA CUDA runs locally as ground truth. Everything else is BLOCKED unless
 the corresponding hardware/CI is reachable.
 
-- CUDA unit + integration: run via the repo's own workflow scripts
-  (`.github/workflows/te-plugin-tests.yml`, `all_tests_cuda.yml`), stream to
-  `$ART/test-cuda.log`.
+### 7a. Import smoke test (gate 0 -- runs before any functional test)
+
+Import-time crashers (a Python module re-exporting an enum the plugin proxy never
+bound -- see Stage 3) never surface in functional tests that don't import that
+module. Catch them in seconds by importing every submodule (`{PY}` = the interpreter
+of the env TE was built into, e.g. the build conda env's `python`; the bare host may
+have only `python3` or none):
+
+```bash
+{PY} - <<'EOF'
+import pkgutil, importlib, transformer_engine.pytorch as tep
+# TWO traps, both verified against a real broken sync:
+# (1) Collect ALL module names FIRST, THEN import in a separate loop. If you import
+#     inside the walk_packages() loop, walk_packages itself imports each package to
+#     recurse into it and SWALLOWS the exception (default onerror ignores), leaving
+#     the module half-initialized so your own import_module() no longer re-raises ->
+#     a broken module reports 0 failures. Two-phase is mandatory.
+# (2) Exclude packaging/build-only modules (e.g. `setup`, anything importing
+#     `build_tools`) -- they legitimately fail at runtime and are false positives.
+SKIP = ("setup",)  # extend if the tree adds more build-only modules
+names = [m.name for m in pkgutil.walk_packages(tep.__path__, tep.__name__ + ".",
+                                               onerror=lambda n: None)]
+bad = []
+for n in names:
+    if n.rsplit(".", 1)[-1] in SKIP:
+        continue
+    try:
+        importlib.import_module(n)
+    except Exception as e:
+        bad.append((n, repr(e)))
+for n, e in bad:
+    print("IMPORT-FAIL", n, e[:100])
+print("SMOKE total_fail", len(bad))
+raise SystemExit(1 if bad else 0)
+EOF
+```
+
+Any `IMPORT-FAIL` is a hard stop -- fix (usually a missing enum/op binding in
+`plugin/core/ops.py`) before running the matrix. Verified: with the pre-fix
+`ops.py` this prints `IMPORT-FAIL transformer_engine.pytorch.router ... AttributeError:
+Operator 'NVTERoutingMapFormat' not found`; with the fix it prints `SMOKE total_fail 0`.
+
+### 7b. Build the expected-test set from the diff (NOT from a handed-in list)
+
+**The single most important discipline in this stage.** The set of tests to run is
+derived from the sync diff, independently of any list someone hands you. A
+subsystem upstream touched in `{base}..{target}` MUST have its test file run.
+
+```bash
+# subsystems upstream changed -> map to test files
+git -C "$REPO" diff --name-only {base} {target} \
+  -- transformer_engine/ > "$ART/upstream-touched.txt"
+```
+
+Map touched paths to test files (maintain this table in the ledger; extend as the
+tree grows):
+
+| touched path signal              | required test file            |
+|----------------------------------|-------------------------------|
+| `*fused_router*`, `router.py`    | `tests/pytorch/test_fused_router.py` |
+| `*comm_gemm_overlap*`, `*comm_overlap*`, overlap factory | `tests/plugin/plugin/test_cuda_comm_overlap_contract.py`, `tests/plugin/plugin/test_vendor_comm_overlap_contract.py` (PR#115) |
+| `*fused_attn*`, `attention.py`   | `tests/pytorch/test_fused_attn.py`   |
+| `*gemm*`, `*quantize*`, `cublaslt*` | `test_fusible_ops.py`, `test_float8_blockwise_gemm_exact.py` |
+| any transformer layer / norm     | `tests/pytorch/test_numerics.py`     |
+| `*jit*`, `*onnx*`                 | `tests/pytorch/test_onnx_export.py`  |
+
+Write the resulting required set to `$ART/expected-tests.txt`.
+
+### 7c. Run, then reconcile expected vs actually-collected (mandatory)
+
+```bash
+{PY} -m pytest tests/pytorch/ --collect-only -q 2>&1 | tee "$ART/collected.txt"
+{PY} -m pytest tests/pytorch/ -q 2>&1 | tee "$ART/test-cuda.log"
+```
+
+Reconcile `expected-tests.txt` against the files actually in `collected.txt`:
+
+- **The difference set (expected − collected) MUST be empty, or each missing item
+  MUST carry an explicit waiver reason** (e.g. "diff did not touch attention").
+  A non-empty difference set with no waiver = you may NOT conclude "no regression".
+  This is exactly the gap that hid `test_fused_router.py` when the test list was
+  handed in rather than derived from the diff.
+- Watch for **collection errors and files with 0 collected** -- an import crash
+  shows up here (or is truncated away by `tail`), not as a normal failure line.
+- Never accept a handed-in test list as complete. Treat it as a *candidate*
+  actual-set and reconcile it against `expected-tests.txt` before drawing any
+  conclusion.
+
+### 7d. Classify and record
+
 - For each non-CUDA backend, mark BLOCKED with the reason in the matrix; do not
   guess pass. If CI for that backend can be triggered, capture the run URL as
   evidence instead.
+- Classify every failure by root cause: FL regression / toolchain limit (e.g.
+  cuBLAS/CUDA version) / upstream-not-yet-adapted. Only FL regressions block the sync.
 - Update `decisions.tsv` status column: pass / blocked / fail + evidence path.
+
+The stage conclusion must be stated in a refutable form:
+> "Impact set N subsystems; N test files collected and executed; difference set 0
+> (or: M waived, reasons ...); X failures classified, 0 FL regressions."
+An empty "difference set" field means the conclusion cannot be signed off.
 
 ## Stage 8: Finalize to main and open PR
 
@@ -333,8 +499,11 @@ All under `$ART = /share/.../temp/te-upstream-<target>/`:
 fork-delta.txt         backends.txt          decisions.tsv
 merge.log conflicts.txt         conflict-notes.md
 bindings.txt           plugin-base.txt       api-matrix.tsv
+cuda-impl-gaps.txt     binding-arg-drift.txt pybind-enums.txt
+plugin-enums.txt       enum-gaps.txt
 build-delta.txt        submodule-status.txt
 local-uses.txt         failure-masks.txt     test-cuda.log
+upstream-touched.txt   expected-tests.txt    collected.txt
 ```
 
 The `decisions.tsv` ledger is the source of truth: no open P0 rows -> eligible to

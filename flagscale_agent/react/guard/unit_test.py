@@ -18,6 +18,8 @@ Triggers on write_file/edit_file targeting flagscale_agent/ (excluding tests/ it
 Post-check only: fires after a successful write/edit, not before.
 """
 
+from __future__ import annotations
+
 from . import Guard, GuardContext, GuardVerdict
 
 

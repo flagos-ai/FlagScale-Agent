@@ -99,7 +99,7 @@ class TaskPlan:
         with open(active_path, "w", encoding="utf-8") as f:
             yaml.dump({"active_id": plan_id}, f)
 
-    def create(self, title: str, steps: List, session_id: str = "") -> dict:
+    def create(self, title: str, steps: List, session_id: str = "", thinking: str = "") -> dict:
         """Create a new plan.
         
         Args:
@@ -109,6 +109,14 @@ class TaskPlan:
                    - acceptance: List[str] (optional)
                    - other fields ignored for now
             session_id: Session identifier
+            thinking: Optional plan-level problem model — the agent's CURRENT
+                      theory of the task: the bottleneck, the load-bearing
+                      hypothesis, the evidence for it, and the falsifiable
+                      prediction for the next move. Distinct from step notes
+                      (which are an append-only per-step log of what happened);
+                      thinking is a single overwrite-style slot holding the
+                      current understanding of the WHOLE task, and it is the
+                      home for deliberate/deep reasoning as opposed to fast action.
         """
         with self._lock:
             # Pause any existing active plan (check both active.yaml and scan files)
@@ -158,7 +166,30 @@ class TaskPlan:
                 "updated": time.time(),
                 "session_id": session_id,
                 "steps": step_list,
+                "thinking": (thinking or "").strip(),
+                "thinking_updated": time.time() if (thinking or "").strip() else 0.0,
             }
+            self._save(plan)
+            return plan
+
+    def set_thinking(self, thinking: str) -> dict:
+        """Overwrite the plan-level problem model (current theory of the task).
+
+        Unlike step notes (append-only log), thinking is a single slot that holds
+        the agent's LATEST understanding of the whole task — bottleneck, hypothesis,
+        evidence, and the falsifiable prediction for the next move. Overwriting is
+        intentional: the point is the CURRENT model, not its history. Each write
+        stamps ``thinking_updated`` so a guard can tell whether deliberate thinking
+        actually moved between two points in time (a real model update) versus a
+        cosmetic re-ping.
+        """
+        with self._lock:
+            plan = self.get_active()
+            if not plan:
+                raise ValueError("No active plan")
+            plan["thinking"] = (thinking or "").strip()
+            plan["thinking_updated"] = time.time()
+            plan["updated"] = time.time()
             self._save(plan)
             return plan
 
@@ -453,6 +484,12 @@ class TaskPlan:
         if not plan:
             return ""
         lines = []
+        thinking = (plan.get("thinking") or "").strip()
+        if thinking:
+            lines.append("当前问题模型 (thinking):")
+            for t_line in thinking.split("\n"):
+                lines.append(f"   {t_line}")
+            lines.append("")
         for s in plan["steps"]:
             icon = STATUS_ICONS.get(s["status"], " ")
             line = f"{s['id']}. [{icon}] {s['title']}"
@@ -484,6 +521,11 @@ class TaskPlan:
 
     def _format_plan(self, plan: dict) -> str:
         lines = [f"Plan: {plan['title']} [{plan['status']}]"]
+        thinking = (plan.get("thinking") or "").strip()
+        if thinking:
+            lines.append("  当前问题模型 (thinking):")
+            for t_line in thinking.split("\n"):
+                lines.append(f"     {t_line}")
         for s in plan["steps"]:
             icon = STATUS_ICONS.get(s["status"], " ")
             line = f"  {s['id']}. [{icon}] {s['title']}"

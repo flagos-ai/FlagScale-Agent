@@ -1,6 +1,9 @@
 # know-te-fp8
 # TransformerEngine FP8量化：Float8Tensor底层、量化系统、fused linear ops
-# Source: TransformerEngine-FL @ 2cb485f
+# Source: TransformerEngine-FL @ 129ada24
+
+# To read a section: load_knowledge(name='know-te-fp8', doc='<path below>', start_line=<L>, end_line=<L>)
+# Do NOT pass these doc paths to read_file — they are knowledge-internal.
 
 ## transformerengine_fl/01_fp8_quantization_system.md (495 lines)
 L1: 第一章：FP8 量化系统源码深度分析

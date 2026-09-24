@@ -22,7 +22,7 @@ version = "0.1.0"
 description = "FlagScale Agent - AI infrastructure agent for large-scale model training, inference, and serving."
 readme = "README.md"
 license = {text = "Apache-2.0"}
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 dependencies = [
     "typer>=0.9.0",
     "anthropic>=0.39.0",
@@ -31,6 +31,7 @@ dependencies = [
     "prompt_toolkit>=3.0",
     "requests>=2.28.0",
     "beautifulsoup4>=4.12.0",
+    "psutil>=5.9.0",
 ]
 
 [project.optional-dependencies]
@@ -40,6 +41,14 @@ dev = [
     "pytest-cov>=6.0.0",
     "pytest-mock>=3.14.0",
     "ruff>=0.4.0",
+]
+# Optional: inspect_checkpoint tool. torch/safetensors are lazy imports inside
+# the tool (flagscale_agent/react/tools/inspect_checkpoint.py); without this
+# extra the tool degrades to an ERROR string and the rest of the agent and the
+# test suite (importorskip) work untouched.
+checkpoint = [
+    "torch>=1.13",
+    "safetensors>=0.3.0",
 ]
 
 [project.urls]

@@ -17,8 +17,10 @@
 import os
 import time
 
+from flagscale_agent.react import display
 from flagscale_agent.react.session import (
-    find_resumable_sessions, load_conversation,
+    find_resumable_sessions, load_conversation, get_session_lock_holder,
+    SessionLockedError,
 )
 
 
@@ -97,9 +99,28 @@ class CommandHandler:
                         target = s
                         break
             if target:
+                # Concurrency guard: refuse to resume a directory another
+                # live agent process holds (their saves would overwrite this
+                # process's history wholesale — last-writer-wins).
+                holder = get_session_lock_holder(target["session_dir"])
+                if holder:
+                    print(display.red(
+                        f"REFUSED: session {target.get('session_id', '?')[:8]} is held by "
+                        f"another live agent process (PID {holder.get('pid')}, started "
+                        f"{holder.get('start', '?')}: {holder.get('cmd', '?')}). "
+                        f"Stop it first or pick a different session."
+                    ))
+                    return
                 data = load_conversation(target["session_dir"])
                 if data:
-                    self.agent._restore_session(data, target["session_dir"])
+                    try:
+                        self.agent._restore_session(data, target["session_dir"])
+                    except SessionLockedError as e:
+                        # TOCTOU: lock was free at pre-check, taken between
+                        # check and restore. _restore_session acquired nothing
+                        # in that case (guard raises before binding).
+                        print(display.red(str(e)))
+                        return
                     sid = target.get("session_id", "?")[:12]
                     print(f"Resumed session {sid} ({target.get('user_turns', 0)} turns)")
                     return

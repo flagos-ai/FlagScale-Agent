@@ -14,9 +14,11 @@
 
 """Tests for FlagScaleTrainMonitorTool (unified monitor)."""
 
+import glob
 import json
 import os
 import tempfile
+import threading
 import time
 
 import pytest
@@ -249,10 +251,94 @@ class TestLiveness:
         # Log grew 10s ago — should be alive
         assert tool._is_alive("training", time.time() - 10) is True
 
-    def test_dead_no_signals(self):
+    def test_is_network_storage_real_local_tmp(self):
+        """Un-mocked probe: /tmp (tmpfs/overlay on any Linux) must classify
+        as LOCAL storage. Canary against whitelist inversion — the gate may
+        only declare dead on proven-local paths."""
         tool = FlagScaleTrainMonitorTool()
-        # Log grew 300s ago, no GPU, no pgrep match
+        assert tool._is_network_storage("/tmp") is False
+
+    def test_dead_no_signals(self, monkeypatch):
+        """Local storage + both local probes negative → proven dead."""
+        tool = FlagScaleTrainMonitorTool()
+        monkeypatch.setattr(tool, "_gpu_has_compute_process", lambda: False)
+        monkeypatch.setattr(tool, "_pgrep_alive", lambda: False)
+        monkeypatch.setattr(tool, "_is_network_storage", lambda path=".": False)
         assert tool._is_alive("training", time.time() - 300) is False
+
+    def test_uncertain_remote_shared_storage(self, monkeypatch):
+        """Network storage + probes negative → 'uncertain', never False."""
+        tool = FlagScaleTrainMonitorTool()
+        monkeypatch.setattr(tool, "_gpu_has_compute_process", lambda: False)
+        monkeypatch.setattr(tool, "_pgrep_alive", lambda: False)
+        monkeypatch.setattr(tool, "_is_network_storage", lambda path=".": True)
+        result = tool._is_alive("training", time.time() - 300)
+        assert result == "uncertain"
+
+    def test_watch_stderr_growth_keeps_alive(self, tmp_path, monkeypatch):
+        """stderr bytes growing while stdout is locked on a quiet file
+        must count as a growth signal (keeps watch alive, no false DEAD)."""
+        output_dir = _make_flagscale_logs(
+            str(tmp_path),
+            stdout_content="init done, no metrics here\n",
+        )
+        # Fixture nests under experiment_output/ — find the stderr there
+        stderr_files = sorted(
+            glob.glob(os.path.join(
+                output_dir, "logs", "details", "host_*", "*", "*", "*", "*", "stderr.log"
+            ))
+        )
+        assert stderr_files, "fixture must create stderr.log"
+        stderr_file = stderr_files[0]
+        tool = FlagScaleTrainMonitorTool()
+        # Disable GPU/pgrep probes: only the stderr-growth signal can prove life
+        monkeypatch.setattr(tool, "_gpu_has_compute_process", lambda: False)
+        monkeypatch.setattr(tool, "_pgrep_alive", lambda: False)
+        monkeypatch.setattr(tool, "_is_network_storage", lambda path=".": True)
+
+        def grow_stderr():
+            for _ in range(6):
+                time.sleep(1.5)
+                with open(stderr_file, "a") as f:
+                    f.write("progress heartbeat line\n")
+
+        t = threading.Thread(target=grow_stderr, daemon=True)
+        t.start()
+        result = tool.execute(output_dir=output_dir, mode="watch", duration=8, interval=3)
+        assert "DEAD" not in result
+        assert "Timeout" in result or "running" in result
+
+    def test_watch_shared_storage_stale_yields_uncertain_not_dead(self, tmp_path, monkeypatch):
+        """End-to-end: logs fully stale + no probes on shared storage → watch
+        must NOT declare DEAD; it reports UNCERTAIN and exits via timeout."""
+        output_dir = _make_flagscale_logs(
+            str(tmp_path),
+            stdout_content="iteration 10 | lm loss: 8.5432 | grad norm: 1.234\n",
+        )
+        tool = FlagScaleTrainMonitorTool()
+        monkeypatch.setattr(tool, "_gpu_has_compute_process", lambda: False)
+        monkeypatch.setattr(tool, "_pgrep_alive", lambda: False)
+        monkeypatch.setattr(tool, "_is_network_storage", lambda path=".": True)
+        tool.LIVENESS_GRACE_SECONDS = {"training": 1, "startup": 1, "rendezvous": 1, "init": 1}
+        result = tool.execute(output_dir=output_dir, mode="watch", duration=10, interval=2)
+        assert "TRAINING DEAD" not in result
+        assert "UNCERTAIN" in result
+        assert "Timeout" in result
+
+    def test_watch_local_storage_stale_yields_dead(self, tmp_path, monkeypatch):
+        """End-to-end: same stale logs on LOCAL storage with no probes →
+        watch correctly declares DEAD (gate only downgrades, never hides)."""
+        output_dir = _make_flagscale_logs(
+            str(tmp_path),
+            stdout_content="iteration 10 | lm loss: 8.5432 | grad norm: 1.234\n",
+        )
+        tool = FlagScaleTrainMonitorTool()
+        monkeypatch.setattr(tool, "_gpu_has_compute_process", lambda: False)
+        monkeypatch.setattr(tool, "_pgrep_alive", lambda: False)
+        monkeypatch.setattr(tool, "_is_network_storage", lambda path=".": False)
+        tool.LIVENESS_GRACE_SECONDS = {"training": 1, "startup": 1, "rendezvous": 1, "init": 1}
+        result = tool.execute(output_dir=output_dir, mode="watch", duration=10, interval=2)
+        assert "TRAINING DEAD" in result
 
     def test_grace_period_rendezvous(self):
         tool = FlagScaleTrainMonitorTool()

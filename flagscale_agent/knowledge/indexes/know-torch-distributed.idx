@@ -2,6 +2,9 @@
 # PyTorch分布式：ProcessGroup/NCCL backend、DDP reducer、FSDP sharding、DeviceMesh、torchrun
 # Source: PyTorch @ docs-only
 
+# To read a section: load_knowledge(name='know-torch-distributed', doc='<path below>', start_line=<L>, end_line=<L>)
+# Do NOT pass these doc paths to read_file — they are knowledge-internal.
+
 ## pytorch/01_process_group_collective.md (378 lines)
 L1: PyTorch Distributed 源码深度分析 — 第1章：ProcessGroup 与集合通信
   L3: 1. 设计动机

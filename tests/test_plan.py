@@ -325,3 +325,43 @@ class TestNotesAppendMode:
         assert "remember: use snake_case" in ctx
 
 
+class TestThinking:
+    """Plan-level `thinking` — the single-slot 'home for deep thinking'."""
+
+    def test_create_without_thinking_defaults_empty(self, tp):
+        plan = tp.create("Test", ["A"])
+        assert plan["thinking"] == ""
+        assert plan["thinking_updated"] == 0.0
+
+    def test_create_with_thinking_stamps_time(self, tp):
+        plan = tp.create("Test", ["A"], thinking="bottleneck: data too small")
+        assert plan["thinking"] == "bottleneck: data too small"
+        assert plan["thinking_updated"] > 0.0
+
+    def test_set_thinking_overwrites(self, tp):
+        tp.create("Test", ["A"], thinking="first model")
+        plan = tp.set_thinking("second model, predict acc 0.61->0.64")
+        # single-slot overwrite semantics, not append
+        assert plan["thinking"] == "second model, predict acc 0.61->0.64"
+        assert "first model" not in plan["thinking"]
+        assert plan["thinking_updated"] > 0.0
+
+    def test_set_thinking_strips(self, tp):
+        tp.create("Test", ["A"])
+        plan = tp.set_thinking("  padded model  ")
+        assert plan["thinking"] == "padded model"
+
+    def test_thinking_visible_in_summary(self, tp):
+        tp.create("Test", ["A"], thinking="hypothesis: tokenizer offset bug")
+        assert "hypothesis: tokenizer offset bug" in tp.summary()
+
+    def test_thinking_visible_in_context_for_prompt(self, tp):
+        tp.create("Test", ["A"], thinking="predict: 5x data lifts acc")
+        ctx = tp.context_for_prompt()
+        assert "predict: 5x data lifts acc" in ctx
+
+    def test_empty_thinking_not_shown(self, tp):
+        tp.create("Test", ["A"])
+        # No thinking-model header when thinking slot is empty.
+        assert "当前问题模型" not in tp.context_for_prompt()
+        assert "当前问题模型" not in tp.summary()

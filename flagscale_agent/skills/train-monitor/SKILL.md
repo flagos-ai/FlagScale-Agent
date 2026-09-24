@@ -1,8 +1,8 @@
 ---
-description: Monitor FlagScale distributed training jobs. Locate logs, check training
-  health, detect anomalies (NaN loss, OOM, NCCL timeout, hangs), parse training metrics
-  (loss, grad norm, throughput), and provide periodic status reports. Supports single-node
-  and multi-node monitoring.
+description: Monitor FlagScale distributed training jobs. Check training health,
+  detect anomalies (NaN loss, OOM, NCCL timeout, hangs), parse training metrics
+  (loss, grad norm, throughput), and provide periodic status reports. Supports
+  single-node and multi-node monitoring.
 name: train-monitor
 ---
 
@@ -20,7 +20,7 @@ name: train-monitor
  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  See the License for the specific language governing permissions and
  limitations under the License.
- -->
+-->
 
 # FlagScale Training Monitor
 
@@ -28,283 +28,170 @@ Monitor running FlagScale training jobs: locate logs, check health, detect anoma
 
 ## Critical Rules
 
-1. **Always use `monitor(output_dir=...)` as the primary monitoring method.** It auto-discovers the latest logs, scans stderr for errors, and reports metrics — all in one call. NEVER use raw `find` commands to locate logs (they find old runs from previous launches).
+1. **Use `flagscale_train_monitor(output_dir=...)` as the primary monitoring method.**
+   It auto-discovers the latest logs across all hosts, scans stderr for errors, finds
+   the loss rank, and reports metrics — all in one call. NEVER use raw `find` to locate
+   logs (they find old runs from previous launches).
+   - `mode="check"`: one-shot inspection of current log state (use for spot checks).
+   - `mode="watch"`: continuous polling until event or `duration` (max 1800s) elapses
+     (use for supervised waits).
+   - `filter="errors"|"progress"` narrows check-mode output; `lines` sets tail depth.
+2. **Check stderr FIRST, not stdout.** Crash information is in stderr. A process showing
+   "wandb initialized" or "loading model" in stdout may already be dead. The monitor
+   tool scans stderr automatically.
+3. **Old log trap**: multiple runs accumulate under the same experiment dir — always
+   resolve the LATEST timestamp dir. The monitor tool handles this; if you must go
+   manual, sort timestamp dirs and take the last.
 
-2. **Check stderr FIRST, not stdout.** Crash information is in stderr. A process showing "wandb initialized" or "loading model" in stdout may already be dead. The monitor tool checks stderr automatically.
+## Locating the Experiment Directory
 
-3. **Old log trap**: `find ... -name "stdout.log"` without timestamp filtering will return logs from ALL previous runs. Always filter by the current run's timestamp or use the monitor tool which handles this automatically.
+The experiment output dir is whatever you passed as `output_dir` at launch (recorded in
+the experiment ledger memory entry per the ops-discipline HARD GATE). If not recorded,
+read it from the task config: `<exp_dir>` is the value of the `output_dir` field in
+`train.yaml`, or `<exp_dir>/outputs` for FlagScale-launched runs.
 
-## Finding the Experiment Directory
-
-Before searching the filesystem, check workspace_state's "Experiments" section — it contains a registry of all launched experiments with their directories. Use `workspace_state(action="read")` and look up the experiment dir from the table. This is the fastest and most reliable way to find logs.
-
-If the registry is empty or the experiment isn't listed, fall back to the log directory structure below.
-
-## Log Directory Structure
-
-FlagScale training logs follow this structure:
+## Log Directory Structure (reference only — prefer the monitor tool)
 
 ```
 <exp_dir>/
 ├── logs/
-│   ├── host_0_<hostname>.output              # torchrun launcher output
-│   ├── pids/host_0_<hostname>.pid            # launcher PID
-│   └── details/host_0_<hostname>/
-│       ├── 20260424_153816.588538/           # timestamp dir
-│       │   └── default_<hash>/attempt_0/
-│       │       ├── 0/stdout.log  stderr.log  # rank 0
-│       │       ├── 1/stdout.log  stderr.log  # rank 1
-│       │       └── .../
-│       └── 20260424_162209.763893/           # newer run
-│           └── ...
+│   ├── host_<N>_<hostname>.output              # torchrun launcher output
+│   ├── pids/host_<N>_<hostname>.pid            # launcher PID
+│   └── details/host_<N>_<hostname>/
+│       └── <timestamp>/<run_id>/attempt_<N>/<local_rank>/
+│           ├── stdout.log                      # training metrics, progress
+│           └── stderr.log                      # errors, warnings, stack traces
 ├── checkpoints/
-├── tensorboard/
-└── wandb/
+└── tensorboard/
 ```
 
 Key facts:
-- Each training launch creates a NEW timestamp directory
-- Multiple runs accumulate — always find the LATEST timestamp dir
-- Training metrics (loss, iteration) are printed by the **last rank**
+- Each training launch creates a NEW timestamp directory — find the LATEST one
+- Training metrics (loss, iteration) are printed by the **last pipeline rank**
 - Errors can appear on **any rank**'s stderr
 
----
+## Step 1: Locate the Latest Logs
 
-## Step 1: Locate Latest Logs
-
-**Preferred: use the `find_latest_log` tool.** It auto-scans all ranks, finds the loss rank, and checks for errors.
+Preferred — one call:
 
 ```
-find_latest_log(experiment="<exp_name>", vocab_size=<vocab_size>)
+flagscale_train_monitor(output_dir=<exp_dir>, mode="check")
 ```
 
-For deeper metric analysis, use `parse_training_metrics`:
-```
-parse_training_metrics(log_path="<stdout.log path>", vocab_size=<vocab_size>)
-```
-
-**Manual fallback** (if tools unavailable):
+Manual fallback (when the tool is unavailable):
 
 ```bash
-EXP_DIR=<exp_dir from train.yaml>
-LATEST=$(ls -d ${EXP_DIR}/logs/details/host_0_*/[0-9]*/ 2>/dev/null | sort | tail -1)
-ATTEMPT=$(find "$LATEST" -type d -name "attempt_*" 2>/dev/null | head -1)
-NPROC={nproc_per_node}
-LAST_RANK=$((NPROC - 1))
+EXP_DIR=<exp_dir>
+# Latest timestamp dir under host_0 (all hosts share the timestamp)
+LATEST=$(ls -d ${EXP_DIR}/logs/details/host_0_*/[0-9]*/ | sort | tail -1)
+# Latest attempt inside it
+ATTEMPT=$(ls -d ${LATEST}*/attempt_[0-9]* 2>/dev/null | sort | tail -1)
+LAST_RANK=$(( $(nproc) - 1 ))   # loss rank = last local rank
+tail -1 ${ATTEMPT}/${LAST_RANK}/stdout.log
 ```
-
-Verify the path is valid:
-```bash
-echo "Latest log dir: $LATEST"
-echo "Attempt dir: $ATTEMPT"
-ls "$ATTEMPT/" 2>/dev/null | head -5
-```
-
-If `LATEST` or `ATTEMPT` is empty, training either hasn't started or logs are in an unexpected location. Check `EXP_DIR` value in `train.yaml`.
-
-### Multi-Node: Finding the Loss Log
-
-For multi-node training, the loss log is on the **last node's last rank**:
-
-```bash
-LAST_HOST_DIR=$(ls -d ${EXP_DIR}/logs/details/host_*/ 2>/dev/null | sort | tail -1)
-LATEST=$(ls -d ${LAST_HOST_DIR}[0-9]*/ 2>/dev/null | sort | tail -1)
-ATTEMPT=$(find "$LATEST" -type d -name "attempt_*" 2>/dev/null | head -1)
-tail -30 ${ATTEMPT}/${LAST_RANK}/stdout.log
-```
-
----
 
 ## Step 2: Health Check
 
-Training is normal when BOTH conditions are true:
-1. Loss is being printed (new lines in stdout.log)
-2. GPUs are active (utilization > 0%, memory occupied)
-
-### Quick Health Check
+Quick check — one stdout line + GPU state:
 
 ```bash
-# Latest loss line + GPU status
 tail -1 ${ATTEMPT}/${LAST_RANK}/stdout.log
-nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv,noheader
+nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv
 ```
 
-### Process Check
+Process liveness (launcher PID per host):
 
 ```bash
-cat ${EXP_DIR}/logs/pids/*.pid 2>/dev/null | xargs -I{} ps -p {} -o pid,stat,etime --no-headers
+for f in ${EXP_DIR}/logs/pids/*.pid; do
+  PID=$(cat $f); ps -p ${PID} > /dev/null && echo "ALIVE ${PID}" || echo "DEAD ${PID}"
+done
 ```
 
-If no processes found, training has stopped. Check stderr for the reason.
+Loss sanity — the four gates (checked in order):
 
-### Loss Sanity Check — CRITICAL
+| Gate | Reading | Meaning |
+|------|---------|---------|
+| 1 | Initial loss ≈ ln(vocab_size): 32000→10.37, 38016→10.55, 128256→11.76 | Still within ~10% after >10 iterations = fundamentally wrong (data or masking bug). Dummy data trains like random tokens; real data must dive quickly. |
+| 2 | `number of zeros` in gradient histogram > 90% | Gradient flow broken (stale/detached params) — inspect grads. |
+| 3 | `params norm` identical across iterations | Params frozen — check optimizer wiring. |
+| 4 | Loss trend flat or rising after warmup | Investigate immediately (LR, data order, NaN). |
 
-**This is the most important check. Do it EVERY time you look at training output.**
-
-The `parse_training_metrics` and `find_latest_log` tools do this automatically. If checking manually:
-
-1. **Random output check**: `ce_loss ≈ ln(vocab_size)` means the model is outputting random probabilities.
-   - For vocab_size=32000: random loss ≈ 10.37
-   - For vocab_size=38016: random loss ≈ 10.55
-   - For vocab_size=128256: random loss ≈ 11.76
-   - If loss is within 10% of ln(vocab_size) after >10 iterations, something is fundamentally wrong (weights not loaded, forward pass broken, attention mask not applied).
-
-2. **Zero gradient check**: if `num_zeros` / total_params > 90%, gradients are not flowing. The model is not learning.
-
-3. **Params norm check**: if `params_norm` doesn't change across iterations, weights are frozen or not being updated.
-
-4. **Loss trend check**: loss should decrease over the first 50-100 iterations. If it's flat or increasing, investigate immediately.
-
-**When any of these checks fail, STOP and diagnose before continuing.** Do NOT celebrate a "successful" training run that has random-output loss. Do NOT proceed to the next task. The training is broken.
-
-### Dummy data vs real data
-
-- Dummy/mock data: loss near ln(vocab_size) is EXPECTED. The data is random.
-- Real data: loss near ln(vocab_size) is a CRITICAL BUG. Investigate immediately.
-- Always know which data you're using. Check the config's `data_path` field.
-
-### Training Progress
-
-```bash
-# Last 30 lines of training output (last rank)
-tail -30 ${ATTEMPT}/${LAST_RANK}/stdout.log
-
-# Errors on rank 0 (most common error location)
-tail -30 ${ATTEMPT}/0/stderr.log
-
-# Errors on last rank
-tail -30 ${ATTEMPT}/${LAST_RANK}/stderr.log
-```
-
----
+A clean run: initial loss near ln(vocab), then smooth monotone descent, grad norm
+decaying. If iter-1 loss looks like a checkpoint-continued value instead of the
+cold-start value, verify checkpoint-load evidence (timers + resume lines) before
+judging the conversion.
 
 ## Step 3: Anomaly Detection
 
 | Symptom | Likely Cause | Action |
-|---------|-------------|--------|
-| GPU memory occupied but 0% util, no new loss | Hanging / NCCL deadlock | Check stderr on all ranks, check network |
-| GPU memory 0, no new loss | Training crashed or was killed | Check stderr for error, check PID |
-| `nan` in loss or grad norm | Numerical instability | Reduce LR, check data for corruption |
-| `skipped iterations` increasing | Loss scale too high | Will auto-recover, monitor |
-| Loss suddenly spikes | Data issue or LR too high | Check data batch, check LR schedule |
-| NCCL timeout errors in stderr | Network issue between nodes | Check IB/RoCE, check firewall |
-| OOM (Out of Memory) | Model too large for GPU memory | Reduce micro_batch_size, increase TP/PP, enable recomputation |
+|---------|--------------|--------|
+| `CUDA out of memory` in any stderr | TP/PP/DP memory budget too tight | Check activation checkpointing / micro-batch size. |
+| `NCCL timeout` / `watchdog` in stderr | A rank stalled (straggler or deadlock) | Find which rank printed last; check its node. |
+| Loss becomes NaN | Numerical instability (fp16 overflow, bad data) | Check grad-norm history; inspect first NaN iter's inputs. |
+| stderr silent + stdout stalls | Hung collectives (mismatched world size) | Compare `nproc` vs launched ranks. |
+| Process alive, GPU util 0% | Deadlocked training loop | py-spy dump or kill + relaunch. |
+| Repeated restarts in multiple attempts | flaky node or OOM loop | Read the earliest stderr in each attempt. |
+| `TorchDynamo` / `TE` errors in stderr | Plugin/version mismatch | Compare against env-setup records. |
 
-### Check All Ranks for Errors
-
-When anomaly detected, check stderr on ALL ranks (not just rank 0):
+Scan ALL ranks' stderr (errors rarely land on rank 0):
 
 ```bash
-for r in $(ls ${ATTEMPT}/ 2>/dev/null); do
-  [ -f "${ATTEMPT}/$r/stderr.log" ] || continue
-  errors=$(grep -c -iE "error|exception|traceback|oom|killed" "${ATTEMPT}/$r/stderr.log" 2>/dev/null)
-  if [ "$errors" -gt 0 ]; then
-    echo "=== rank $r ($errors errors) ==="
-    tail -10 ${ATTEMPT}/$r/stderr.log
-  fi
+for d in ${EXP_DIR}/logs/details/host_*/${TS}/${RUN}/attempt_0; do
+  grep -l -iE "error|nan|out of memory|timeout" ${d}/*/stderr.log
 done
 ```
 
-### Multi-Node Error Check
+Multi-node (SSH loop, stdout and stderr both):
 
 ```bash
-for host_dir in ${EXP_DIR}/logs/details/host_*/; do
-  host=$(basename "$host_dir")
-  latest=$(ls -d ${host_dir}[0-9]*/ 2>/dev/null | sort | tail -1)
-  attempt=$(find "$latest" -type d -name "attempt_*" 2>/dev/null | head -1)
-  [ -z "$attempt" ] && continue
-  echo "=== $host ==="
-  for r in $(ls "$attempt/" 2>/dev/null); do
-    [ -f "${attempt}/$r/stderr.log" ] || continue
-    errors=$(grep -c -iE "error|exception|traceback" "${attempt}/$r/stderr.log" 2>/dev/null)
-    [ "$errors" -gt 0 ] && echo "  rank $r: $errors errors" && tail -3 "${attempt}/$r/stderr.log"
-  done
+for h in host_1 host_2; do
+  ssh ${h} "grep -iE 'error|nan|oom|timeout' ${EXP_DIR}/logs/details/${h}_*/${TS}/${RUN}/attempt_0/*/stderr.log | tail -5"
 done
 ```
 
----
+## Step 4: Parse Metrics
 
-## Step 4: Periodic Monitoring Report
+Preferred: `flagscale_train_monitor(output_dir=<exp_dir>, mode="check", filter="progress")`.
 
-Report the following metrics at user-requested intervals:
-
-| Metric | Source | Command |
-|--------|--------|---------|
-| Iteration / total | stdout.log last rank | `grep "iteration" ${ATTEMPT}/${LAST_RANK}/stdout.log \| tail -1` |
-| LM loss | stdout.log last rank | `grep "lm loss" ${ATTEMPT}/${LAST_RANK}/stdout.log \| tail -5` |
-| Elapsed time per iteration | stdout.log last rank | `grep "elapsed time per iteration" ${ATTEMPT}/${LAST_RANK}/stdout.log \| tail -1` |
-| Grad norm | stdout.log last rank | `grep "grad norm" ${ATTEMPT}/${LAST_RANK}/stdout.log \| tail -5` |
-| GPU utilization + memory | nvidia-smi | `nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv,noheader` |
-| Node health (multi-node) | SSH | `ssh <node> nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader` |
-
-### Loss Trend Analysis
+Manual (stdout line layout — Megatron-style logs):
 
 ```bash
-# Extract loss values for trend analysis
-grep "lm loss" ${ATTEMPT}/${LAST_RANK}/stdout.log | awk '{for(i=1;i<=NF;i++) if($i=="loss:") print $(i+1)}' | tail -50
+grep -oE "iteration +[0-9]+/" ${ATTEMPT}/${LAST_RANK}/stdout.log | tail -1   # progress
+grep "lm loss" ${ATTEMPT}/${LAST_RANK}/stdout.log | tail -3                  # loss trend
+grep -oE "grad norm: [0-9.]+" ${ATTEMPT}/${LAST_RANK}/stdout.log | tail -3   # stability
+grep "elapsed time per iteration" ${ATTEMPT}/${LAST_RANK}/stdout.log | tail -1  # throughput
+nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv              # hardware
 ```
 
-A healthy training run shows:
-- Loss decreasing over time (not necessarily monotonically)
-- Grad norm stable (not exploding)
-- Elapsed time per iteration consistent (no sudden slowdowns)
-- All GPUs at high utilization (>90%)
-
-### Alert Conditions
-
-Alert immediately if ANY of these occur:
-- No new loss output for > 5 minutes (training may have stopped)
-- Loss becomes `nan` or `inf`
-- Grad norm exceeds 100x its typical value
-- GPU utilization drops to 0% on any GPU
-- Any node becomes unreachable (multi-node)
-- stderr shows new errors
-
----
-
-## Checkpoint Monitoring
+Multi-node metrics (SSH per host, last rank only):
 
 ```bash
-# Check latest checkpoint
-ls -lt ${EXP_DIR}/checkpoints/ 2>/dev/null | head -5
-
-# Check if checkpoint is being written (file size changing)
-ls -lh ${EXP_DIR}/checkpoints/iter_*/mp_rank_00/ 2>/dev/null | tail -3
+ssh host_2 "tail -1 ${EXP_DIR}/logs/details/host_2_*/${TS}/${RUN}/attempt_0/7/stdout.log"
 ```
 
----
+Alert conditions (report immediately, do not wait for the next poll):
+- NaN in loss, or grad norm > 10x its recent median
+- throughput drop > 30% vs the run's median
+- any stderr error line appearing in the last N minutes
+- GPU memory within 2 GB of capacity (OOM incoming)
 
-## TensorBoard / WandB
+## Checkpoints and TensorBoard
 
-If TensorBoard logs exist:
-```bash
-ls ${EXP_DIR}/tensorboard/ 2>/dev/null
-```
+- Checkpoint cadence and content: see the train-config skill (`checkpoint` section).
+- TensorBoard event files live under `<exp_dir>/tensorboard/` — if the tool surface
+  lacks a reader, report the path and let the user open it.
 
-If WandB logs exist:
-```bash
-ls ${EXP_DIR}/wandb/ 2>/dev/null
-```
+## Common Issues
 
-These provide richer visualization but require a browser. For CLI-based monitoring, use the log parsing commands above.
-
----
-
-## Common Issues During Monitoring
-
-| Symptom | Diagnosis | Action |
-|---------|-----------|--------|
-| Log file exists but empty | Training crashed during startup | Check stderr.log for import errors or CUDA issues |
-| Loss stuck at same value | Learning rate too low or gradient issue | Check LR schedule, verify grad norm is non-zero |
-| Loss oscillating wildly | LR too high or batch size too small | Reduce LR or increase effective batch size |
-| `Killed` in stderr | OOM killed by system | Check `dmesg \| tail`, reduce memory usage |
-| Log timestamps stop updating | Process hung (NCCL deadlock, data loader stuck) | Check GPU util — if 0%, likely NCCL hang; if >0%, likely data loader |
-
----
+| Issue | Fix |
+|-------|-----|
+| Monitoring an old run | Resolve the LATEST timestamp dir (sort + tail -1). |
+| Empty stdout for a rank | Rank may not have started; check that rank's stderr first. |
+| Different loss across ranks | Expected under PP (only last stage prints) — compare same stage across attempts. |
+| Monitor tool finds nothing | `output_dir` typo, or logs not yet flushed; fall back to manual tail. |
 
 ## Related Skills
 
-- `train-run` — launch, stop, and manage training jobs
-- `train-config` — generate and validate training configuration
-- `train-precision-alignment` — verify numerical alignment between implementations
-- `topo-detect` — detect hardware topology for diagnosing performance issues
+- `train-run`: launch/stop jobs and preflight validation (pairs with this skill).
+- `ops-discipline`: experiment ledger HARD GATE and root-cause discipline.
+- `train-config`: parallelism/precision knobs that the anomalies above point at.

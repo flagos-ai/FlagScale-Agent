@@ -2,6 +2,9 @@
 # CUDA算子开发：ATen dispatch机制、CUTLASS 3.x GEMM、CuTe Layout、TMA异步流水线、WGMMA
 # Source: CUDA-Operator-Analysis @ docs-only
 
+# To read a section: load_knowledge(name='know-cuda-kernel', doc='<path below>', start_line=<L>, end_line=<L>)
+# Do NOT pass these doc paths to read_file — they are knowledge-internal.
+
 ## cuda_operator/00_overview.md (64 lines)
 L1: CUDA算子深度分析 — 总纲
   L3: 1. 目标定位

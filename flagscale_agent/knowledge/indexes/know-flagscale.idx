@@ -1,5 +1,9 @@
 # know-flagscale
 # FlagScale框架：Repo结构、Hydra两级Config体系、Runner执行链路、训练Config字段全表、训练Runner详解、Examples目录规范
+# Source: FlagScale @ b5741d04
+
+# To read a section: load_knowledge(name='know-flagscale', doc='<path below>', start_line=<L>, end_line=<L>)
+# Do NOT pass these doc paths to read_file — they are knowledge-internal.
 
 ## flagscale/01_repo_structure.md (212 lines)
 L1: FlagScale Repo 结构与架构 深度源码分析

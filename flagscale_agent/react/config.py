@@ -77,14 +77,16 @@ class AgentConfig:
     model: Optional[str] = None
     api_key: Optional[str] = None
     base_url: Optional[str] = None
-    max_iterations: int = 200
+    max_iterations: int = 200000
     max_context_tokens: int = 0  # 0 = auto-detect from model
     shell_remind_interval: int = 60
     max_output_tokens: int = 8192
+    thinking_budget: int = 0  # 0 = disabled; >0 = enable thinking with budget_tokens cap (must be ≥1024 and < max_output_tokens)
     session_dir: Optional[str] = None
     skill_dirs: List[str] = field(default_factory=list)
     shell_env: Dict[str, str] = field(default_factory=dict)
     max_continuations: int = 200
+    time_budget_sec: float = 0.0  # 0 = unset; >0 = per-turn wall-clock budget driving time warnings + wrap-up (NOT a hard kill)
     _config_path: Optional[str] = field(default=None, repr=False)
 
     def __post_init__(self):

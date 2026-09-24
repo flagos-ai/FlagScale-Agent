@@ -173,9 +173,12 @@ class Memory:
                     if len(parts) < 2 or domain_filter not in parts[1]:
                         continue
                 if keyword:
-                    kw = keyword.lower()
+                    # Multi-token AND: "nccl timeout" → both must appear.
+                    # Single token preserves the original substring semantics
+                    # (backward compatible with existing callers/tests).
+                    kws = keyword.lower().split()
                     text = (entry.get("key", "") + " " + entry.get("content", "")).lower()
-                    if kw not in text:
+                    if not all(kw in text for kw in kws):
                         continue
                 entries.append(entry)
             except Exception:

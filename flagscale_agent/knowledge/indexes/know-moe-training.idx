@@ -1,0 +1,103 @@
+# know-moe-training
+# MoE预训练性能优化：架构层(细粒度/共享专家/SCMoE/CE-MoE)、路由与负载均衡(aux loss/expert bias/group-limited)、EP与混合并行、All-to-All通信优化(DeepEP/NCCL EP/megakernel/低比特通信)、内核与显存(GroupedGEMM/FP8)、训练稳定性、评测与成本、FlagScale配置映射
+
+# To read a section: load_knowledge(name='know-moe-training', doc='<path below>', start_line=<L>, end_line=<L>)
+# Do NOT pass these doc paths to read_file — they are knowledge-internal.
+
+## moe_training/01_moe_pretrain_perf_survey.md (214 lines)
+L1: MoE 预训练性能优化调研
+  L7: 1. 背景与动机
+  L20: 2. 架构层优化：让专家"该细的细、该共享的共享"
+    L22: 2.1 细粒度专家 + 共享专家隔离 (DeepSeekMoE)
+    L28: 2.2 SCMoE：每层共享专家化
+    L32: 2.3 DeepSeek-V4 系列：混合压缩注意力 + mHC 残差（2026 新旗舰，暂无公开技术报告）
+    L42: 2.4 层配置与专家拓扑的新进展（2026）
+  L51: 3. 路由与负载均衡：从有梯度辅助损失到无梯度偏置
+    L53: 3.1 负载均衡三条主线
+    L64: 3.2 DeepSeek-V3 auxiliary-loss-free 路由（实践主力）
+    L71: 3.3 通信友好的路由约束：group-limited routing
+    L75: 3.4 2026 前沿：从"逼均衡"到"调度均衡"
+  L82: 4. 并行策略：EP 与混合并行的设计空间
+    L84: 4.1 EP 基本形态
+    L88: 4.2 关键设计决策
+    L95: 4.3 2026 前沿：解耦执行
+  L99: 5. 通信优化：All-to-All 的每一毫秒
+    L101: 5.1 通信结构
+    L106: 5.2 DeepEP 式双模式 + 低精度通信
+    L111: 5.3 通信-计算 overlap（最大收益点）
+    L124: 5.4 层级两跳与新通信库
+  L129: 6. 内核与显存：GroupedGEMM、稀疏计算与 FP8
+  L142: 7. 训练稳定性：MoE 特有的问题与对策
+  L149: 8. 评测与成本：怎么衡量"优化得好"
+  L157: 9. FlagScale / Megatron-LM-FL 配置实践（映射速查）
+  L194: 10. 开放问题与研究前沿
+  L203: 主要参考文献（arXiv ID）
+
+## moe_training/02_kimi_k3_k25_training_infra.md (86 lines)
+L1: Kimi K3 / K2.5 训练基础设施与配方走读（技术报告一手提取）
+  L7: 1. K3 vs K2 架构对照（Table 1 原文数据）
+  L24: 2. 训练配方（§3.2–§3.4）
+  L36: 3. MoonEP：完美均衡的专家并行（§5.2.1，开源 github.com/MoonshotAI/MoonEP）
+  L54: 4. 显存效率（§5.2.2）
+  L71: 5. 多模态编码器（§5.2.3）
+  L79: 6. 对 FlagScale/Megatron 用户的映射提示
+
+## moe_training/03_deepep_source_analysis.md (532 lines)
+L1: DeepEP 源码深度分析：MoE Expert Parallelism 通信引擎（V1 legacy 双模式 + V2 架构演进）
+  L7: 1. 概述与设计动机
+    L9: 1.1 解决什么问题
+    L22: 1.2 为什么是双模式（WHY）
+    L36: 1.3 关键设计决策一览
+  L43: 2. 源码定位
+    L60: 2.1 仓库目录速览（含本文未深潜的支撑件）
+  L78: 3. 架构总览
+    L80: 3.1 四层结构
+    L101: 3.2 一次 dispatch→combine 的完整数据流（normal 模式）
+    L123: 3.3 LL 模式两相位与 hook 时序
+  L134: 4. Python API 层（`deep_ep/buffers/legacy.py`）
+    L136: 4.1 构造与 NVSHMEM 环境（L14-136）
+    L149: 4.2 Config 查表与启动参数（L233-292）
+    L153: 4.3 dispatch/combine 返回值与 handle（L322-456）
+    L160: 4.4 EventOverlap 与流（L166-199）
+    L164: 4.5 LL API 与容错（L538-622）
+  L173: 5. Config 与 buffer 布局（`csrc/legacy/config.hpp`）
+    L175: 5.1 Config 五字段与约束（L25-50)
+    L196: 5.2 buffer size hint 公式（L53-98）
+    L210: 5.3 LowLatencyLayout：奇偶双缓冲（L119-158）
+  L225: 6. intranode kernel：NVLink 域 dispatch/combine（`intranode.cu`）
+    L229: 6.1 notify_dispatch：设备端通信 + mapped counter 回传（L26-168）
+    L235: 6.2 dispatch kernel（L212-546，kNumRanks 模板）
+    L245: 6.3 流控与内存序伪代码
+    L258: 6.4 combine kernel 与 min-head retire（L694 起）
+    L262: 6.5 边界与约束
+  L269: 7. internode kernel：NVLink→RDMA 两级转发（`internode.cu`）
+    L273: 7.1 dispatch kernel：5 种 warp 角色（L446-1213）
+    L287: 7.2 RDMA sender：32-slot 位图窗口（L562-757）
+    L307: 7.3 coordinator：coalescing 批量 put（L758-848）
+    L311: 7.4 forwarder：round-robin 双 ring 中转（L849-1018）
+    L319: 7.5 NVLReceiver 与本地化（L1061-1213）
+    L323: 7.6 combine kernel（L1711-2282）
+    L327: 7.7 时序图：一个 token 的跨机旅程（rank0→rank9 的专家，rank0/9 同机）
+  L346: 8. low-latency kernel：纯 RDMA + IBGDA（`internode_ll.cu`）
+    L350: 8.1 消息布局与两相位骨架（L177-190, L352-359）
+    L359: 8.2 SEND 相位：FP8 量化 + per-expert 定点投递（L188-349）
+    L366: 8.3 RECV 相位：静态 packed 布局与容错（L352-461）
+    L372: 8.4 hook 机制与 0-SM 等待窗口（L188-190, buffer.hpp:L1577/L1592/L1696/L1711）
+    L383: 8.5 combine kernel：LogFMT 9-bit 与 FP32 归约（L715-1139）
+    L387: 8.6 边界与约束
+  L393: 9. V2 架构演进（main 分支新形态）与 V1 的关系
+    L408: 9.1 V2 三个变化的机制含义
+    L415: 9.2 迁移判据
+  L424: 10. 量化分析：通信量、带宽与流水线
+    L426: 10.1 通信量公式
+    L444: 10.2 buffer 与 QP 的量约束
+    L457: 10.3 SM 预算
+  L461: 11. 设计决策对比表
+    L463: 11.1 normal vs low-latency（同一仓库内两条路径）
+    L478: 11.2 信号与同步原语选型
+    L489: 11.3 DeepEP vs 替代方案
+  L499: 12. 配置建议与调优指南（FlagScale/Megatron 视角）
+    L501: 12.1 推荐配置
+    L507: 12.2 常见陷阱
+    L516: 12.3 配置→kernel 行为的映射表（调优时按图索骥）
+    L530: 12.4 调优顺序（从cheap到expensive）

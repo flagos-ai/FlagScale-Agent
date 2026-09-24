@@ -39,6 +39,20 @@ class TestOverrideDisplay:
         guard = MockGuard("display_test")
         reg.register(guard)
         
+        # First, surface the block (no override yet) so registry remembers this guard
+        ctx_no_override = GuardContext(
+            tool_name="shell",
+            tool_args={"command": "ls"},
+            override_reason="",
+            turn_count=1,
+            recent_tool_history=[],
+            context_pressure=0.0,
+            classify_fn=lambda x, y, default=False: default
+        )
+        verdict_surface = reg.check_pre(ctx_no_override)
+        assert verdict_surface is not None  # Block surfaced
+        
+        # Now supply the override reason
         ctx = GuardContext(
             tool_name="shell",
             tool_args={"command": "ls"},
@@ -49,7 +63,7 @@ class TestOverrideDisplay:
             classify_fn=lambda x, y, default=False: default
         )
         
-        # First call - override should display
+        # First override call - should display
         verdict1 = reg.check_pre(ctx)
         assert verdict1 is None  # None means allowed
         
@@ -76,6 +90,20 @@ class TestOverrideLogic:
         guard = MockGuard()
         reg.register(guard)
         
+        # Surface the block first
+        ctx_surface = GuardContext(
+            tool_name="shell",
+            tool_args={"command": "ls"},
+            override_reason="",
+            turn_count=1,
+            recent_tool_history=[],
+            context_pressure=0.0,
+            classify_fn=lambda x, y, default=False: default
+        )
+        verdict_s = reg.check_pre(ctx_surface)
+        assert verdict_s is not None  # Block surfaced
+        
+        # Now override
         ctx = GuardContext(
             tool_name="shell",
             tool_args={"command": "ls"},
@@ -139,31 +167,47 @@ class TestMultipleGuards:
     """Test override behavior with multiple guards."""
     
     def test_different_guards_both_display_override(self, capsys):
-        """Different guards should each display their override independently."""
+        """With Bug C fix: only the last-surfaced guard releases; others still block."""
         reg = GuardRegistry()
         guard1 = MockGuard("guard1")
+        guard1.priority = 10  # surfaces first
         guard2 = MockGuard("guard2")
+        guard2.priority = 20
         reg.register(guard1)
         reg.register(guard2)
         
+        # Surface guard1 first
+        ctx_surface = GuardContext(
+            tool_name="shell",
+            tool_args={"command": "ls"},
+            override_reason="",
+            turn_count=1,
+            recent_tool_history=[],
+            context_pressure=0.0,
+            classify_fn=lambda x, y, default=False: default
+        )
+        verdict_s = reg.check_pre(ctx_surface)
+        assert verdict_s is not None and verdict_s.guard_name == "guard1"
+        
+        # Now override: only guard1 (last surfaced) releases; guard2 still blocks
         ctx = GuardContext(
             tool_name="shell",
             tool_args={"command": "ls"},
-            override_reason="Valid override for both",
+            override_reason="Valid override for guard1",
             turn_count=1,
             recent_tool_history=[],
             context_pressure=0.0,
             classify_fn=lambda x, y, default=False: default
         )
         
-        # Both guards should trigger, both should display override
         verdict = reg.check_pre(ctx)
-        assert verdict is None
+        # guard1 released, guard2 now surfaces
+        assert verdict is not None and verdict.guard_name == "guard2"
         
         captured = capsys.readouterr()
-        # Should see two override displays (one per guard)
+        # Only ONE override display (guard1)
         override_count = captured.out.count("Guard override")
-        assert override_count == 2, f"Expected 2 override displays (one per guard), got {override_count}"
+        assert override_count == 1, f"Expected 1 override display (guard1 only), got {override_count}"
 
 
 class TestResetTurn:
@@ -174,6 +218,19 @@ class TestResetTurn:
         reg = GuardRegistry()
         guard = MockGuard()
         reg.register(guard)
+        
+        # Surface first
+        ctx_surface = GuardContext(
+            tool_name="shell",
+            tool_args={"command": "ls"},
+            override_reason="",
+            turn_count=1,
+            recent_tool_history=[],
+            context_pressure=0.0,
+            classify_fn=lambda x, y, default=False: default
+        )
+        verdict_s = reg.check_pre(ctx_surface)
+        assert verdict_s is not None
         
         ctx = GuardContext(
             tool_name="shell",

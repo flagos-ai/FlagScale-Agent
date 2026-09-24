@@ -28,6 +28,7 @@ Everything else (session, history, tools, prompts) is injected via dependencies.
 
 from __future__ import annotations
 
+import re
 import signal
 import time
 from dataclasses import dataclass, field
@@ -79,10 +80,18 @@ class AgentKernel:
     One instance per agent. Call run_turn() for each user message.
     """
 
+    # Max consecutive completion-gate blocks with zero intervening progress
+    # before the loop gives up (livelock breaker). Small: a genuinely diligent
+    # agent creates a plan or supplies an override on the FIRST block, so any
+    # value >1 gives it room to react while still catching a stuck re-emit loop
+    # long before max_iter.
+    MAX_CONSECUTIVE_COMPLETION_BLOCKS = 5
+
     def __init__(self, deps: KernelDeps):
         self.deps = deps
         self._interrupted = False
         self._continuation_count = 0
+        self._consecutive_completion_blocks = 0
 
     def run_turn(self) -> KernelResult:
         """Run one ReAct turn (one user message → completion).
@@ -96,6 +105,15 @@ class AgentKernel:
 
         self._interrupted = False
         self._continuation_count = 0  # Reset per turn
+        # Circuit breaker for the completion gate: counts consecutive
+        # completion-gate blocks with no intervening progress (no plan created,
+        # no normal tool executed). A single-shot agent that keeps re-emitting a
+        # bare [TASK_COMPLETE] with neither a plan nor an _override_reason would
+        # otherwise livelock — the gate correctly blocks every time and the loop
+        # `continue`s without incrementing _continuation_count, so it spins all
+        # the way to max_iter (thousands of identical blocks). This breaks out
+        # once the agent has clearly stalled on the gate.
+        self._consecutive_completion_blocks = 0
         d.judge.reset_turn()
         d.guard_registry.reset_turn()
 
@@ -126,6 +144,22 @@ class AgentKernel:
                 if verdict is not None:
                     blocked = self._apply_verdict(verdict, pre=True)
                     if blocked:
+                        # Livelock breaker: the completion gate reads the LAST
+                        # assistant message via _get_last_assistant_text(). Once a
+                        # bare [TASK_COMPLETE] (no plan / no override) lands in
+                        # history, this top-of-loop pre-guard re-fires the gate
+                        # EVERY iteration on that stale text — and `continue`s
+                        # before the LLM is ever called again, so the agent can
+                        # never react. Left unchecked it spins to max_iter
+                        # (~2000 identical blocks). Count consecutive completion-
+                        # gate blocks and give up once clearly stalled.
+                        if verdict.reason == "single_shot_completion_without_plan":
+                            self._consecutive_completion_blocks += 1
+                            if (self._consecutive_completion_blocks
+                                    >= self.MAX_CONSECUTIVE_COMPLETION_BLOCKS):
+                                result.stop_reason = (
+                                    f"completion_gate_livelock: {verdict.reason}")
+                                break
                         # Don't break — re-prompt LLM with the guard message in history
                         # Guard message was injected by _apply_verdict, now give LLM a chance to respond
                         if iteration >= max_iter - 1:
@@ -193,25 +227,181 @@ class AgentKernel:
 
                     # ── Empty output defense: auto-retry up to 3 times ──
                     if not assistant_text.strip():
+                        # Provider-agnostic reasoning detection: BOTH providers
+                        # normalize reasoning into response["thinking"]
+                        # (anthropic: thinking blocks; openai: reasoning_content).
+                        # Do NOT rely on response["reasoning_only"] — that flag is
+                        # only ever set by openai_provider, so an anthropic-compat
+                        # endpoint (e.g. GLM) would never take the reasoning path.
+                        thinking_text = response.get("thinking") or ""
+                        was_reasoning_only = bool(thinking_text.strip())
+                        was_thinking_capped = bool(response.get("thinking_capped"))
+                        # SEPARATE BUDGETS: a cap-trip is a PACING event, not a
+                        # failure — the model still produced (thinking) output
+                        # and each retry is already bounded by the cap itself
+                        # (~cap_budget thinking tokens per call). Budgeting it
+                        # like a genuine empty output killed real runs: e.g.
+                        # fibsqrt 2026-09-08 09:36 — cap fired 4x in one turn,
+                        # retries 1/3..3/3 exhausted the shared budget, and the
+                        # 4th cap-trip stopped the trial (reward 0) with the
+                        # full solution design sitting in the discarded
+                        # reasoning. Cap-retries get their own generous counter
+                        # (per turn) instead of the 3-strike empty budget.
+                        cap_retries = getattr(self, "_cap_retries", 0)
                         empty_retries = getattr(self, "_empty_output_retries", 0)
-                        if empty_retries < 3:
+                        if was_thinking_capped:
+                            if cap_retries >= 50:
+                                self._cap_retries = 0
+                                result.stop_reason = "thinking_cap_max_retries"
+                                break
+                            self._cap_retries = cap_retries + 1
+                            d.display.warn(f"Thinking reached runtime cap (cap-retry {self._cap_retries}), forcing convergence...")
+                        elif empty_retries < 3:
                             self._empty_output_retries = empty_retries + 1
-                            d.display.warn(f"Empty LLM output (retry {empty_retries + 1}/3), auto-continuing...")
-                            # Remove the empty assistant message we just appended
-                            msgs = d.history.get_messages()
-                            if msgs and msgs[-1].get("role") == "assistant":
-                                msgs.pop()
-                            # Inject a nudge
-                            d.history.append({"role": "user", "content": "[system: empty response detected, please continue your work]"})
-                            continue
+                            if was_reasoning_only:
+                                d.display.warn(f"Reasoning produced content but no visible output (retry {empty_retries + 1}/3), continuing...")
+                            else:
+                                d.display.warn(f"Empty LLM output (retry {empty_retries + 1}/3), auto-continuing...")
                         else:
+                            # Exhausted empty-output budget (genuine empty /
+                            # reasoning-only response, nothing to re-inject
+                            # into a working retry loop).
                             self._empty_output_retries = 0
                             result.stop_reason = "empty_output_max_retries"
                             break
+
+                        # ── Retry budget passed: remove the dead assistant
+                        # message, re-inject reasoning, continue the turn ──
+                        # NOTE: get_messages() returns a shallow copy — popping
+                        # that copy is a no-op on the real history (the
+                        # thinking block would stay in the LLM prompt). Use
+                        # pop_last_assistant() which mutates _messages for real.
+                        d.history.pop_last_assistant()
+                        # Inject a targeted nudge
+                        if was_thinking_capped:
+                            # The runtime cap aborted a monolithic thinking
+                            # stream. Same re-injection as the resume path
+                            # (assistant thinking blocks are dropped by the
+                            # GLM endpoint and the aborted stream has no
+                            # valid signature), but the directive is
+                            # CONVERGENCE, not resume: the model must land
+                            # its next concrete step now — segmented
+                            # reasoning beats one 20-minute thought.
+                            nudge = (
+                                "[system: your reasoning reached its runtime length cap and was stopped. "
+                                "Your reasoning so far is reproduced below — do NOT continue it. "
+                                "Land the next concrete step NOW: either call a tool to test your "
+                                "next hypothesis, or output your answer. Deep problems are solved "
+                                "stepwise; experiments beat more thinking.]\n\n"
+                                "<previous_reasoning>\n"
+                                f"{thinking_text}\n"
+                                "</previous_reasoning>"
+                            )
+                        elif was_reasoning_only:
+                            # Many providers (e.g. GLM Anthropic-compat endpoint)
+                            # DROP assistant thinking blocks from the input, so
+                            # the model cannot see its own reasoning on retry.
+                            # Re-inject the FULL thinking content as a user
+                            # message so the model resumes from its prior
+                            # reasoning instead of starting over.
+                            nudge = (
+                                "[system: your previous response generated reasoning but no visible output, "
+                                "and the reasoning was not preserved in the conversation. Your full reasoning "
+                                "is reproduced below — resume from where it left off and output your answer "
+                                "or next action directly. Do NOT repeat the reasoning.]\n\n"
+                                "<previous_reasoning>\n"
+                                f"{thinking_text}\n"
+                                "</previous_reasoning>"
+                            )
+                        else:
+                            nudge = "[system: empty response detected, please continue your work]"
+                        d.history.append({"role": "user", "content": nudge})
+                        continue
                     else:
                         self._empty_output_retries = 0
+                        self._cap_retries = 0
 
-                    if "[TASK_COMPLETE]" in assistant_text or "[NEED_USER_INPUT]" in assistant_text:
+                    # Detect completion signals. Use end-anchored matching to
+                    # distinguish a real sentinel (trailing the text) from a
+                    # mention (e.g. the agent quoting "[TASK_COMPLETE]" while
+                    # explaining guard logic). A sentinel is a line that is
+                    # (almost) just the marker, optionally followed by an
+                    # _override_reason on the same or next line.
+                    _text_stripped = assistant_text.rstrip()
+                    _is_completion = (
+                        _text_stripped.endswith("[TASK_COMPLETE]")
+                        or re.search(
+                            r'\[TASK_COMPLETE\]\s*\n?_override_reason\s*[:=]',
+                            _text_stripped,
+                        ) is not None
+                    )
+                    _is_need_input = _text_stripped.endswith("[NEED_USER_INPUT]")
+                    if _is_completion or _is_need_input:
+                        # ── Completion-path guard consultation ──
+                        # The break below is otherwise unconditional, so guards that
+                        # gate completion (e.g. PlanGuard single-shot completion gate)
+                        # get no say on a text-only [TASK_COMPLETE]. Consult them here:
+                        # a block re-prompts the LLM (continue) instead of breaking, so
+                        # the agent must address the gate (or override) before completing.
+                        # Text-only [TASK_COMPLETE] has no tool_args to carry an
+                        # _override_reason, so a completion-gate block would be
+                        # unoverridable unless we give it a text channel. Parse an
+                        # override reason from the assistant text itself: the agent
+                        # declares it inline as  _override_reason: <reason>  (same
+                        # keyword as the tool-arg form). This lets a genuinely-trivial
+                        # task be released deliberately, while a bare re-emit of
+                        # [TASK_COMPLETE] (no reason) stays blocked.
+                        comp_override = self._extract_text_override(assistant_text)
+                        comp_ctx = self._build_ctx(
+                            tool_name="",
+                            tool_args=({"_override_reason": comp_override}
+                                       if comp_override else {}),
+                            tool_result=None,
+                            # This consultation runs right after the LLM produced
+                            # the sentinel THIS iteration — the completion text is
+                            # fresh, not stale history. The top-of-loop check_pre
+                            # (llm_responded defaults False) must NOT be treated as
+                            # a completion signal even when it scans a prior turn's
+                            # trailing [TASK_COMPLETE] out of history.
+                            llm_responded=True,
+                        )
+                        comp_verdict = d.guard_registry.check_pre(comp_ctx)
+                        if comp_verdict is not None:
+                            comp_blocked = self._apply_verdict(comp_verdict, pre=True)
+                            if comp_blocked:
+                                # Livelock breaker: a blocked completion `continue`s
+                                # without touching _continuation_count, so a bare
+                                # [TASK_COMPLETE] re-emitted with no plan / no override
+                                # would spin to max_iter. Count consecutive blocks and
+                                # give up once the agent has clearly stalled on the gate.
+                                self._consecutive_completion_blocks += 1
+                                if (self._consecutive_completion_blocks
+                                        >= self.MAX_CONSECUTIVE_COMPLETION_BLOCKS):
+                                    result.stop_reason = (
+                                        "completion_gate_livelock: "
+                                        f"{comp_verdict.reason}"
+                                    )
+                                    break
+                                if iteration < max_iter - 1:
+                                    # Re-prompt: LLM sees the guard message and must act
+                                    continue
+                        # Not blocked (released via plan/override) — reset the breaker.
+                        self._consecutive_completion_blocks = 0
+                        # Print the authoritative completion marker HERE — only now
+                        # that the gate has passed. The raw sentinel was stripped
+                        # from the live stream (SentinelStripper), so this is the
+                        # single, gate-approved place it reaches the screen.
+                        # By convention the terminating sentinel is the LAST one in
+                        # the text; an earlier mention (e.g. the agent quoting
+                        # "[TASK_COMPLETE]" while explaining code) must NOT override
+                        # the actual trailing signal. Pick by last occurrence, not
+                        # by a fixed tuple order.
+                        _last_sentinel = max(
+                            ("[TASK_COMPLETE]", "[NEED_USER_INPUT]"),
+                            key=lambda s: assistant_text.rfind(s),
+                        )
+                        if _last_sentinel in assistant_text:
+                            d.display.completion_signal(_last_sentinel)
                         result.stop_reason = "explicit_signal"
                         break
 
@@ -249,6 +439,7 @@ class AgentKernel:
 
                 self._continuation_count = 0
                 self._consecutive_text_only = 0  # Reset: tools were executed
+                self._consecutive_completion_blocks = 0  # progress made; reset breaker
 
                 # ── Execute tools ──
                 _pre_guard_verdicts = []
@@ -363,22 +554,6 @@ class AgentKernel:
                 self._last_turn_had_tools = True
                 result.iterations = iteration + 1
 
-                # ── Self-modification detection ──
-                # If any file tool modified flagscale_agent/ source, stop and ask for /reload
-                if self._detect_self_modification(tool_calls):
-                    # Inject a notice to the assistant so it knows to stop
-                    d.history.append({"role": "user", "content": (
-                        "[system: You just modified FlagScale Agent's own source code "
-                        "(flagscale_agent/). These changes require /reload to take effect. "
-                        "STOP here and tell the user to run /reload. Do NOT continue other work.]"
-                    )})
-                    # Do one more LLM call to let it produce the stop message
-                    response, usage = d.stream_fn(d.history.get_messages())
-                    if d.append_response_fn:
-                        d.append_response_fn(response)
-                    result.stop_reason = "self_modification_reload_needed"
-                    break
-
         finally:
             signal.signal(signal.SIGINT, _prev_handler)
 
@@ -387,6 +562,30 @@ class AgentKernel:
         return result
 
     # ── Internal helpers ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _extract_text_override(text: str) -> str:
+        """Parse an inline override reason from assistant text.
+
+        A text-only completion signal ([TASK_COMPLETE]) carries no tool_args, so
+        an overridable completion-gate block needs a text channel. The agent
+        declares an override inline using the same keyword as the tool-arg form:
+
+            _override_reason: <reason text to end of line>
+
+        Returns the reason (stripped) or "" if absent. Only a reason longer than
+        the guard's minimum (checked downstream by accept_override) actually
+        releases a block, so a bare keyword with no substance still gets blocked.
+        """
+        if not text:
+            return ""
+        # Match  _override_reason: ...  or  _override_reason = ...  (quotes optional)
+        m = re.search(
+            r'_override_reason\s*[:=]\s*["\']?(.+?)["\']?\s*$',
+            text,
+            re.MULTILINE,
+        )
+        return m.group(1).strip() if m else ""
 
     def _get_last_assistant_text(self) -> str:
         """Extract text from last assistant message in history."""
@@ -404,7 +603,8 @@ class AgentKernel:
                     return "".join(texts)
         return ""
 
-    def _build_ctx(self, tool_name: str, tool_args: dict, tool_result: str | None) -> GuardContext:
+    def _build_ctx(self, tool_name: str, tool_args: dict, tool_result: str | None,
+                   llm_responded: bool = False) -> GuardContext:
         d = self.deps
         history = d.history
         # Resolve tool effects from registry
@@ -432,6 +632,7 @@ class AgentKernel:
             classify_fn=d.judge.classify,
             override_reason=override_reason,
             assistant_text=assistant_text,
+            llm_responded=llm_responded,
         )
 
     def _apply_verdict(self, verdict: GuardVerdict, pre: bool) -> bool:
@@ -462,32 +663,7 @@ class AgentKernel:
             display.guard_inject(verdict.message)
         return False
 
-    def _detect_self_modification(self, tool_calls: list) -> bool:
-        """Check if any tool call modified flagscale_agent/ source files.
-        
-        Detects write_file/edit_file operations targeting the agent's own code,
-        which require a /reload to take effect.
-        """
-        SELF_PATHS = ("flagscale_agent/", "flagscale_agent\\")
-        FILE_TOOLS = ("write_file", "edit_file")
-        
-        for tc in tool_calls:
-            name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
-            if name not in FILE_TOOLS:
-                continue
-            # Extract path from tool call input
-            inp = tc.get("input", {}) if isinstance(tc, dict) else getattr(tc, "input", {})
-            if isinstance(inp, str):
-                try:
-                    import json
-                    inp = json.loads(inp)
-                except (json.JSONDecodeError, TypeError):
-                    continue
-            path = inp.get("path", "") if isinstance(inp, dict) else ""
-            # Check if path touches agent source
-            if any(seg in path for seg in SELF_PATHS):
-                return True
-        return False
+
 
     def _get_last_assistant_text(self) -> str:
         """Get the text content of the last assistant message."""
@@ -539,8 +715,16 @@ class AgentKernel:
                         plan_hint = f" Current step: {step.get('title', step.get('description', ''))}"
             return (
                 "Your previous response contained text but no tool calls and no stop signal. "
-                "If you intended to use a tool, emit it now. "
-                "If done, end with [TASK_COMPLETE] or [NEED_USER_INPUT]."
+                "The ONLY valid stop signals are [TASK_COMPLETE] and [NEED_USER_INPUT] "
+                "— they must appear as the last line of your response. "
+                "Simply stopping output is NOT a stop signal.\n\n"
+                "You MUST choose exactly one:\n"
+                "1. If the task is fully done: end with [TASK_COMPLETE] as the last line, "
+                "no tool calls in the same response.\n"
+                "2. If you need user input: end with [NEED_USER_INPUT] as the last line, "
+                "no tool calls in the same response.\n"
+                "3. If you need to take action: emit ONLY tool call(s), no stop signal.\n\n"
+                "Do NOT mix tool calls and stop signals in the same response."
                 f"{plan_hint}"
             )
 

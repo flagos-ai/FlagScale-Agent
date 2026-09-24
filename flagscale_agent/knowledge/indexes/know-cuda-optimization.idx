@@ -2,6 +2,9 @@
 # CUDA性能优化：shared memory/bank conflict、cuBLAS算法选择、occupancy、NCU分析、自定义kernel模式
 # Source: CUDA-Operator-Analysis @ docs-only
 
+# To read a section: load_knowledge(name='know-cuda-optimization', doc='<path below>', start_line=<L>, end_line=<L>)
+# Do NOT pass these doc paths to read_file — they are knowledge-internal.
+
 ## cuda_operator/08_shared_memory_bank_conflict.md (301 lines)
 L1: Chapter 08: Shared Memory与Bank Conflict 深度分析
   L3: 1. 设计动机

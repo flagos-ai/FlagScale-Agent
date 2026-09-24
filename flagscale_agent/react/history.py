@@ -18,11 +18,13 @@ Context management is handled by the model via evict/recall tools.
 No automatic aging, truncation, or compaction.
 """
 
+from __future__ import annotations
+
 import json
 from typing import Any, Dict, List, Optional
 
-# Working window ratio: 60% of max_context_tokens
-WORKING_WINDOW_RATIO = 0.60
+# Working window ratio: 75% of max_context_tokens
+WORKING_WINDOW_RATIO = 0.75
 # Fallback if not dynamically set
 WORKING_WINDOW_TOKENS = 120_000
 
@@ -225,6 +227,27 @@ class HistoryManager:
     def get_messages(self) -> List[Dict[str, Any]]:
         """Return messages list. No aging or compaction — evict/recall handles context."""
         return _validate_tool_pairs(list(self._messages))
+
+    def pop_last_assistant(self) -> Optional[Dict[str, Any]]:
+        """Remove and return the trailing assistant message from the REAL history.
+
+        get_messages() returns a validated SHALLOW COPY — mutating that copy
+        never touches self._messages. Callers that need to actually remove the
+        last assistant message (e.g. empty-output retry) must use this method.
+
+        Scope: operates ONLY on _messages (the LLM prompt). _full_log is the
+        append-only audit log — the popped message stays there, so session
+        persistence, recall_from_full_log, and _ext_idx bookkeeping (the popped
+        message holds the highest ext index; new appends only go higher) are
+        all unaffected. Not protected by ContextPressureGuard because it never
+        touches _full_log.
+
+        Returns None (and does nothing) if history is empty or the last
+        message is not an assistant message.
+        """
+        if self._messages and self._messages[-1].get("role") == "assistant":
+            return self._messages.pop()
+        return None
 
     def get_message_at(self, index: int) -> Optional[Dict[str, Any]]:
         """Return message at given index (external), or None if not found/evicted.
@@ -467,7 +490,11 @@ class HistoryManager:
         display_index = msg.get("_ext_idx", index)
         role = msg.get("role", "unknown")
         if _is_tool_result(msg):
-            tool_name, tool_input = self._extract_tool_info_for_index(index)
+            # Use the resolved INTERNAL position, not the external _ext_idx.
+            # _extract_tool_info_for_index indexes self._messages directly, so it
+            # must receive an internal position. Passing the external index (which
+            # grows unboundedly across hard_resets) caused IndexError on high indexes.
+            tool_name, tool_input = self._extract_tool_info_for_index(internal)
             placeholder = (
                 f"[evicted | index={display_index} | {tool_name}({tool_input}) | {tokens} tokens]"
             )
@@ -626,9 +653,16 @@ class HistoryManager:
         return result
 
     def _extract_tool_info_for_index(self, index: int) -> tuple:
-        """Extract tool_name and key input for a tool_result at index."""
+        """Extract tool_name and key input for a tool_result at internal position `index`.
+
+        `index` is an INTERNAL position into self._messages. Guard against
+        out-of-range values so callers never trigger IndexError.
+        """
         tool_name = "unknown"
         tool_input = ""
+
+        if index < 0 or index >= len(self._messages):
+            return (tool_name, tool_input)
 
         for i in range(index - 1, -1, -1):
             msg = self._messages[i]

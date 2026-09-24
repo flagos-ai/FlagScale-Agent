@@ -28,6 +28,16 @@ from flagscale_agent.react.guard.memory_discipline import MemoryDisciplineGuard
 from flagscale_agent.react.guard.knowledge_skill import KnowledgeSkillGuard
 
 
+def _adv_ks(guard, ctx):
+    """One real KnowledgeSkill tool cycle: check_pre decision + check_post count
+    persistence. KnowledgeSkillGuard advances its counter in check_post (so a
+    blocked/not-run call never inflates it), so accumulation must drive both
+    phases. Returns the check_pre verdict."""
+    verdict = guard.check_pre(ctx)
+    guard.check_post(ctx)
+    return verdict
+
+
 class TestMemoryDisciplineBlockFix:
     """Test MemoryDisciplineGuard block behavior without override."""
 
@@ -88,53 +98,65 @@ class TestKnowledgeSkillBlockFix:
     """Test KnowledgeSkillGuard block behavior without override."""
 
     def test_block_without_override_persists(self):
-        """Block should persist if LLM doesn't provide override."""
+        """Block should persist if LLM doesn't provide override.
+
+        New semantics: the counter advances in check_post for EXECUTED calls; a
+        blocked call carries the [BLOCKED BY GUARD] marker in its result and does
+        NOT advance the count. So the block projects (counter+1 >= threshold) and
+        persists across repeated attempts, but the counter no longer inflates on
+        every blocked pass — it plateaus at threshold-1 until a real call runs."""
         guard = KnowledgeSkillGuard()
-        
-        # Reach threshold (40 calls)
-        for i in range(40):
+
+        # Drive BLOCK_THRESHOLD-1 executed calls: counter reaches 39.
+        for i in range(guard.BLOCK_THRESHOLD - 1):
             ctx = GuardContext(tool_name="shell", tool_args={"command": "ls"})
-            verdict = guard.check_pre(ctx)
-        
-        assert guard._calls_since_knowledge == 40
-        
-        # Next call: counter increments to 41, then checks >= 40, blocks
+            _adv_ks(guard, ctx)
+
+        assert guard._calls_since_knowledge == guard.BLOCK_THRESHOLD - 1
+
+        # Next call: projection = 39+1 = 40 >= 40, blocks.
         ctx = GuardContext(tool_name="shell", tool_args={"command": "ls"})
         verdict = guard.check_pre(ctx)
         assert verdict is not None
         assert verdict.action == "block"
-        assert guard._calls_since_knowledge == 41  # Incremented before check
-        
-        # Continue without override — should keep blocking
+
+        # Continue without override — should keep blocking. Simulate the kernel:
+        # a blocked call's result carries the marker, so check_post does NOT count.
         for i in range(5):
-            ctx = GuardContext(tool_name="shell", tool_args={"command": "ls"})
+            ctx = GuardContext(
+                tool_name="shell",
+                tool_args={"command": "ls"},
+                tool_result="[BLOCKED BY GUARD] prevented",
+            )
             verdict = guard.check_pre(ctx)
             assert verdict is not None
-            assert verdict.action == "block", f"Call {41+i} should still block"
-            assert guard._calls_since_knowledge > 40
+            assert verdict.action == "block", f"Repeat {i} should still block"
+            guard.check_post(ctx)  # blocked marker → no increment
+            # Counter stays plateaued: a blocked call never inflates it.
+            assert guard._calls_since_knowledge == guard.BLOCK_THRESHOLD - 1
 
     def test_block_with_override_resets(self):
         """Override should reset counter and allow new cycle."""
         guard = KnowledgeSkillGuard()
         
-        # Reach threshold and block
-        for i in range(40):
+        # Reach threshold and block (drive counter to 39 via executed calls).
+        for i in range(guard.BLOCK_THRESHOLD - 1):
             ctx = GuardContext(tool_name="shell", tool_args={"command": "ls"})
-            guard.check_pre(ctx)
-        
+            _adv_ks(guard, ctx)
+
         ctx = GuardContext(tool_name="shell", tool_args={"command": "ls"})
         verdict = guard.check_pre(ctx)
         assert verdict.action == "block"
-        
-        # Provide override
+
+        # Provide override (no network gate armed → any substantive reason works).
         result = guard.accept_override("Task is simple, doesn't need knowledge", ctx)
         assert result is True
         assert guard._calls_since_knowledge == 0  # Counter reset by override
-        
-        # New cycle — should not block until threshold again
-        for i in range(39):
+
+        # New cycle — should not block until threshold again.
+        for i in range(guard.BLOCK_THRESHOLD - 1):
             ctx = GuardContext(tool_name="shell", tool_args={"command": "ls"})
-            verdict = guard.check_pre(ctx)
+            verdict = _adv_ks(guard, ctx)
             if verdict and verdict.action == "block":
                 pytest.fail(f"Shouldn't block at call {i+1} after override")
 
@@ -144,16 +166,21 @@ class TestInjectStillWorks:
 
 
     def test_knowledge_skill_inject_timing(self):
-        """Inject should trigger every 15 calls."""
+        """Inject should trigger every 15 calls.
+
+        With check_post persistence, the inject verdict comes from the check_pre
+        projection (calls_since = counter+1) and check_post then advances the
+        counter for the executed call — so injects still land at 15 and 30."""
         guard = KnowledgeSkillGuard()
-        
+
         inject_at = []
         for i in range(1, 41):
             ctx = GuardContext(tool_name="shell", tool_args={"command": "ls"})
             verdict = guard.check_pre(ctx)
             if verdict and verdict.action == "inject":
                 inject_at.append(i)
-        
+            guard.check_post(ctx)  # persist the executed call's increment
+
         assert inject_at == [15, 30], f"Inject should trigger at 15/30, got {inject_at}"
     def test_memory_discipline_inject_timing(self):
         """Inject should trigger every 10 calls. Block at 30 supersedes inject."""
@@ -175,14 +202,15 @@ class TestInjectStillWorks:
         assert block_at == [30], f"Block should trigger at 30, got {block_at}"
 
     def test_knowledge_skill_inject_timing(self):
-        """Inject should trigger every 15 calls."""
+        """Inject should trigger every 15 calls (check_post persistence)."""
         guard = KnowledgeSkillGuard()
-        
+
         inject_at = []
         for i in range(1, 41):
             ctx = GuardContext(tool_name="shell", tool_args={"command": "ls"})
             verdict = guard.check_pre(ctx)
             if verdict and verdict.action == "inject":
                 inject_at.append(i)
-        
+            guard.check_post(ctx)  # persist the executed call's increment
+
         assert inject_at == [15, 30], f"Inject should trigger at 15/30, got {inject_at}"

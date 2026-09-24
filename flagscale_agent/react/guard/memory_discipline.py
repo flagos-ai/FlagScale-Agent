@@ -18,9 +18,14 @@ Logic:
 - Track tool calls since last memory read/write
 - Every 10 calls without memory operation → inject a reminder
 - Every 30 calls without memory operation → block (overridable)
-- Before TASK_COMPLETE without memory review → inject evolution reminder
 - If LLM reads/writes memory, reset counter
+
+Note: The [TASK_COMPLETE] completion-time memory review was moved to
+VerificationGuard's _TEXT_COMPLETE_HYGIENE gate (block, not inject) so it
+actually stops the agent before completion.
 """
+
+from __future__ import annotations
 
 from flagscale_agent.react.guard import Guard, GuardContext, GuardVerdict
 
@@ -36,43 +41,23 @@ class MemoryDisciplineGuard(Guard):
 
     def __init__(self):
         self._calls_since_memory = 0
-        self._evolution_reminded = False
-        self._has_memory_review = False
 
     _MEMORY_TOOLS = frozenset((
         "memory_write", "memory_read", "memory_list",
         "plan_status", "plan_create", "plan_update",
     ))
 
-    _MEMORY_READ_TOOLS = frozenset(("memory_read", "memory_list"))
-
     def check_pre(self, ctx: GuardContext) -> GuardVerdict | None:
         if not ctx.tool_name:
-            # Check if assistant is about to emit TASK_COMPLETE without memory review
-            if (ctx.assistant_text
-                    and "[TASK_COMPLETE]" in ctx.assistant_text
-                    and not self._evolution_reminded
-                    and not self._has_memory_review):
-                self._evolution_reminded = True
-                return GuardVerdict.inject(
-                    "[MemoryDiscipline] About to TASK_COMPLETE but no memory review this session. "
-                    "Before completing, run memory_list() and check:\n"
-                    "(1) Any new fact/pitfall/insight to save?\n"
-                    "(2) Can any existing pitfall be elevated to an insight (recurring pattern)?\n"
-                    "(3) Can any existing insight be digested into a concrete artifact — "
-                    "create/improve a skill, knowledge doc, or agent code?\n"
-                    "(4) Any existing fact invalidated by this session's work?\n\n"
-                    "Report [Memory suggestions] to user with proposed actions; "
-                    "do NOT self-execute digest/delete without confirmation.",
-                    reason="evolution_check_before_complete",
-                    category="memory_evolution_reminder",
-                )
+            # The [TASK_COMPLETE] completion-time memory review was moved to
+            # VerificationGuard's _TEXT_COMPLETE_HYGIENE gate (block, not inject)
+            # so it actually stops the agent before completion. An inject here
+            # was useless — the agent had already emitted [TASK_COMPLETE] and
+            # would not act on advisory text.
             return None
 
         if ctx.tool_name in self._MEMORY_TOOLS:
             self._calls_since_memory = 0
-            if ctx.tool_name in self._MEMORY_READ_TOOLS:
-                self._has_memory_review = True
             return None
 
         self._calls_since_memory += 1
@@ -81,8 +66,11 @@ class MemoryDisciplineGuard(Guard):
             # Do NOT reset counter here — only reset in accept_override if override succeeds
             return GuardVerdict.block(
                 f"[MemoryDiscipline] {self.BLOCK_THRESHOLD} tool calls without any memory operation. "
-                "You likely have findings worth saving (facts, pitfalls, insights) or existing "
-                "memories that could help. Run memory_list() or memory_write() before continuing.",
+                "Before continuing, run ONE concrete recall action: "
+                "memory_read(key='pitfall/<domain>/') for the domain you are working in "
+                "(whole-domain pitfall read), or memory_list(keyword='...') if you only have "
+                "a symptom keyword. If you have findings worth saving, memory_write() them — "
+                "a finding not written is a finding lost at the next eviction.",
                 reason=f"no_memory_ops_{self.BLOCK_THRESHOLD}_calls",
                 category="memory_discipline",
             )
@@ -90,10 +78,11 @@ class MemoryDisciplineGuard(Guard):
         if self._calls_since_memory % self.INJECT_THRESHOLD == 0:
             return GuardVerdict.inject(
                 f"[MemoryDiscipline] {self._calls_since_memory} tool calls without "
-                "reading or writing memory. Consider: saving key findings as fact/pitfall/insight, "
-                "or checking existing memories to avoid repeating past work. "
-                "If a pitfall recurs, elevate to insight; "
-                "if an insight has enough evidence, digest into skill/knowledge/agent code.",
+                "reading or writing memory. Pick ONE: "
+                "(1) RECALL — memory_read(key='pitfall/<current-domain>/') before your next "
+                "risky action (launch/build/deploy/new host); "
+                "(2) WRITE — memory_write() a finding from this stretch (path/config/error fix); "
+                "(3) DIGEST — recurring pitfall → insight, evidenced insight → skill/knowledge.",
                 reason="no_memory_ops_recently",
                 category="memory_discipline",
             )

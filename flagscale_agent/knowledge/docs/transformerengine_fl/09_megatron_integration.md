@@ -7,6 +7,23 @@
 | `megatron/core/extensions/transformer_engine.py` | 2837 | Megatron↔TE 全量适配层 |
 | `transformer_engine/pytorch/linear.py` | ~1670 | TE Linear 基础实现 |
 | `transformer_engine/pytorch/distributed.py` | ~1950 | TE checkpoint/comm原语 |
+| `tests/plugin/plugin/test_cuda_comm_overlap_contract.py` | — | vendor overlap factory 契约测试 (PR#115 新增) |
+
+---
+
+## 0. Vendor 通信重叠 factory 契约 (PR#115, 2026-09-08)
+
+> 适用于 MetaX/MUSA/Hygon/Iluvatar/Enflame 等 vendor 后端接入 TE-FL 时，
+> 实现共享的 comm overlap factory 接口必须满足的契约（PR#115 实测）：
+
+1. **共享 factory 接口新增参数**：`use_cublasmp` 与 `comm_type`。
+2. **CUDA 路径的 overlap 选项一律按 keyword 转发**，并归一化通信类型
+   （避免位置参数顺序漂移导致 vendor 侧错绑）。
+3. **vendor legacy 构造参数保留**：MUSA/MetaX/Hygon/Iluvatar/Enflame 的旧构造签名不破坏。
+4. **不支持的 cuBLASMp 组合显式 reject**（fail-fast），不允许静默降级。
+
+回归防护：`tests/plugin/plugin/test_cuda_comm_overlap_contract.py` +
+`test_vendor_comm_overlap_contract.py` —— 改 factory 签名或新增 vendor 后端时先跑这两个契约测试。
 
 ---
 

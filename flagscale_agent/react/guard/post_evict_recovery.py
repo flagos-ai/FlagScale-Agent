@@ -19,6 +19,8 @@ injects a reminder to run plan_status() and memory_read() before continuing
 with other operations. Resets once recovery actions are taken.
 """
 
+from __future__ import annotations
+
 from flagscale_agent.react.guard import Guard, GuardContext, GuardVerdict
 
 
@@ -104,13 +106,23 @@ class PostEvictRecoveryGuard(Guard):
             f"[PostEvictRecovery] You just evicted {self._evicted_count}+ messages — "
             f"significant context was lost. Before continuing, restore your working state:\n"
             f"1. plan_status() — check current task progress and step notes\n"
-            f"2. memory_read(key='fact/cluster/') or relevant prefix — recover environment facts\n"
+            f"2. memory_list() — scan all memory entries to find relevant facts, "
+            f"pitfalls, and insights for your current domain\n"
             f"3. If needed: recall(index=N) for specific evicted content\n"
-            f"4. For deep recovery: read conversation_full.json in your session directory "
-            f"(grep/read_file on it to find past instructions, tool results, or code snippets "
-            f"without re-executing commands)\n\n"
-            f"Do NOT proceed on stale assumptions. Verify key parameters "
-            f"(IPs, ports, paths, parallelism config) from memory or plan notes.",
+            f"4. For deep recovery: grep/read_file on conversation_full.json in your "
+            f"session directory to find past instructions, tool results, or code snippets "
+            f"without re-executing commands\n\n"
+            f"Do NOT proceed on stale assumptions. After recovery, verify these "
+            f"commonly error-prone items against memory or plan notes:\n"
+            f"- Exact commands and their syntax (flags, JSON formats, argument order)\n"
+            f"- File paths and delivery paths (exact location the task requires output)\n"
+            f"- Environment state (which user, which container, which working directory, "
+            f"which branch)\n"
+            f"- Task constraints (version numbers, exact formats, GIVEN values with "
+            f"zero tolerance)\n"
+            f"- Recently corrected memory entries (ensure you are using the updated "
+            f"version, not the stale one)\n"
+            f"- Previously failed approaches (avoid repeating the same mistake)",
             reason="heavy_eviction_detected",
             category="post_evict_recovery",
         )

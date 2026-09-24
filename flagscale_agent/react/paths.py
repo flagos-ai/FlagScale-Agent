@@ -51,6 +51,14 @@ def get_memory_dir() -> str:
     return os.path.join(get_dot_flagscale_root(), "agent_memory")
 
 
+def get_proposals_dir() -> str:
+    """Get global improvement-proposal registry directory
+    (~/.flagscale/proposals). Global (not per-session) because a proposal is
+    reviewed across sessions: an unreviewed proposal raised in one session must
+    resurface at the wrap-up of a later one."""
+    return os.path.join(get_dot_flagscale_root(), "proposals")
+
+
 def get_input_history_file() -> str:
     """Get readline input history file (~/.flagscale/input_history)."""
     return os.path.join(get_dot_flagscale_root(), "input_history")

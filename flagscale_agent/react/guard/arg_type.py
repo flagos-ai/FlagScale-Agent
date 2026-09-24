@@ -19,6 +19,8 @@ this guard blocks the call and returns a clear error so the LLM can retry with
 correct types. This prevents TypeError crashes in both tool execution and post-guards.
 """
 
+from __future__ import annotations
+
 from flagscale_agent.react.guard import Guard, GuardContext, GuardVerdict
 
 

@@ -1,6 +1,9 @@
 # know-te-attention
 # TransformerEngine注意力：DotProductAttention、Context Parallel、融合实现
-# Source: TransformerEngine-FL @ 2cb485f
+# Source: TransformerEngine-FL @ 129ada24
+
+# To read a section: load_knowledge(name='know-te-attention', doc='<path below>', start_line=<L>, end_line=<L>)
+# Do NOT pass these doc paths to read_file — they are knowledge-internal.
 
 ## transformerengine_fl/03_dot_product_attention.md (480 lines)
 L1: 第三章：DotProductAttention & Flash Attention 系统

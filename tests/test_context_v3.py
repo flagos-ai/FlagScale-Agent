@@ -292,6 +292,95 @@ class TestHistoryEvictRecall:
         assert "tokens" in placeholder
 
 
+class TestEvictHighExtIdxAfterReset:
+    """Regression: evicting a tool_result whose external index is far larger than
+    len(_messages) must NOT raise IndexError.
+
+    Reproduces the post-hard_reset state where _ext_idx grows unboundedly (e.g.
+    17480) while _messages is short. Previously evict_message passed the external
+    index into _extract_tool_info_for_index, which indexed self._messages[index]
+    directly -> 'list index out of range'.
+    """
+
+    def setup_method(self):
+        from flagscale_agent.react.history import HistoryManager
+        self.hm = HistoryManager(max_context_tokens=64000)
+
+    def _build_post_reset_messages(self):
+        # Short _messages list, but each carries a large _ext_idx as if many
+        # messages were appended then discarded by hard_reset.
+        base = 17476
+        self.hm._messages = [
+            {"role": "system", "content": "You are an assistant.", "_ext_idx": 0},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_hi",
+                        "function": {
+                            "name": "shell",
+                            "arguments": json.dumps({"command": "make -j"}),
+                        },
+                    }
+                ],
+                "_ext_idx": base + 1,
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_hi",
+                "content": "build output\n" * 200,
+                "_ext_idx": base + 2,
+            },
+            {"role": "assistant", "content": "done", "_ext_idx": base + 3},
+            {"role": "user", "content": "tail1", "_ext_idx": base + 4},
+            {"role": "assistant", "content": "tail2", "_ext_idx": base + 5},
+            {"role": "user", "content": "tail3", "_ext_idx": base + 6},
+            {"role": "assistant", "content": "tail4", "_ext_idx": base + 7},
+        ]
+        # Simulate reset offset so ext->internal resolution goes through _ext_idx.
+        self.hm._index_offset = base
+
+    def test_evict_high_ext_idx_tool_result_no_crash(self):
+        """Evicting the high-ext-idx tool_result pair must succeed, not raise."""
+        self._build_post_reset_messages()
+        base = 17476
+        # The assistant tool_use at base+1 pairs with the tool_result at base+2.
+        result = self.hm.evict_message(base + 1)
+        assert result is not None
+        # tool_name should be resolved from the paired assistant tool_use.
+        # Metadata tool_name may be 'shell' or 'unknown'; the key assertion is no crash
+        # and that the message is now evicted.
+        assert self.hm._messages[1]["_evicted"] is True
+
+    def test_evict_high_ext_idx_out_of_range_returns_none(self):
+        """An ext_idx not present in _messages resolves to None (skipped), no crash."""
+        self._build_post_reset_messages()
+        # 999999 is not any message's _ext_idx and > len(_messages) -> None
+        assert self.hm.evict_message(999999) is None
+
+    def test_extract_tool_info_out_of_range_guard(self):
+        """_extract_tool_info_for_index tolerates out-of-range internal positions."""
+        self._build_post_reset_messages()
+        assert self.hm._extract_tool_info_for_index(999999) == ("unknown", "")
+        assert self.hm._extract_tool_info_for_index(-5) == ("unknown", "")
+
+    def test_evict_high_ext_idx_tool_result_directly(self):
+        """Evicting the tool_result directly exercises the L470 placeholder path.
+
+        This is the path that passed the external index (base+2 == 17478) into
+        _extract_tool_info_for_index, which then did self._messages[17478] -> crash.
+        """
+        self._build_post_reset_messages()
+        base = 17476
+        result = self.hm.evict_message(base + 2)  # the tool_result
+        assert result is not None
+        assert self.hm._messages[2]["_evicted"] is True
+        # Placeholder is built via _extract_tool_info_for_index; tool_name resolved
+        # from the preceding assistant tool_use.
+        assert result["metadata"]["tool_name"] == "shell"
+
+
 # ════════════════════════════════════════════════════════════════════════════════
 # ContextPressureGuard Tests
 # ════════════════════════════════════════════════════════════════════════════════
@@ -831,6 +920,45 @@ class TestPromptIntegrity:
         assert "## Memory" in SYSTEM_PROMPT_STATIC
         assert "memory_read" in SYSTEM_PROMPT_STATIC
         assert "cross-session knowledge" in SYSTEM_PROMPT_STATIC
+
+    def test_plan_gated_by_acting_not_difficulty(self):
+        """Plan guidance must state plan is gated by whether you ACT, not by
+        task difficulty, so 'simple' tasks are never a license to skip the plan."""
+        from flagscale_agent.react.prompt import SYSTEM_PROMPT_STATIC
+        assert "not gated by task difficulty" in SYSTEM_PROMPT_STATIC
+        assert "no such thing as a task too simple to plan" in SYSTEM_PROMPT_STATIC
+
+    def test_plan_guards_wired_to_lifecycle_rationale(self):
+        """Prompt must explain WHY skipping a plan is dangerous: runtime guards
+        (stall/verification) are wired to the plan lifecycle and cannot fire
+        without an active plan."""
+        from flagscale_agent.react.prompt import SYSTEM_PROMPT_STATIC
+        assert "wired to the plan lifecycle" in SYSTEM_PROMPT_STATIC
+        assert "With no active plan, none of them can fire" in SYSTEM_PROMPT_STATIC
+
+    def test_method_switch_cannot_retarget_easier_goal(self):
+        """Method-switch must not be usable to disguise lowering the bar /
+        substituting a reachable target for the constrained one (pov-ray class)."""
+        from flagscale_agent.react.prompt import SYSTEM_PROMPT_STATIC
+        assert "change HOW you solve the problem the task set — never WHAT problem that is" in SYSTEM_PROMPT_STATIC
+        assert "wearing the vocabulary of Principle 3 as a disguise" in SYSTEM_PROMPT_STATIC
+        assert "never a license to retarget an easier goal" in SYSTEM_PROMPT_STATIC
+
+    def test_verify_output_not_method_rationale(self):
+        """Verification must reject arguing the method is sound in place of
+        checking the output against ground truth (video-processing class)."""
+        from flagscale_agent.react.prompt import SYSTEM_PROMPT_STATIC
+        assert "arguing that your METHOD is sound in place of checking that your OUTPUT is correct" in SYSTEM_PROMPT_STATIC
+        assert "A confident rationale for a wrong answer is still a wrong answer" in SYSTEM_PROMPT_STATIC
+
+    def test_established_constraint_must_be_durable(self):
+        """A load-bearing constraint must be written to memory immediately so it
+        survives context eviction (build-pov-ray class: agent held the 2.2
+        constraint 19min, lost it to eviction, reverted to the rejected 3.7)."""
+        from flagscale_agent.react.prompt import SYSTEM_PROMPT_STATIC
+        assert "This list must be DURABLE, not held in working context" in SYSTEM_PROMPT_STATIC
+        assert "re-inferring \"what was I even asked to do?\" from environmental scraps" in SYSTEM_PROMPT_STATIC
+        assert "recover the constraint from memory before acting" in SYSTEM_PROMPT_STATIC
 
 
 class TestNoUnnecessaryTruncation:

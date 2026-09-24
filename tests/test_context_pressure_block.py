@@ -193,3 +193,65 @@ class TestInfiniteBlockRegression:
         result = guard.check_pre(ctx_tool)
         assert result is not None
         assert result.action == "block"
+
+
+class TestSaveGuidanceSurvivalRange:
+    """Regression: evict + hard_reset blocks must carry the survival-range test
+    (cross-session truth -> memory, this-session progress -> plan) so the agent
+    knows WHAT to extract before context is destroyed."""
+
+    def _evict_msg(self):
+        guard = ContextPressureGuard()
+        ctx = _make_ctx(0.85, evictable_count=100, tool_name="shell")
+        v = guard.check_pre(ctx)
+        assert v is not None and v.category == "context_pressure_evict"
+        return v.message
+
+    def _hard_reset_msg(self):
+        guard = ContextPressureGuard()
+        # trigger hard_reset path: high pressure + too few evictable
+        ctx1 = _make_ctx(0.90, evictable_count=10, tool_name="shell")
+        r = guard.check_pre(ctx1)
+        assert r is not None and r.category == "context_pressure_hard_reset"
+        return r.message
+
+    def test_evict_block_has_survival_range(self):
+        msg = self._evict_msg()
+        assert "EXTRACT NOW" in msg
+        assert "survival-range test" in msg
+        assert "cross-session truth" in msg
+        assert "this-session progress" in msg
+        assert "WHAT NOT" in msg  # noise guard: don't re-dump cheaply re-derivable facts
+
+    def test_hard_reset_block_has_survival_range(self):
+        msg = self._hard_reset_msg()
+        assert "EXTRACT NOW" in msg
+        assert "survival-range test" in msg
+        assert "continuation summary lives only in the next window" in msg
+
+    def test_two_hard_reset_blocks_identical(self):
+        """The two hard_reset emission sites (recovery-path + threshold-path)
+        must carry the SAME guidance text; the evict site is distinct."""
+        import inspect
+        import re
+        from flagscale_agent.react.guard import context_pressure as cp
+        src = inspect.getsource(cp)
+        # Three emission sites total (2 hard_reset + 1 evict), each ending
+        # with "Allowed tools:".
+        assert src.count("Allowed tools:") == 3
+        # Both hard_reset sites carry the reset-specific clause.
+        assert src.count("Only memory survives a reset") == 2
+
+        # Extract the two hard_reset blocks and compare after indent normalizing.
+        lines = src.split("\n")
+        starts = [i for i, l in enumerate(lines)
+                  if "Eviction cannot free enough space" in l]
+        assert len(starts) == 2, f"expected 2 hard_reset blocks, got {len(starts)}"
+        blocks = []
+        for s in starts:
+            e = s
+            while "Allowed tools:" not in lines[e]:
+                e += 1
+            blocks.append([re.sub(r"^\s+", "", x).rstrip()
+                           for x in lines[s:e + 1] if x.strip()])
+        assert blocks[0] == blocks[1], "two hard_reset blocks differ"

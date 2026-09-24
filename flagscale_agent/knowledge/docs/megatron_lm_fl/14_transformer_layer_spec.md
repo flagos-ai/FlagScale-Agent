@@ -268,7 +268,7 @@ BaseTransformerLayer (ABC, L325)
             │
             └── MoETransformerLayer (L1914)      MoE 层
                   └─ 重写 _forward_mlp 支持 expert 路由
-                  └─ CUDA Graph scope 支持 moe_router
+                  └─ CUDA Graph 支持 moe_router (v0.18.2: CudaGraphModule, 见第18章)
 ```
 
 ### 7.2 MoETransformerLayer 扩展 (L1914+)
@@ -281,7 +281,9 @@ class MoETransformerLayer(TransformerLayer):
         # 如果 CUDA Graph scope 包含 moe_router:
         #   先 graph-capture router 前向
         #   再执行 expert 计算（无法 graph capture 因为动态路由）
-        if CudaGraphScope.moe_router in self.config.cuda_graph_scope:
+        if CudaGraphModule.moe_router in self.config.cuda_graph_modules:
+            # v0.18.2: 原 CudaGraphScope.moe_router in self.config.cuda_graph_scope
+            # 配置面重构: scope→modules + cuda_graph_impl + inference_cuda_graph_scope, 详见第18章
             router_output = self._cudagraph_router(...)
             mlp_output = self.mlp.forward_after_router(router_output, ...)
         else:
@@ -338,15 +340,18 @@ self.offload_mlp_norm = (
 
 ```python
 def create_mcore_cudagraph_manager(self, config):
-    """按 scope 粒度注册 CUDA Graph"""
-    if not self.config.cuda_graph_scope:
-        # scope 为空 → Graph 整个 layer
+    """按捕获覆盖粒度注册 CUDA Graph (v0.18.2 API)"""
+    # 训练捕获覆盖 = cuda_graph_modules (成员: attn/mlp/moe/moe_router/moe_preprocess/mamba)
+    # 空列表 = 整层捕获; 实现选择 = cuda_graph_impl (none/local/transformer_engine/full_iteration)
+    # 旧 API (cuda_graph_scope + CudaGraphScope) 已 deprecated, 详见第18章
+    if not self.config.cuda_graph_modules:
+        # 覆盖为空 → Graph 整个 layer
         self.cudagraph_manager = CudaGraphManager(config)
-    elif CudaGraphScope.attn in self.config.cuda_graph_scope:
+    elif CudaGraphModule.attn in self.config.cuda_graph_modules:
         # 只 Graph attention 部分
         self.cudagraph_manager = CudaGraphManager(config)
-    elif CudaGraphScope.mlp in self.config.cuda_graph_scope:
-        # 只 Graph MLP 部分（MoE 不走这里）
+    elif CudaGraphModule.mlp in self.config.cuda_graph_modules:
+        # 只 Graph MLP 部分（MoE 层用 moe/moe_router 覆盖，不走这里）
         assert not self.is_moe_layer
         self.cudagraph_manager = CudaGraphManager(config)
 ```

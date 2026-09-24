@@ -12,12 +12,12 @@
  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  See the License for the specific language governing permissions and
  limitations under the License.
- -->
+-->
 
 # Operational Discipline — Summary
 
-General operational rules for FlagScale infrastructure work: reading strategy, shell safety, environment awareness, and root cause diagnosis.
+General operational rules for FlagScale infrastructure work: pitfall recall, reading strategy, shell safety, remote execution posture (ssh → docker), environment awareness, root cause diagnosis, and the experiment ledger gate.
 
-**Load when**: starting infrastructure work on a new server, debugging shell/environment issues, or needing structured diagnosis methodology.
+**Load when**: starting infrastructure work on a new server, executing remote/docker operations, debugging shell/environment issues, or before training launches.
 
-Key rules: read complete files before implementing, never run same command twice, use conda run (not activate), check stderr first for errors, verify everything after install. For training-specific operations, use train-run skill instead.
+Key rules: recall pitfalls from memory BEFORE the error; read complete files before implementing; never run the same command twice; same-object read/write calls never batch in parallel; docker exec needs `-i` for stdin and three checkpoints (landed / version / effect) before trusting a remote change; record every training attempt in the memory ledger before launch; back up before irreversible git operations. For training-specific operations, use train-run skill instead.

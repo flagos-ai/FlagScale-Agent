@@ -29,7 +29,7 @@ Launch, stop, and manage FlagScale distributed training jobs on GPU servers.
 ## Critical Rules
 
 1. **If the user says the environment/conda is already set up, DO NOT install packages.** Go straight to preflight verification (Step 3). Only install if preflight imports fail.
-2. **After launching training (not dryrun — dryrun only generates scripts), you MUST immediately call monitor() to observe the process.** Do not proceed to other tasks without monitoring.
+2. **After launching training (not dryrun — dryrun only generates scripts), you MUST immediately call `flagscale_train_monitor(output_dir=...)` to observe the process.** Do not proceed to other tasks without monitoring.
 3. **Never delete experiment output directories.**
 
 ## Prerequisites
@@ -397,15 +397,12 @@ workspace_experiment(action="finalize", name="<experiment_name>",
 
 **Within 30 seconds of launch:**
 1. **Wait 10-15 seconds** before checking logs — the log directory may not exist yet (race condition with nohup/background launch)
-2. Use `monitor(output_dir="<exp_dir>", duration=60)` to auto-discover logs AND scan stderr — NEVER use raw `find` commands (they may find old logs from previous runs)
+2. Use `flagscale_train_monitor(output_dir="<exp_dir>", mode="check")` to auto-discover logs AND scan stderr — NEVER use raw `find` commands (they may find old logs from previous runs)
 3. If stderr has errors → training failed at startup. Fix and retry.
 4. **Check stderr FIRST, not stdout** — crash info is in stderr. A process showing "wandb initialized" in stdout may already be dead.
 
 **After first metrics appear (usually 1-3 minutes):**
-4. **Auto-trigger `parse_training_metrics`** — do NOT use `tail -f` or `grep` to manually scan logs. The tool parses structured metrics and runs health checks automatically. Call it with `vocab_size` for the random-output check:
-   ```
-   parse_training_metrics(log_path="<log_path>", vocab_size=<vocab_size>)
-   ```
+4. **Use `flagscale_train_monitor(output_dir="<exp_dir>", mode="check", vocab_size=<vocab_size>)`** — do NOT use `tail -f` or `grep` to manually scan logs. The tool parses structured metrics and runs the health checks automatically (`vocab_size` enables the random-output check). For continuous supervision use `mode="watch"` with `duration`.
 5. Interpret the health check results:
    - `loss ≈ ln(vocab_size)` → model outputs are random. Stop. Check: weights loaded? forward pass correct?
    - `grad_norm = 0` or `num_zeros ≈ total_params` → gradients not flowing. Check loss computation, frozen params.
@@ -464,10 +461,10 @@ Key points:
 **Always use the dedicated tool first** — it handles the full directory traversal, rank scanning, and health checks in one call:
 
 ```
-find_latest_log(experiment="<exp_dir>", vocab_size=<vocab_size>)
+flagscale_train_monitor(output_dir="<exp_dir>", mode="check", vocab_size=<vocab_size>)
 ```
 
-If the experiment dir is recorded in workspace_state's "Experiments" section, use that path directly. NEVER use `find`, `ls -R`, or shell globbing to search for log files.
+If the experiment dir is recorded in the experiment ledger memory entry, use that path directly. NEVER use `find`, `ls -R`, or shell globbing to search for log files.
 
 **Manual fallback** (only if the tool is unavailable):
 EXP_DIR=$(grep 'exp_dir:' examples/<model>/conf/train.yaml | awk '{print $2}')

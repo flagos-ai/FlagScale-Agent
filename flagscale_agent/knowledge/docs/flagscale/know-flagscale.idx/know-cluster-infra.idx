@@ -1,7 +1,0 @@
-# know-cluster-infra
-# 集群基础设施：IB拓扑检测方法、网络fabric结构、GPU监控方案、Slurm调度
-# Source: NCCL @ docs-only
-
-## nccl/00_topology_detection_guide.md (0 lines)
-
-## cluster_management/01_gpu_cluster_monitoring.md (0 lines)

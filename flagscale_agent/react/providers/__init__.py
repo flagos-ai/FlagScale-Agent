@@ -17,7 +17,7 @@
 from flagscale_agent.react.providers.base import LLMProvider
 
 
-def get_provider(provider: str, model: str, api_key: str, base_url: str = None, max_tokens: int = 8192) -> LLMProvider:
+def get_provider(provider: str, model: str, api_key: str, base_url: str = None, max_tokens: int = 8192, thinking_budget: int = 0) -> LLMProvider:
     """Create an LLM provider instance."""
     if provider == "openai":
         from flagscale_agent.react.providers.openai_provider import OpenAIProvider
@@ -28,6 +28,6 @@ def get_provider(provider: str, model: str, api_key: str, base_url: str = None, 
             AnthropicProvider,
         )
 
-        return AnthropicProvider(model=model, api_key=api_key, base_url=base_url, max_tokens=max_tokens)
+        return AnthropicProvider(model=model, api_key=api_key, base_url=base_url, max_tokens=max_tokens, thinking_budget=thinking_budget)
     else:
         raise ValueError(f"Unknown provider: {provider}. Use 'openai' or 'anthropic'.")

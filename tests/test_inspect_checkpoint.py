@@ -18,7 +18,12 @@ import os
 import tempfile
 
 import pytest
-import torch
+
+pytest.importorskip(
+    "torch", reason="inspect_checkpoint needs torch (pip install flagscale-agent[checkpoint])"
+)
+
+import torch  # noqa: E402  (guarded by importorskip above)
 
 from flagscale_agent.react.tools.inspect_checkpoint import (
     InspectCheckpointTool,

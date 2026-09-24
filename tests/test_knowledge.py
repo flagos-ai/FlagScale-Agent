@@ -58,7 +58,9 @@ class TestKnowledgeManager:
         from flagscale_agent.knowledge import KnowledgeManager
         km = KnowledgeManager()
         assert km.root.exists()
-        assert len(km.available_groups) == 17
+        # 17 base groups + know-moe-training (MoE pretraining perf survey)
+        # + know-linear-attention (FLA source analysis)
+        assert len(km.available_groups) == 19
 
     def test_init_custom_dir(self, knowledge_dir):
         """Test initialization with custom directory."""
@@ -185,3 +187,48 @@ class TestLoadKnowledgeTool:
         assert tool.name == "load_knowledge"
         assert "name" in tool.parameters["properties"]
         assert "name" in tool.parameters["required"]
+        # New precise-read params exposed
+        assert "doc" in tool.parameters["properties"]
+        assert "start_line" in tool.parameters["properties"]
+        assert "end_line" in tool.parameters["properties"]
+
+    def test_execute_read_doc(self, knowledge_dir):
+        """Test reading a specific doc via the tool using index-style path."""
+        from flagscale_agent.knowledge import KnowledgeManager
+        from flagscale_agent.react.tools.load_knowledge import LoadKnowledgeTool
+
+        km = KnowledgeManager(knowledge_dir)
+        tool = LoadKnowledgeTool(km)
+
+        # Full doc read
+        result = tool.execute(name="know-test-group", doc="test_repo/01_test.md")
+        assert "test_repo/01_test.md" in result
+        assert "# Test Chapter 1" in result
+
+    def test_execute_read_doc_line_range(self, knowledge_dir):
+        """Test reading a line range via the tool."""
+        from flagscale_agent.knowledge import KnowledgeManager
+        from flagscale_agent.react.tools.load_knowledge import LoadKnowledgeTool
+
+        km = KnowledgeManager(knowledge_dir)
+        tool = LoadKnowledgeTool(km)
+
+        result = tool.execute(
+            name="know-test-group", doc="test_repo/01_test.md",
+            start_line=3, end_line=5,
+        )
+        assert "lines 3-5" in result
+        body = result.split("===\n", 1)[1]
+        assert len(body.splitlines()) == 3
+
+    def test_execute_read_doc_not_in_group(self, knowledge_dir):
+        """Test clear error when doc path is not part of the group."""
+        from flagscale_agent.knowledge import KnowledgeManager
+        from flagscale_agent.react.tools.load_knowledge import LoadKnowledgeTool
+
+        km = KnowledgeManager(knowledge_dir)
+        tool = LoadKnowledgeTool(km)
+
+        result = tool.execute(name="know-test-group", doc="wrong/path.md")
+        assert "not in group" in result
+        assert "test_repo/01_test.md" in result  # lists available docs

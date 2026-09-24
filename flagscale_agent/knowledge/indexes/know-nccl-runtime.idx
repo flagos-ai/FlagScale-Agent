@@ -2,6 +2,9 @@
 # NCCL运行时：集合通信算法实现、Transport层(P2P/SHM/NET)、任务调度、性能调优
 # Source: NCCL @ docs-only
 
+# To read a section: load_knowledge(name='know-nccl-runtime', doc='<path below>', start_line=<L>, end_line=<L>)
+# Do NOT pass these doc paths to read_file — they are knowledge-internal.
+
 ## nccl/03_collective_algorithms.md (477 lines)
 L1: N03: 集合通信算法实现 — 深度源码分析
   L6: 1. 本章解决什么问题？

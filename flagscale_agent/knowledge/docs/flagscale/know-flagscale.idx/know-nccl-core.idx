@@ -1,9 +1,0 @@
-# know-nccl-core
-# NCCL核心：整体架构、拓扑检测算法、channel/ring/tree路径选择
-# Source: NCCL @ docs-only
-
-## nccl/00_topology_detection_guide.md (0 lines)
-
-## nccl/01_architecture_overview.md (0 lines)
-
-## nccl/02_topology_detection.md (0 lines)

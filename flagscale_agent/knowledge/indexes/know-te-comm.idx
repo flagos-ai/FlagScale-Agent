@@ -1,6 +1,9 @@
 # know-te-comm
 # TransformerEngine通信优化：Userbuffers comm-gemm overlap、TP集成、CPU offload
-# Source: TransformerEngine-FL @ 2cb485f
+# Source: TransformerEngine-FL @ 129ada24
+
+# To read a section: load_knowledge(name='know-te-comm', doc='<path below>', start_line=<L>, end_line=<L>)
+# Do NOT pass these doc paths to read_file — they are knowledge-internal.
 
 ## transformerengine_fl/05_userbuffers_comm_gemm_overlap.md (559 lines)
 L1: 第五章：Userbuffers & Comm-GEMM Overlap 系统深度源码分析
@@ -184,71 +187,72 @@ L628: 标记不需要offload的tensor
 L631: 强制offload base tensor (view场景)
 L634: CUDA Graph debug: 禁用graph查看kernel list
 
-## transformerengine_fl/09_megatron_integration.md (652 lines)
+## transformerengine_fl/09_megatron_integration.md (669 lines)
 L1: Chapter 09: Megatron-LM 集成接口 — 源码深度分析
   L3: 源码位置
-  L13: 1. 架构总览
-  L32: 2. TELinear：基类设计 (L675-916)
-    L34: 2.1 初始化参数映射
-    L66: 2.2 is_first_microbatch 优化 (L720, L878-884)
-    L82: 2.3 delay_wgrad_compute支持 (L730-734, L912-915)
-L85: 初始化时透传给TE (需要TE >= 2.3.0)
-L89: 提供backward_dw方法供外部显式调用
-    L97: 2.4 Expert并行参数标记 (L846-858)
-  L113: 3. TELayerNormColumnParallelLinear：融合LN+Linear (L918-1143)
-    L115: 3.1 设计动机
-    L127: 3.2 Userbuffers配置映射 (L988-1019)
-    L155: 3.3 symmetric_ar_type参数 (L1021-1026)
-L158: FlagScale扩展: NVLink对称内存AllReduce
-    L164: 3.4 split_te_layernorm_column_parallel_linear (L325-403)
-  L185: 4. TEColumnParallelLinear & TERowParallelLinear (L1145-1357)
-    L187: 4.1 列并行 vs 行并行参数差异
-    L198: 4.2 sharded_state_dict (分布式检查点)
-L201: TEColumnParallelLinear (列切分, 沿axis 0)
-L211: TERowParallelLinear (行切分, 沿axis 1)
-  L220: 5. TEDotProductAttention：全特性注意力适配 (L1359-2445)
-    L222: 5.1 初始化核心流程
-L225: 步骤1: 构建ProcessGroupCollection
-L232: 步骤2: CP配置注入
-L249: 步骤3: 版本条件特性
-    L257: 5.2 cp_stream共享设计
-    L269: 5.3 PackedSeqParams版本兼容 (L1509-1529)
-L275: 根据TE版本裁剪不支持的参数
-L282: 非注意力字段过滤
-  L287: 6. 量化配置系统 (L86-307)
-    L289: 6.1 三层配置结构
-    L306: 6.2 TEQuantizationRecipe (L93-160)
-    L325: 6.3 运行时量化决策 (_get_should_context_be_quantized_params, L285-305)
-L347: 场景1: 只让某些层用FP8，其余BF16
-L348: 全局不开fp8_autocast，对特定层设置 override_nonquantized_autocast=True
-L350: 场景2: 全局FP8，但某层回退到BF16
-L351: 全局开fp8_autocast，对特定层设置 override_quantized_autocast=False
-    L354: 6.4 forward中的量化context注入 (L876-892)
-  L367: 7. TEDelayedScaling：FP8 Recipe Megatron适配 (L2447-2480)
-    L369: 7.1 参数映射
-    L394: 7.2 在Megatron中的使用
-L397: training.py中的典型调用
-  L411: 8. TECudaRNGStatesTracker：RNG兼容适配 (L2483-2515)
-    L413: 8.1 Megatron与TE的RNG差异
-    L422: 8.2 is_initialized状态追踪
-  L445: 9. te_checkpoint：跨版本激活检查点 (L2518-2542)
-  L478: 10. get_cpu_offload_context：跨版本CPU Offload封装 (L2558-2637)
-    L480: 10.1 版本分支逻辑
-  L517: 11. _get_extra_te_kwargs：通用参数注入 (L307-317)
-  L536: 12. FlagScale特定扩展
-    L538: 12.1 tp_size动态获取 (L1037, L1547)
-L541: FlagScale修改: 支持FlexDistributed (get_parallel_context() != None时)
-    L549: 12.2 cp_stream FlagScale Add (L1368, L1452)
-    L561: 12.3 device抽象 (L316)
-  L567: 13. 端到端配置传递链路
-    L569: 13.1 FP8训练完整链路
-    L604: 13.2 模块替换关系
-  L617: 14. 设计决策与取舍
-  L630: 15. 调试与验证
-L633: 检查模块替换是否生效
-L639: 验证UB overlap配置
-L644: 检查FP8量化状态
-L649: 验证CP stream共享
+  L14: 0. Vendor 通信重叠 factory 契约 (PR#115, 2026-09-08)
+  L30: 1. 架构总览
+  L49: 2. TELinear：基类设计 (L675-916)
+    L51: 2.1 初始化参数映射
+    L83: 2.2 is_first_microbatch 优化 (L720, L878-884)
+    L99: 2.3 delay_wgrad_compute支持 (L730-734, L912-915)
+L102: 初始化时透传给TE (需要TE >= 2.3.0)
+L106: 提供backward_dw方法供外部显式调用
+    L114: 2.4 Expert并行参数标记 (L846-858)
+  L130: 3. TELayerNormColumnParallelLinear：融合LN+Linear (L918-1143)
+    L132: 3.1 设计动机
+    L144: 3.2 Userbuffers配置映射 (L988-1019)
+    L172: 3.3 symmetric_ar_type参数 (L1021-1026)
+L175: FlagScale扩展: NVLink对称内存AllReduce
+    L181: 3.4 split_te_layernorm_column_parallel_linear (L325-403)
+  L202: 4. TEColumnParallelLinear & TERowParallelLinear (L1145-1357)
+    L204: 4.1 列并行 vs 行并行参数差异
+    L215: 4.2 sharded_state_dict (分布式检查点)
+L218: TEColumnParallelLinear (列切分, 沿axis 0)
+L228: TERowParallelLinear (行切分, 沿axis 1)
+  L237: 5. TEDotProductAttention：全特性注意力适配 (L1359-2445)
+    L239: 5.1 初始化核心流程
+L242: 步骤1: 构建ProcessGroupCollection
+L249: 步骤2: CP配置注入
+L266: 步骤3: 版本条件特性
+    L274: 5.2 cp_stream共享设计
+    L286: 5.3 PackedSeqParams版本兼容 (L1509-1529)
+L292: 根据TE版本裁剪不支持的参数
+L299: 非注意力字段过滤
+  L304: 6. 量化配置系统 (L86-307)
+    L306: 6.1 三层配置结构
+    L323: 6.2 TEQuantizationRecipe (L93-160)
+    L342: 6.3 运行时量化决策 (_get_should_context_be_quantized_params, L285-305)
+L364: 场景1: 只让某些层用FP8，其余BF16
+L365: 全局不开fp8_autocast，对特定层设置 override_nonquantized_autocast=True
+L367: 场景2: 全局FP8，但某层回退到BF16
+L368: 全局开fp8_autocast，对特定层设置 override_quantized_autocast=False
+    L371: 6.4 forward中的量化context注入 (L876-892)
+  L384: 7. TEDelayedScaling：FP8 Recipe Megatron适配 (L2447-2480)
+    L386: 7.1 参数映射
+    L411: 7.2 在Megatron中的使用
+L414: training.py中的典型调用
+  L428: 8. TECudaRNGStatesTracker：RNG兼容适配 (L2483-2515)
+    L430: 8.1 Megatron与TE的RNG差异
+    L439: 8.2 is_initialized状态追踪
+  L462: 9. te_checkpoint：跨版本激活检查点 (L2518-2542)
+  L495: 10. get_cpu_offload_context：跨版本CPU Offload封装 (L2558-2637)
+    L497: 10.1 版本分支逻辑
+  L534: 11. _get_extra_te_kwargs：通用参数注入 (L307-317)
+  L553: 12. FlagScale特定扩展
+    L555: 12.1 tp_size动态获取 (L1037, L1547)
+L558: FlagScale修改: 支持FlexDistributed (get_parallel_context() != None时)
+    L566: 12.2 cp_stream FlagScale Add (L1368, L1452)
+    L578: 12.3 device抽象 (L316)
+  L584: 13. 端到端配置传递链路
+    L586: 13.1 FP8训练完整链路
+    L621: 13.2 模块替换关系
+  L634: 14. 设计决策与取舍
+  L647: 15. 调试与验证
+L650: 检查模块替换是否生效
+L656: 验证UB overlap配置
+L661: 检查FP8量化状态
+L666: 验证CP stream共享
 
 ## transformerengine_fl/11_cuda_kernels.md (352 lines)
 L1: TE-FL 第11章：CUDA Kernel 层深度源码分析

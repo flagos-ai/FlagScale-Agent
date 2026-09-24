@@ -6,6 +6,8 @@ Manages knowledge groups: loading config, reading indexes, returning
 doc content for the LLM to consume.
 """
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
 from typing import Optional

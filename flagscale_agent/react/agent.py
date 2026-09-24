@@ -24,6 +24,7 @@ import atexit
 import json
 import os
 import re
+import signal
 import sys
 import time
 import uuid
@@ -47,7 +48,9 @@ from flagscale_agent.react.retry import retry_with_backoff, _is_context_limit_er
 from flagscale_agent.react.session import (
     save_conversation, load_conversation, mark_completed,
     find_resumable_sessions, list_sessions, get_session_dir,
-    append_session_index, get_recent_sessions,
+    acquire_session_lock, release_session_lock, get_session_lock_holder,
+    SessionLockedError, dir_empty_except_lock, SESSION_LOCK_FILE,
+    clean_stale_empty_sessions,
 )
 from flagscale_agent.react.skills import SkillManager
 from flagscale_agent.react.tools import ToolRegistry
@@ -55,7 +58,7 @@ from flagscale_agent.react.tools.edit_file import EditFileTool
 from flagscale_agent.react.tools.load_knowledge import LoadKnowledgeTool
 from flagscale_agent.react.tools.load_skill import LoadSkillTool
 from flagscale_agent.react.tools.read_file import ReadFileTool
-from flagscale_agent.react.tools.shell import ShellTool
+from flagscale_agent.react.tools.shell import ShellTool, ShellJobsTool
 from flagscale_agent.react.tools.write_file import WriteFileTool
 from flagscale_agent.react.tools.web_fetch import WebFetchTool
 # find_log removed - merged into monitor
@@ -64,6 +67,8 @@ from flagscale_agent.react.memory import Memory
 from flagscale_agent.react.tools.memory_write import MemoryWriteTool
 from flagscale_agent.react.tools.memory_read import MemoryReadTool
 from flagscale_agent.react.tools.memory_list import MemoryListTool
+from flagscale_agent.react.proposals import ProposalRegistry
+from flagscale_agent.react.tools.proposal import ProposalTool
 from flagscale_agent.react.plan import TaskPlan
 from flagscale_agent.react.tools.monitor import FlagScaleTrainMonitorTool
 from flagscale_agent.react.tools.plan_create import PlanCreateTool
@@ -82,8 +87,15 @@ from flagscale_agent.react.guard.training_monitor import TrainingMonitorGuard
 
 from flagscale_agent.react.guard.package_search import PackageSearchGuard
 
+from flagscale_agent.react.guard.find_guard import FindGuard
+from flagscale_agent.react.guard.shell_jobs_wait import ShellJobsWaitGuard
+
 from flagscale_agent.react.guard.unit_test import UnitTestGuard
+from flagscale_agent.react.guard.knowledge_index import KnowledgeIndexGuard
+from flagscale_agent.react.guard.post_edit_far_end import PostEditFarEndGuard
 from flagscale_agent.react.guard.memory_discipline import MemoryDisciplineGuard
+from flagscale_agent.react.guard.memory_post_check import MemoryPostCheckGuard
+from flagscale_agent.react.guard.time_budget import TimeBudgetGuard
 from flagscale_agent.react.guard.post_evict_recovery import PostEvictRecoveryGuard
 from flagscale_agent.react.guard.knowledge_skill import KnowledgeSkillGuard
 from flagscale_agent.react.guard.arg_type import ArgTypeGuard
@@ -94,6 +106,14 @@ from flagscale_agent.react.tool_executor import ToolExecutor, tool_display_summa
 
 from flagscale_agent.react.judge import Judge
 from flagscale_agent.react.commands import CommandHandler
+
+
+# NOTE: there is deliberately NO internal default time budget. When the
+# FLAGSCALE_AGENT_TIME_BUDGET_SEC env var is unset/unparseable/non-positive, no
+# external harness is enforcing a wall, so _task_budget_stats() reports None and
+# no budget figure is surfaced to the agent or the health judge. Fabricating a
+# large default (e.g. 24h) would falsely signal abundant time and invite
+# leisurely work — see _task_budget_stats for the full rationale.
 
 
 # ── WorkerAgent ──────────────────────────────────────────────────────────────
@@ -120,12 +140,25 @@ class WorkerAgent:
         self._knowledge_manager = KnowledgeManager()
 
         self._session_id = uuid.uuid4().hex[:8]
-        from flagscale_agent.react.paths import get_sessions_root, get_memory_dir
+        from flagscale_agent.react.paths import get_sessions_root, get_memory_dir, get_proposals_dir
         sessions_root = config.session_dir or get_sessions_root()
         session_dir = os.path.join(sessions_root, self._session_id)
         os.makedirs(session_dir, exist_ok=True)
         self._session_dir = session_dir
         self._sessions_root = sessions_root
+        # Concurrency guard: a session dir is single-owner state (every save
+        # rewrites conversation.json/full.json wholesale, swap_store keys by
+        # external index, plans/active.yaml is one pointer). Take the lock
+        # BEFORE anything reads or writes the directory; the fresh uuid makes
+        # a collision here essentially impossible, but the check is cheap and
+        # turns a silent corruption into a loud error if it ever happens.
+        try:
+            self._session_lock_fd = acquire_session_lock(session_dir)
+        except SessionLockedError as e:
+            raise RuntimeError(
+                f"new session directory is unexpectedly locked "
+                f"(existing content at {session_dir}?): {e}"
+            ) from e
 
 
         # Provider and history must be created before ContextManager
@@ -136,6 +169,7 @@ class WorkerAgent:
         self.provider = _provider or get_provider(
             config.provider, config.model, config.api_key,
             config.base_url, config.max_output_tokens,
+            thinking_budget=config.thinking_budget,
         )
 
         self.history = HistoryManager(max_context_tokens=config.max_context_tokens)
@@ -153,6 +187,12 @@ class WorkerAgent:
 
         plan_dir = os.path.join(session_dir, "plans")
         self.task_plan = _task_plan or TaskPlan(plan_dir)
+
+        # Global, cross-session improvement-proposal registry. Lives outside the
+        # per-session dir on purpose: an unreviewed proposal raised in one
+        # session must resurface at a later session's wrap-up. This is what the
+        # wrap-up HARNESS GAP item reads to re-report unanswered proposals.
+        self.proposals = ProposalRegistry(get_proposals_dir())
 
         if not _tool_registry:
             self._register_tools()
@@ -172,6 +212,7 @@ class WorkerAgent:
 
         self._init_runtime_state()
         atexit.register(self._atexit_hook)
+        self._install_signal_handlers()
 
     def _init_runtime_state(self):
         """Initialize mutable per-session state. Called from __init__.
@@ -188,7 +229,16 @@ class WorkerAgent:
         self._total_iterations: int = 0
         self._original_user_task: str = ""
         self._session_start: float = time.time()
+        # Wall-clock start of the CURRENT turn. Re-stamped at the top of every
+        # _react_loop so task-budget accounting resets per turn (interactive mode
+        # runs many turns over a long-lived session; only the current turn's
+        # elapsed time is meaningful against a per-task budget). In single-shot
+        # mode a turn == the whole session, so this coincides with _session_start.
+        # Initialized here so it is always set even before the first turn.
+        self._turn_start: float = self._session_start
         self._session_input_tokens: int = 0
+        # Cumulative count of messages evicted this session (dashboard gauge).
+        self._evict_count: int = 0
         self._session_output_tokens: int = 0
 
 
@@ -213,30 +263,83 @@ class WorkerAgent:
         guard_registry = GuardRegistry()
         # Register native guards - all guards registered unconditionally
         guard_registry.register(ArgTypeGuard(tool_registry=self.tool_registry))
+        # StartupGuard runs FIRST (priority=5) — the START phase of the
+        # three-phase framework. Its ordered pipeline gates real work:
+        # BackupPhase (back up irreplaceable inputs before the 1st shell) →
+        # NetworkProbePhase (lightweight probe before the 1st heavy net op,
+        # single-shot only) → ResearchPhase (one research pass before real work,
+        # single-shot only). Replaces the standalone BackupGuard.
+        from flagscale_agent.react.guard.startup import StartupGuard
+        self._startup_guard = StartupGuard()
+        guard_registry.register(self._startup_guard)
+        from flagscale_agent.react.guard.compile_redirect import CompileRedirectGuard
+        guard_registry.register(CompileRedirectGuard())
         guard_registry.register(ShellSafetyGuard())
+        # VcsBackupGuard: targeted block on destructive git ops (checkout --,
+        # reset --hard, clean -f, stash drop/clear, ...) — protects uncommitted
+        # work from irreversible loss (e.g. a checkout discarding a patch).
+        from flagscale_agent.react.guard.vcs_backup import VcsBackupGuard
+        guard_registry.register(VcsBackupGuard())
+        # IpPortGuard: post-check advisory when a shell command touches an IP
+        # literal or an SSH-family port flag. IPs and ports are a proven
+        # hallucination hotspot (two host segments, three SSH port roles) — the
+        # inject-only reminder pushes verification against the authoritative
+        # memory fact and on-disk hostfile instead of recall. Never blocks.
+        from flagscale_agent.react.guard.ip_port import IpPortGuard
+        guard_registry.register(IpPortGuard())
+        # LongTimeShellGuard: block long foreground sleep/timeout (>30s) on
+        # non-background shell calls. The agent has repeatedly burned minutes
+        # on `sleep 180`-style foreground waits instead of backgrounding the
+        # job and polling shell_jobs — the guard forces the doctrine at the
+        # right layer (block+override), background=true passes freely.
+        from flagscale_agent.react.guard.longtimeshell import LongTimeShellGuard
+        guard_registry.register(LongTimeShellGuard())
 
         # Reliability guards (P7)
 
         guard_registry.register(ContextPressureGuard(
             working_window_tokens=self.history.working_window if self.history else 0
         ))
-        guard_registry.register(PlanGuard(task_plan=self.task_plan))
+        self._plan_guard = PlanGuard(task_plan=self.task_plan)
+        guard_registry.register(self._plan_guard)
 
         # Plan enforcement guard
         from flagscale_agent.react.guard.plan_update import PlanUpdateGuard
         guard_registry.register(PlanUpdateGuard(task_plan=self.task_plan))
         guard_registry.register(TrainingMonitorGuard())
         guard_registry.register(PackageSearchGuard())
+        guard_registry.register(FindGuard())
+        guard_registry.register(ShellJobsWaitGuard())
 
         guard_registry.register(UnitTestGuard())
+        # KnowledgeIndexGuard (always active, inject-only): editing a knowledge
+        # doc shifts the line numbers cached in indexes/<group>.idx, so
+        # load_knowledge would read the wrong lines. Reminds to regenerate the
+        # index after such an edit. Mirrors UnitTestGuard. Never blocks.
+        guard_registry.register(KnowledgeIndexGuard())
+        # PostEditFarEndGuard (always active, inject-only): after EVERY successful
+        # write_file/edit_file, remind the agent to verify the FAR end — valid-for-
+        # type on the edited file, the consumer's read path, and (for agent source)
+        # that the live process still runs old code until /reload. Generic across
+        # file types, unlike UnitTestGuard. Never blocks.
+        guard_registry.register(PostEditFarEndGuard())
         # Memory discipline guard (always active)
         guard_registry.register(MemoryDisciplineGuard())
+        # Memory post-check guard (always active, inject-only): reconciles the
+        # moment a memory_read/write succeeds — the write/read is not "done"
+        # until the agent checks for duplicate keys, temp-vs-durable, staleness.
+        guard_registry.register(MemoryPostCheckGuard())
+        # Time-budget awareness guard: injects escalating wall-clock advisories
+        # (50/75/90%) so the agent itself — not just the health judge — reacts to
+        # cumulative task time. Silent when no concrete wall was injected.
+        guard_registry.register(TimeBudgetGuard(stats_fn=self._task_budget_stats))
         # Post-evict recovery guard (always active)
         guard_registry.register(PostEvictRecoveryGuard())
         # Knowledge-first guard (always active, inject-only)
-        guard_registry.register(KnowledgeSkillGuard())
+        self._knowledge_guard = KnowledgeSkillGuard()
+        guard_registry.register(self._knowledge_guard)
         # Verification discipline guard (always active, block on step_done without evidence)
-        guard_registry.register(VerificationGuard(plan=self.task_plan))
+        guard_registry.register(VerificationGuard(plan=self.task_plan, proposals=self.proposals))
 
         deps = KernelDeps(
             provider=self.provider,
@@ -267,11 +370,22 @@ class WorkerAgent:
         self.tool_registry.register(ReadFileTool())
         self.tool_registry.register(WriteFileTool())
         self.tool_registry.register(EditFileTool())
+        _shell_tool = ShellTool(
+            remind_interval=self.config.shell_remind_interval,
+            env=self.config.shell_env,
+            health_judge_fn=self._health_judge,
+        )
+        self.tool_registry.register(_shell_tool)
+        # Background-job control tool: poll/wait/list/kill jobs started with
+        # shell(background=true) or auto-detached from the monitor loop. Wire the
+        # SAME health judge + the ShellTool instance's history/resource helpers
+        # so a backgrounded job that later hangs is caught by the same liveness
+        # logic (and gets the same judge context) the synchronous monitor uses.
         self.tool_registry.register(
-            ShellTool(
-                remind_interval=self.config.shell_remind_interval,
-                env=self.config.shell_env,
+            ShellJobsTool(
                 health_judge_fn=self._health_judge,
+                history_fn=_shell_tool._build_history_str,
+                resources_fn=_shell_tool._detect_resources,
             )
         )
         
@@ -286,12 +400,15 @@ class WorkerAgent:
         from flagscale_agent.react.tools.plan_create import PlanCreateTool
         from flagscale_agent.react.tools.plan_update import PlanUpdateTool
         from flagscale_agent.react.tools.plan_status import PlanStatusTool
+        from flagscale_agent.react.tools.recall_search import RecallSearchTool
         self.tool_registry.register(MemoryWriteTool(self.memory, self._session_id, task_plan=self.task_plan))
         self.tool_registry.register(MemoryReadTool(self.memory))
         self.tool_registry.register(MemoryListTool(self.memory))
+        self.tool_registry.register(ProposalTool(self.proposals, self._session_id))
         self.tool_registry.register(PlanCreateTool(self.task_plan, self._session_id))
         self.tool_registry.register(PlanUpdateTool(self.task_plan))
         self.tool_registry.register(PlanStatusTool(self.task_plan))
+        self.tool_registry.register(RecallSearchTool(self._session_dir))
         
         # Web and infrastructure tools
         self.tool_registry.register(WebFetchTool(proxies=self._build_proxies()))
@@ -318,6 +435,14 @@ class WorkerAgent:
 
     def _refresh_system_prompt(self, memory_context: str = "", plan_context: str = ""):
         tool_names = [t.name for t in self.tool_registry.all_tools()]
+        # Feed the runtime gauges to the dashboard before each rebuild.
+        try:
+            self._prompt_builder.runtime_stats = {
+                "evict_count": self._evict_count,
+                "budget": self._task_budget_stats(),
+            }
+        except Exception:
+            pass  # dashboard degrades to existing lines, never crashes the turn
         self._prompt_builder.refresh(
             history=self.history,
             active_skill_content={},
@@ -331,8 +456,146 @@ class WorkerAgent:
     # ── Health judge (delegates to unified Judge) ───────────────────────────
 
     def _health_judge(self, command: str, recent_output: str, elapsed: str,
-                      output_changed: bool = True, stall_count: int = 0) -> dict:
-        return self.judge.health(command, recent_output, elapsed, output_changed, stall_count)
+                      output_changed: bool = True, stall_count: int = 0,
+                      activity: str = "", command_history: str = "",
+                      container_resources: str = "", health_advisory: str = "",
+                      **_ignored) -> dict:
+        # The shell monitor loop forwards richer context (command_history,
+        # container_resources, health_advisory). Accept and forward the fields
+        # judge.health understands; **_ignored absorbs any future field the
+        # loop adds without breaking this call (a mismatch here silently
+        # disables the whole LLM judge, since the bounded worker swallows the
+        # TypeError and returns None).
+        expectation = self._current_expectation_anchor()
+        return self.judge.health(
+            command, recent_output, elapsed, output_changed, stall_count,
+            expectation=expectation, activity=activity,
+            command_history=command_history,
+            container_resources=container_resources,
+            task_budget=self._task_budget_summary(),
+        )
+
+    def _task_budget_stats(self) -> dict | None:
+        """Resolve the whole-task wall-clock budget as structured numbers.
+
+        Returns a dict {elapsed, budget, remaining, pct} (all floats/seconds)
+        ONLY when a concrete per-turn wall exists, from either source (config
+        field time_budget_sec, e.g. via --time-budget-sec, takes precedence over
+        the env var FLAGSCALE_AGENT_TIME_BUDGET_SEC that an external harness
+        injects). Returns None otherwise.
+
+        Design: the tb-adapter always exports this env to the value it actually
+        enforces via asyncio.wait_for (the real harbor wall, or its own concrete
+        fallback). The ONLY case where the env is unset is a standalone /
+        interactive run with NO external time enforcement — there, a real
+        deadline does not exist, so we must NOT fabricate one. In particular we
+        deliberately do NOT fabricate a large code-uniformity default (e.g.
+        24h): reporting that as a "budget" would tell the agent (and the health
+        judge) it has abundant time and invite it to work leisurely. Unset /
+        unparseable / non-positive env => None => no budget
+        reporting anywhere (the health prompt stays byte-identical to the
+        no-budget version, and the TimeBudgetGuard stays silent).
+
+        Elapsed is measured from the CURRENT turn's start (self._turn_start,
+        re-stamped each _react_loop), not from session start: an interactive
+        session may span many turns over hours, and only the active turn's time
+        is meaningful against a per-task budget. In single-shot mode a turn is
+        the whole session, so the two coincide.
+        """
+        # Config field (e.g. via --time-budget-sec) takes precedence; fall back
+        # to the env var that an external harness injects. Either source carries
+        # the same meaning: a per-turn wall-clock budget that drives time
+        # warnings + wrap-up (it is NOT a hard kill on its own).
+        budget = None
+        cfg_budget = getattr(self.config, "time_budget_sec", 0.0) or 0.0
+        if cfg_budget and cfg_budget > 0:
+            budget = float(cfg_budget)
+        else:
+            raw = os.environ.get("FLAGSCALE_AGENT_TIME_BUDGET_SEC", "").strip()
+            if not raw:
+                # No external harness enforcing a wall -> no real deadline exists.
+                return None
+            try:
+                budget = float(raw)
+            except (TypeError, ValueError):
+                # Unparseable -> treat as no injected wall rather than fabricating
+                # the 24h default.
+                return None
+        if budget <= 0:
+            # Explicit 0 / negative disables budget reporting.
+            return None
+        elapsed = max(0.0, time.time() - self._turn_start)
+        remaining = budget - elapsed
+        pct = (elapsed / budget) * 100.0 if budget else 0.0
+        return {
+            "elapsed": elapsed,
+            "budget": budget,
+            "remaining": remaining,
+            "pct": pct,
+        }
+
+    def _task_budget_summary(self) -> str:
+        """Free-text summary of cumulative wall-clock vs the injected budget.
+
+        Returns "" when no concrete wall was injected (see _task_budget_stats),
+        so the health prompt stays byte-identical to the no-budget version and
+        no 24h-default figure ever leaks to the judge. When a real wall exists,
+        reports elapsed-since-turn-start, the total, percent used and remaining.
+        """
+        stats = self._task_budget_stats()
+        if stats is None:
+            return ""
+
+        def _fmt(sec: float) -> str:
+            sec = int(max(0.0, sec))
+            m, s = divmod(sec, 60)
+            h, m = divmod(m, 60)
+            if h:
+                return f"{h}h{m:02d}m"
+            return f"{m}m{s:02d}s"
+
+        return (
+            f"cumulative task time elapsed {_fmt(stats['elapsed'])} of total budget "
+            f"{_fmt(stats['budget'])} ({stats['pct']:.0f}% used, "
+            f"~{_fmt(stats['remaining'])} remaining)"
+        )
+
+    def _current_expectation_anchor(self) -> str:
+        """Assemble an expectation anchor from the active plan's current step.
+
+        The anchor is whatever the agent declared for the step it is executing —
+        its title, scratchpad notes, and acceptance criteria. This is where the
+        agent states intent BEFORE acting, so the health judge can test the live
+        run against it. Returns "" when there is no active plan or no in-progress
+        step, which keeps health monitoring in its generic no-anchor mode.
+        """
+        try:
+            plan = self.task_plan.get_active()
+        except Exception:
+            return ""
+        if not plan:
+            return ""
+        steps = plan.get("steps") or []
+        # Prefer the step currently marked "doing"; fall back to the first
+        # pending step so the anchor still reflects imminent intent.
+        current = next((s for s in steps if s.get("status") == "doing"), None)
+        if current is None:
+            current = next((s for s in steps if s.get("status") == "pending"), None)
+        if current is None:
+            return ""
+        parts = []
+        title = (current.get("title") or "").strip()
+        if title:
+            parts.append(f"Current step: {title}")
+        notes = (current.get("notes") or "").strip()
+        if notes:
+            parts.append(f"Notes: {notes}")
+        acceptance = current.get("acceptance") or []
+        if acceptance:
+            joined = "; ".join(str(a).strip() for a in acceptance if str(a).strip())
+            if joined:
+                parts.append(f"Acceptance: {joined}")
+        return "\n".join(parts)
 
     def _judge_confirm(self, category: str, matched_text: str, context: str = "") -> bool:
         return self.judge.classify(category, {"text": matched_text, "context": context}, default=True)
@@ -345,9 +608,61 @@ class WorkerAgent:
         except Exception:
             pass
 
+    def _install_signal_handlers(self):
+        """Persist the trajectory on termination signals.
+
+        atexit does NOT run on SIGTERM (default disposition terminates the
+        process without stack unwinding, so no atexit and no finally:) nor on
+        SIGKILL. Harbor / Terminal-Bench enforces timeouts by sending SIGTERM
+        first, then SIGKILL after a grace period. SIGKILL is uncatchable, but
+        SIGTERM is — installing a handler lets us flush conversation/memory to
+        disk before the process dies, covering the common timeout case.
+
+        signal.signal() only works on the main thread; in worker threads or
+        embedded contexts it raises ValueError, which we swallow (atexit +
+        the single-shot finally: still apply there).
+        """
+        def _handler(signum, frame):
+            try:
+                self._save_conversation(completed=False)
+            except Exception:
+                pass
+            # Reap any still-running background shell jobs so a timeout kill
+            # does not leave orphaned build/train processes behind.
+            try:
+                from flagscale_agent.react.tools.shell import _JOB_REGISTRY
+                _JOB_REGISTRY.cleanup_all()
+            except Exception:
+                pass
+            # Restore the default disposition and re-raise so the process
+            # exits with the correct signal status instead of swallowing the
+            # termination request.
+            try:
+                signal.signal(signum, signal.SIG_DFL)
+                os.kill(os.getpid(), signum)
+            except Exception:
+                # Last resort: exit with the conventional 128+signum code.
+                os._exit(128 + signum)
+
+        for _sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                signal.signal(_sig, _handler)
+            except (ValueError, OSError):
+                # Not on the main thread, or signal unsupported on this
+                # platform — rely on atexit / finally fallbacks instead.
+                pass
+
     def _save_conversation(self, completed: bool = False, session_summary: str = None):
         if not self.history.messages:
             return
+        # Keep the resume-list preview in sync with the actual conversation.
+        # If no explicit summary is provided, regenerate one from the current
+        # input history on EVERY save — otherwise a summary written by an old
+        # crash/exception save stays frozen on disk forever (session.py
+        # preserves any existing session_summary), so the resume list shows
+        # stale turns while turn_count keeps advancing.
+        if session_summary is None and self._session_input_history:
+            session_summary = self._generate_session_summary()
         save_conversation(
             self._session_dir, self._session_id,
             self.history.messages,
@@ -485,12 +800,21 @@ class WorkerAgent:
                     "is being compacted to free up context space. Summarize the FULL work "
                     "state in a structured format that will allow seamless continuation.\n\n"
                     "Include:\n"
-                    "1. TASK: What is being worked on (one paragraph)\n"
+                    "1. TASK: What is being worked on (one paragraph). State the task's "
+                    "hard constraints VERBATIM (exact version, tool, format, method the task "
+                    "named) — these are the task's identity and must survive compaction intact.\n"
                     "2. PROGRESS: Key steps completed, decisions made, paths/values discovered\n"
                     "3. CURRENT STATE: What was just happening, any pending operations\n"
                     "4. NEXT STEPS: What to do next\n"
                     "5. CRITICAL CONTEXT: File paths, configs, error messages, any values "
-                    "that would be lost without this summary\n\n"
+                    "that would be lost without this summary\n"
+                    "6. CONSTRAINTS & RULED-OUT APPROACHES: Every approach ALREADY TRIED AND "
+                    "REJECTED and WHY (e.g. 'downgrading to v3.7 is NOT acceptable — task "
+                    "requires v2.2', 'config X deadlocks', 'path Y is a dead end'). This is the "
+                    "MOST easily lost and MOST damaging to lose: after compaction you will "
+                    "re-infer the task from leftover files and risk reverting to a degraded "
+                    "approach you already proved wrong. Preserve these negative constraints "
+                    "explicitly — a ruled-out approach stays ruled out after compaction.\n\n"
                     f"{plan_info}\n\n"
                     "Be comprehensive but concise. This summary replaces the full conversation "
                     "history. Output the summary directly, no preamble."
@@ -544,6 +868,13 @@ class WorkerAgent:
         parts.append(f"Reset count: {self.history._reset_count}")
         parts.append(f"Full conversation log: {self._session_dir}/conversation_full.json")
         parts.append("\nUse read_file on conversation_full.json or memory_list() for more context.")
+        parts.append(
+            "\n[!] CONSTRAINTS WARNING: This compaction may have dropped the task's hard "
+            "constraints and the approaches you already ruled out. Before acting, recover them "
+            "from plan notes and memory (memory_read/memory_list) — do NOT re-infer the task "
+            "from leftover files in the workdir and revert to a degraded approach you already "
+            "rejected. A ruled-out approach stays ruled out."
+        )
 
         return "\n".join(parts)
 
@@ -611,6 +942,12 @@ class WorkerAgent:
         # Generate session summary before saving
         summary = self._generate_session_summary()
         self._save_conversation(completed=False, session_summary=summary)
+        # Reap any still-running background shell jobs before exiting.
+        try:
+            from flagscale_agent.react.tools.shell import _JOB_REGISTRY
+            _JOB_REGISTRY.cleanup_all()
+        except Exception:
+            pass
         sys.exit(0)
 
     # ── Main entry ──────────────────────────────────────────────────────────
@@ -654,23 +991,86 @@ class WorkerAgent:
             """Enter always submits (even in multiline mode)."""
             event.current_buffer.validate_and_handle()
 
-        session = PromptSession(
-            history=FileHistory(history_file),
-            completer=completer,
-            multiline=True,
-            key_bindings=kb,
-            style=PromptStyle.from_dict({
-                "prompt": "#87d787 bold",
-                "": "#e4e4e4",
-            }),
+        def _build_session():
+            return PromptSession(
+                history=FileHistory(history_file),
+                completer=completer,
+                multiline=True,
+                key_bindings=kb,
+                style=PromptStyle.from_dict({
+                    "prompt": "#87d787 bold",
+                    "": "#e4e4e4",
+                }),
+            )
+
+        session = _build_session()
+
+        # ── Interactive input watchdog ──
+        # prompt_toolkit can occasionally wedge on its input fd: the process
+        # stays alive and the pane keeps rendering, but keystrokes are never
+        # consumed (observed as a main thread parked in ep_poll while stdin
+        # has pending, unread bytes). guard_state["at_prompt"] is True only
+        # while blocked in session.prompt(), so a long model/tool turn can
+        # never trip the watchdog. On a confirmed wedge it escalates to
+        # SIGINT; watchdog_state["tripped"] then tells the except below to
+        # rebuild the prompt session instead of treating it as a user exit.
+        from flagscale_agent.react.prompt_watchdog import PromptWatchdog
+        guard_state = {"at_prompt": False}
+        watchdog_state = {"tripped": False}
+
+        def _on_watchdog_sigint():
+            watchdog_state["tripped"] = True
+
+        def _pending_input_backlog() -> bool:
+            """Keys read off the tty but not yet dispatched by prompt_toolkit.
+
+            The classic wedge leaves bytes unread in the kernel (caught by
+            ``select``). A second wedge class has the reader *consume* the
+            keystroke and then stall before dispatching it, so ``select`` on the
+            fd sees nothing while the key sits in prompt_toolkit's userspace
+            queues. Consult both ``KeyProcessor.input_queue`` (fed but not
+            processed) and ``Vt100Input._buffer`` (parsed but not fed).
+            """
+            app = getattr(session, "app", None)
+            if app is None:
+                return False
+            kp = getattr(app, "key_processor", None)
+            if kp is not None and getattr(kp, "input_queue", None):
+                return True
+            inp = getattr(app, "input", None)
+            buf = getattr(inp, "_buffer", None) if inp is not None else None
+            return bool(buf)
+
+        watchdog = PromptWatchdog(
+            is_at_prompt=lambda: guard_state["at_prompt"],
+            on_sigint=_on_watchdog_sigint,
+            pending_probe=_pending_input_backlog,
+            logger=display.warn,
         )
+        watchdog.start()
 
         while True:
+            guard_state["at_prompt"] = True
             try:
                 user_input = session.prompt([("class:prompt", "> ")]).strip()
             except (EOFError, KeyboardInterrupt):
+                guard_state["at_prompt"] = False
+                if watchdog_state["tripped"]:
+                    # A wedged input loop was broken by the watchdog: rebuild a
+                    # fresh prompt session and keep going rather than exiting.
+                    watchdog_state["tripped"] = False
+                    display.warn("input loop was stuck — prompt session rebuilt")
+                    try:
+                        session = _build_session()
+                    except Exception:
+                        pass
+                    continue
                 self._exit()
                 break
+            except BaseException:
+                guard_state["at_prompt"] = False
+                raise
+            guard_state["at_prompt"] = False
 
             if not user_input:
                 continue
@@ -698,19 +1098,63 @@ class WorkerAgent:
 
 
     def _run_single_shot(self, query: str):
+        # Unsupervised run: the plan (with acceptance/verification) stands in
+        # for the absent human supervisor, so PlanGuard enforces it (block
+        # after an observation budget) rather than merely reminding.
+        if getattr(self, "_plan_guard", None) is not None:
+            self._plan_guard.set_single_shot(True)
+        # Same rationale: no human to nudge toward setup discipline, so the
+        # StartupGuard enables its single-shot phases (NetworkProbePhase requiring
+        # a lightweight probe before the first heavy net op, and ResearchPhase
+        # requiring one research pass before real work).
+        if getattr(self, "_startup_guard", None) is not None:
+            self._startup_guard.set_single_shot(True)
         self._inject_context()
         self.history.append({"role": "user", "content": query})
         try:
             self._react_loop()
         except Exception:
             display.warn("WorkerAgent._run_single_shot() react loop failed")
+        finally:
+            # Headless single-shot has no per-turn REPL save (unlike the
+            # interactive loop), so persist explicitly here to guarantee a
+            # normally-completed run is durable. A harness timeout that kills
+            # the process mid-run is handled separately by the SIGTERM handler
+            # installed in _install_signal_handlers().
+            self._auto_save()
+            try:
+                from flagscale_agent.react.tools.shell import _JOB_REGISTRY
+                _JOB_REGISTRY.cleanup_all()
+            except Exception:
+                pass
 
     def _restore_session(self, data: dict, session_dir: str):
         """Restore a previous session - take over its session_id and dir."""
-        # Take over the old session identity
+        # Concurrency guard: refuse to bind a directory another live agent
+        # process holds. This must happen BEFORE any state is re-pointed.
+        holder = get_session_lock_holder(session_dir)
+        if holder:
+            print(display.red(
+                f"[resume] REFUSED: session directory is held by another live agent "
+                f"process (PID {holder.get('pid')}, started {holder.get('start', '?')}: "
+                f"{holder.get('cmd', '?')}). Two processes writing the same session "
+                f"would corrupt each other's history. Resume a different session or "
+                f"stop the holder first."
+            ))
+            raise SessionLockedError(session_dir, holder)
+
+        # Rebinding: release the old directory's lock only after the new one
+        # is secured. Same-dir rebind (already-bound directory re-restored)
+        # and cross-dir rebind both end holding exactly one lock.
         old_session_dir = self._session_dir
+        old_lock_fd = getattr(self, "_session_lock_fd", None)
+        new_lock_fd = acquire_session_lock(session_dir)  # raises SessionLockedError if taken meanwhile
         self._session_id = data.get("session_id", self._session_id)
         self._session_dir = session_dir
+        if new_lock_fd is not old_lock_fd:
+            if old_lock_fd is not None:
+                release_session_lock(old_lock_fd)
+            self._session_lock_fd = new_lock_fd
 
         # Re-point plan to old session's dirs
         self.task_plan._dir = os.path.join(session_dir, "plans")
@@ -722,14 +1166,47 @@ class WorkerAgent:
             swap_store=SwapStore(os.path.join(session_dir, "swap_store")),
         )
 
-        # Clean up the empty new session dir if it's different
-        if old_session_dir != session_dir:
+        # Re-point recall_search to the restored session's log. The tool captured
+        # self._session_dir at registration time (the fresh, empty dir __init__
+        # created); after a resume/reload rebind it must search the RESTORED
+        # directory's conversation_full.json, not the abandoned one. Registry
+        # register() overwrites by name, so re-registering replaces the instance.
+        from flagscale_agent.react.tools.recall_search import RecallSearchTool
+        self.tool_registry.register(RecallSearchTool(session_dir))
+
+        # Same capture-at-registration problem for tools that captured
+        # self._session_id: restore has just replaced _session_id, but the old
+        # instances would keep tagging memory entries / plans with the
+        # abandoned fresh session id. Re-register under the restored id.
+        from flagscale_agent.react.tools.memory_write import MemoryWriteTool
+        from flagscale_agent.react.tools.plan_create import PlanCreateTool
+        self.tool_registry.register(MemoryWriteTool(
+            self.memory, self._session_id, task_plan=self.task_plan))
+        self.tool_registry.register(PlanCreateTool(self.task_plan, self._session_id))
+        # Re-register the proposal tool under the restored session id (same
+        # capture-at-registration issue as memory_write/plan_create above).
+        self.tool_registry.register(ProposalTool(self.proposals, self._session_id))
+
+        # Clean up the empty new session dir if it's different. The emptiness
+        # predicate must ignore dotfiles (the lock file lives there) AND empty
+        # subdirectories (SwapStore/TaskPlan __init__ makedirs their dirs), else
+        # a fresh dir that only ever held .session.lock + swap_store/ is never
+        # removed and empty shells accumulate across reloads.
+        if old_session_dir != session_dir and dir_empty_except_lock(old_session_dir):
             try:
                 import shutil
-                if os.path.isdir(old_session_dir) and not os.listdir(old_session_dir):
-                    shutil.rmtree(old_session_dir, ignore_errors=True)
+                shutil.rmtree(old_session_dir, ignore_errors=True)
             except Exception:
                 pass
+
+        # Opportunistic sweep: every resume/reload is a natural point to reap
+        # stale empty shells (abandoned __init__ dirs from past reloads) across
+        # the whole sessions root. Three-condition guard inside: empty-except-
+        # lock + no live lock holder + mtime older than CLEAN_MIN_AGE_SEC.
+        try:
+            clean_stale_empty_sessions(self._sessions_root)
+        except Exception:
+            pass
 
         # Restore _full_log from conversation_full.json if it exists.
         # This preserves the complete audit trail across /reload and hard resets.
@@ -882,6 +1359,14 @@ class WorkerAgent:
             return
 
         session_dir = get_session_dir(target["session_id"])
+        # Concurrency guard before reading state: if another live agent holds
+        # this directory, refuse. Continuing here would fork the history.
+        holder = get_session_lock_holder(session_dir)
+        if holder:
+            err = SessionLockedError(session_dir, holder)
+            print(display.red(f"\n[reload] REFUSED: {err}\n"
+                              f"[reload] Stop the other agent process first, then retry /reload.\n"))
+            sys.exit(1)
         # Load full conversation data (find_resumable_sessions only returns metadata)
         conv_path = os.path.join(session_dir, "conversation.json")
         try:
@@ -913,6 +1398,15 @@ class WorkerAgent:
         steps = active.get("steps", [])
         icons = {"pending": "⬜", "doing": "🔄", "done": "✅", "skipped": "⏭", "blocked": "🚫"}
         lines = [f'<active-plan title="{active.get("title", "")}">']
+        # Plan-level problem model (the agent's CURRENT hypothesis). Rendered in
+        # full — never truncated — so the dashboard can carry it permanently.
+        # Absent/empty thinking omits the block entirely (byte-identical to the
+        # pre-hypothesis behavior).
+        thinking = (active.get("thinking") or "").strip()
+        if thinking:
+            lines.append("<current-hypothesis>")
+            lines.append(thinking)
+            lines.append("</current-hypothesis>")
         current_step = None
         for s in steps:
             icon = icons.get(s.get("status", "pending"), "?")
@@ -941,6 +1435,17 @@ class WorkerAgent:
         sessions = find_resumable_sessions(self._sessions_root)
         if sessions:
             hints.append(f"{len(sessions)} resumable session(s) - use /resume to restore")
+        # Surface unreviewed harness-improvement proposals at startup (not in the
+        # dashboard) so a long-pending one is visible before the next wrap-up.
+        try:
+            n_open = self.proposals.open_count()
+        except Exception:
+            n_open = 0
+        if n_open:
+            hints.append(
+                f"{n_open} open improvement proposal(s) awaiting review - "
+                "will be re-reported at wrap-up"
+            )
         return hints
 
     def _check_proxy(self):
@@ -968,6 +1473,7 @@ class WorkerAgent:
     def _react_loop(self):
         """Kernel-based react loop."""
         self.turn_count += 1
+        self._turn_start = time.time()
         self._interrupted = False
         self._turn_iteration_count = 0
         self._context_pressure_warned = False
@@ -992,6 +1498,16 @@ class WorkerAgent:
         for tc in tool_calls:
             self._last_tool_calls_deque.append(tc["name"])
         self._total_iterations += 1
+
+        # Count evicted messages (dashboard gauge: shows the agent how much
+        # context it has already swapped out this session).
+        for tc in tool_calls:
+            if tc["name"] == "evict":
+                n = (tc.get("arguments") or {}).get("indexes") or []
+                try:
+                    self._evict_count += len(n)
+                except TypeError:
+                    pass
 
         # Refresh system prompt if plan tools were used
         if any(tc["name"] in ("plan_create", "plan_update", "plan_status")
@@ -1095,8 +1611,21 @@ class WorkerAgent:
         tool_calls_by_id = {}
         current_tool = None
         stream_truncated = False
+        reasoning_only = False
+        thinking_capped = False
         usage = {}
         self._streaming_in_code_block = False
+
+        # ── Runtime thinking cap (see thinking_cap.py) ──
+        # Abort a monolithic thinking stream once it reaches
+        # config.thinking_budget estimated tokens. cap_budget <= 0 disables
+        # the cap entirely (default config → behavior identical to before).
+        # Only trips while the response is PURE thinking: once text or tool
+        # calls exist, the response already has visible output and aborting
+        # would only truncate genuine work.
+        from flagscale_agent.react.thinking_cap import ThinkingCapCounter
+        cap_budget = getattr(self.config, "thinking_budget", 0) or 0
+        thinking_counter = ThinkingCapCounter()
 
         stream = retry_with_backoff(
             lambda: self.provider.chat_stream(messages, schemas),
@@ -1106,6 +1635,9 @@ class WorkerAgent:
         thinking_cleared = False
         streaming_trailing_newlines = 0
         streaming_started = False
+        sentinel_stripper = display.SentinelStripper()
+        thinking_text = ""
+        thinking_signature = ""
 
         def compress_newlines(text, trailing_from_prev, is_first):
             if not text:
@@ -1143,7 +1675,15 @@ class WorkerAgent:
                         display.thinking_done()
                         thinking_cleared = True
                     if event["type"] == "text":
-                        text = event["content"]
+                        # Keep the RAW text for the kernel's completion gate...
+                        content_parts.append(event["content"])
+                        # ...but strip completion sentinels from what reaches the
+                        # screen, so a gate-blocked [TASK_COMPLETE] never shows up
+                        # with authority before the gate runs (kernel prints the
+                        # authoritative marker only once completion is accepted).
+                        text = sentinel_stripper.feed(event["content"])
+                        if not text:
+                            continue
                         text, streaming_trailing_newlines = compress_newlines(
                             text, streaming_trailing_newlines, not streaming_started)
                         if text:
@@ -1159,7 +1699,6 @@ class WorkerAgent:
                             if fence_count % 2 == 1:
                                 self._streaming_in_code_block = not self._streaming_in_code_block
                         display._write(text)
-                        content_parts.append(event["content"])
                     elif event["type"] == "tool_start":
                         # Clear thinking spinner on first tool call
                         if not thinking_cleared:
@@ -1178,6 +1717,42 @@ class WorkerAgent:
                         target = tool_calls_by_id.get(delta_id, current_tool) if delta_id else current_tool
                         if target:
                             target["arguments_json"] += event["arguments_delta"]
+                    elif event["type"] == "reasoning_only":
+                        if not content_parts and not tool_calls:
+                            reasoning_only = True
+                    elif event["type"] == "thinking":
+                        thinking_text += event["content"]
+                        if display._use_color():
+                            display._write(display.dim(event["content"]))
+                        else:
+                            display._write(event["content"])
+                        # ── Runtime cap check ──
+                        if not thinking_capped and not content_parts and not tool_calls:
+                            thinking_counter.add(event["content"])
+                            capped_now, _capped_at = thinking_counter.state(cap_budget)
+                            if capped_now:
+                                thinking_capped = True
+                                reasoning_only = True
+                                display._write(
+                                    display.dim(
+                                        f"\n[thinking reached {cap_budget} token cap — forcing convergence]"
+                                    )
+                                )
+                                # Abort the stream. The kernel re-injects the
+                                # accumulated thinking as a user message with a
+                                # convergence directive, so the reasoning is
+                                # segmented, not lost.
+                                break
+                    elif event["type"] == "thinking_start":
+                        if not thinking_cleared:
+                            display.thinking_done()
+                            thinking_cleared = True
+                        display._write(display.dim("💭 thinking...\n"))
+                    elif event["type"] == "block_stop":
+                        if thinking_text:
+                            display._write(display.dim("\n"))
+                    elif event["type"] == "signature":
+                        thinking_signature += event["content"]
                     elif event["type"] == "usage":
                         usage = {
                             "input_tokens": event.get("input_tokens"),
@@ -1187,6 +1762,13 @@ class WorkerAgent:
                         }
                     elif event["type"] == "done":
                         break
+                if thinking_capped:
+                    # Release the underlying HTTP stream promptly instead of
+                    # waiting for GC (we abandoned the generator mid-iteration).
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
                 break
             except KeyboardInterrupt:
                 if not thinking_cleared:
@@ -1216,6 +1798,16 @@ class WorkerAgent:
                     continue
                 raise
 
+        # Flush any residual held-back text (a partial that never completed into
+        # a sentinel, e.g. from a truncated stream) — it is genuine text.
+        residual = sentinel_stripper.flush()
+        if residual:
+            residual, streaming_trailing_newlines = compress_newlines(
+                residual, streaming_trailing_newlines, not streaming_started)
+            if residual:
+                streaming_started = True
+                display._write(display.blue(residual) if display._use_color() else residual)
+
         if content_parts:
             if streaming_trailing_newlines > 1 and display._use_color():
                 up = streaming_trailing_newlines - 1
@@ -1237,7 +1829,7 @@ class WorkerAgent:
             if not parsed_tool_calls:
                 parsed_tool_calls = None
 
-        return {"content": "".join(content_parts) or None, "tool_calls": parsed_tool_calls, "truncated": stream_truncated}, usage
+        return {"content": "".join(content_parts) or None, "tool_calls": parsed_tool_calls, "truncated": stream_truncated, "reasoning_only": reasoning_only, "thinking_capped": thinking_capped, "thinking": thinking_text or None, "signature": thinking_signature or None}, usage
 
     # ── Tool execution (delegated to ToolExecutor) ──────────────────────────
 

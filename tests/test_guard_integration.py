@@ -217,6 +217,13 @@ class TestOverride:
     def test_override_with_good_reason(self):
         """Guard accepts override with substantive reason (>20 chars)."""
         reg = _make_registry([HardBlockGuard()])
+        
+        # Surface the block first
+        ctx_surface = _ctx("dangerous_tool", override_reason="")
+        v_surf = reg.check_pre(ctx_surface)
+        assert v_surf is not None  # Block surfaced
+        
+        # Now override
         ctx = _ctx("dangerous_tool",
                    override_reason="This is needed for production hotfix deployment to resolve outage")
         v = reg.check_pre(ctx)
@@ -312,6 +319,34 @@ class TestMemoryDisciplineE2E:
 
         assert g.accept_override("Already saved findings to disk, no memory needed", _ctx()) is True
         assert g._calls_since_memory == 0
+
+    # ── actionable-copy anchors (proactive recall, not vague reminders) ──
+
+    def test_inject_copy_names_concrete_actions(self):
+        """Inject message must offer the RECALL/WRITE/DIGEST action chain."""
+        from flagscale_agent.react.guard.memory_discipline import MemoryDisciplineGuard
+        g = MemoryDisciplineGuard()
+        ctx = _ctx("shell")
+
+        for _ in range(10):
+            v = g.check_pre(ctx)
+        assert v is not None and v.action == "inject"
+        # concrete recall command forms, not vague "consider..."
+        assert "memory_read(key='pitfall/" in v.message
+        assert "memory_write()" in v.message
+        assert "RECALL" in v.message and "WRITE" in v.message
+
+    def test_block_copy_names_domain_recall(self):
+        """Block message must name a whole-domain pitfall recall command."""
+        from flagscale_agent.react.guard.memory_discipline import MemoryDisciplineGuard
+        g = MemoryDisciplineGuard()
+        ctx = _ctx("shell")
+
+        for _ in range(30):
+            v = g.check_pre(ctx)
+        assert v is not None and v.action == "block"
+        assert "memory_read(key='pitfall/<domain>/')" in v.message
+        assert "memory_list(keyword='...')" in v.message
 
     def test_counter_persists_across_turns(self):
         """reset_new_turn does NOT reset counter — memory gap persists."""

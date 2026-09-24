@@ -1,7 +1,10 @@
 # know-source-analysis
 # 分析标准方法论：基础设施源码分析、模型实现分析、论文技术报告调研、硬件与通信基础设施分析的文档产出规范
 
-## analysis_standards/01_infrastructure_analysis.md (333 lines)
+# To read a section: load_knowledge(name='know-source-analysis', doc='<path below>', start_line=<L>, end_line=<L>)
+# Do NOT pass these doc paths to read_file — they are knowledge-internal.
+
+## analysis_standards/01_infrastructure_analysis.md (345 lines)
 L1: 训练基础设施源码分析标准
   L13: 一、核心原则
   L27: 二、文档结构模板
@@ -31,16 +34,17 @@ L32: 第N章：[主题名称] 深度源码分析
   L202: 六、示例产出指标
     L206: know-megatron-model（7章，平均 ~561 行）
     L218: know-megatron-parallel（6章，平均 ~595 行）
-    L229: know-te-comm（5章，平均 ~559 行）
-    L239: know-energon（6章，平均 ~345 行）
-    L250: know-cuda-optimization（7章，平均 ~293 行）
-    L262: know-cuda-kernel（8章，平均 ~251 行）
-    L275: know-torch-distributed（5章，平均 ~381 行）
-    L285: know-flash-attn（5章，平均 ~361 行）
-    L295: know-profiling（5章，平均 ~277 行）
-    L305: know-flagscale（6章，平均 ~184 行）
-    L316: 其他知识组汇总
-    L328: 总结
+    L229: know-te-comm（5章，平均 ~562 行）
+    L239: know-megatron-training（6章，平均 ~352 行）
+    L250: know-energon（6章，平均 ~345 行）
+    L261: know-cuda-optimization（7章，平均 ~293 行）
+    L273: know-cuda-kernel（8章，平均 ~251 行）
+    L286: know-torch-distributed（5章，平均 ~381 行）
+    L296: know-flash-attn（5章，平均 ~361 行）
+    L306: know-profiling（5章，平均 ~277 行）
+    L316: know-flagscale（6章，平均 ~216 行）
+    L327: 其他知识组汇总
+    L340: 总结
 
 ## analysis_standards/02_implementation_analysis.md (191 lines)
 L1: 模型训练实现分析标准

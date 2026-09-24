@@ -107,6 +107,20 @@ class TestShellTool:
         result = tool.execute(command="bash -c 'echo running; sleep 10'")
         assert "TERMINATED" in result
 
+    def test_kill_message_redirects_agent_away_from_variants(self):
+        # Regression: after a health-monitor kill, the agent relaunched
+        # near-identical variants. The TERMINATED message must tell the agent
+        # this was a monitor decision and to change method class, not rerun.
+        tool = ShellTool(
+            remind_interval=1,
+            health_judge_fn=lambda cmd, out, t, **kw: {"kill": True, "reason": "stalled loop"},
+        )
+        result = tool.execute(command="bash -c 'echo running; sleep 10'")
+        assert "TERMINATED" in result
+        low = result.lower()
+        assert "health monitor" in low
+        assert "do not relaunch" in low or "change your method" in low
+
     def test_empty_command_returns_error(self):
         tool = ShellTool()
         result = tool.execute(command="")
@@ -127,7 +141,7 @@ class TestShellTool:
 class TestHealthJudge:
     def test_health_judge_kills_on_first_interval(self):
         """health_judge_fn can kill even on the first check — no stall threshold needed."""
-        def judge(cmd, output, elapsed, output_changed=True, stall_count=0):
+        def judge(cmd, output, elapsed, output_changed=True, stall_count=0, **kw):
             return {"kill": True, "reason": "Repeated connection errors"}
 
         tool = ShellTool(
@@ -141,7 +155,7 @@ class TestHealthJudge:
     def test_health_judge_continue(self):
         """health_judge_fn says continue → command runs to completion."""
         judge_calls = []
-        def judge(cmd, output, elapsed, output_changed=True, stall_count=0):
+        def judge(cmd, output, elapsed, output_changed=True, stall_count=0, **kw):
             judge_calls.append(1)
             return {"kill": False, "reason": "Looks fine"}
 
@@ -157,7 +171,7 @@ class TestHealthJudge:
     def test_health_judge_receives_stall_info(self):
         """health_judge_fn receives output_changed=False and stall_count when output stalls."""
         received = []
-        def judge(cmd, output, elapsed, output_changed=True, stall_count=0):
+        def judge(cmd, output, elapsed, output_changed=True, stall_count=0, **kw):
             received.append({"output_changed": output_changed, "stall_count": stall_count})
             if stall_count >= 2:
                 return {"kill": True, "reason": "Stalled too long"}
@@ -175,7 +189,7 @@ class TestHealthJudge:
 
     def test_health_judge_overrides_legacy_stall(self):
         """When health_judge_fn is set, legacy stall detection is bypassed."""
-        def judge(cmd, output, elapsed, output_changed=True, stall_count=0):
+        def judge(cmd, output, elapsed, output_changed=True, stall_count=0, **kw):
             return {"kill": False, "reason": "Let it run"}
 
         tool = ShellTool(
@@ -282,6 +296,52 @@ class TestToolRegistry:
         schemas = reg.to_schemas("openai")
         assert len(schemas) == 2
         assert all(s["type"] == "function" for s in schemas)
+
+
+class TestRequiredArgPrevalidation:
+    """Registry catches missing required args BEFORE dispatch (schema-driven)."""
+
+    def test_missing_required_friendly_error_no_traceback(self):
+        reg = ToolRegistry()
+        reg.register(ReadFileTool())
+        result = reg.execute("read_file")
+        assert result.startswith("ERROR: required argument(s) missing")
+        assert "path" in result
+        assert "KeyError" not in result
+
+    def test_missing_reports_all_names(self, tmp_path):
+        reg = ToolRegistry()
+        reg.register(EditFileTool())
+        result = reg.execute("edit_file", path=str(tmp_path / "f.txt"))
+        assert "old_string" in result and "new_string" in result
+
+    def test_empty_value_counts_as_missing(self, tmp_path):
+        reg = ToolRegistry()
+        reg.register(WriteFileTool())
+        result = reg.execute("write_file", path=str(tmp_path / "f.txt"), content="")
+        assert "content" in result
+
+    def test_memory_write_missing_key_blocked_before_dispatch(self):
+        from flagscale_agent.react.tools.memory_write import MemoryWriteTool
+        reg = ToolRegistry()
+        reg.register(MemoryWriteTool(None))  # execute() never reached on this path
+        result = reg.execute("memory_write", type="fact", content="x")
+        assert "key" in result
+
+    def test_plan_update_missing_action_blocked_before_dispatch(self):
+        from flagscale_agent.react.tools.plan_update import PlanUpdateTool
+        reg = ToolRegistry()
+        reg.register(PlanUpdateTool(None))  # execute() never reached on this path
+        result = reg.execute("plan_update")
+        assert "action" in result
+
+    def test_valid_call_unaffected(self, tmp_path):
+        f = tmp_path / "ok.txt"
+        reg = ToolRegistry()
+        reg.register(WriteFileTool())
+        result = reg.execute("write_file", path=str(f), content="hello")
+        assert "ERROR" not in result
+        assert f.read_text() == "hello"
 
 
 class TestEditFileReplaceAll:

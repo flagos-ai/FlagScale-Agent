@@ -39,6 +39,61 @@ def _write(text):
         sys.stdout.flush()
 
 
+# Completion sentinels the kernel gates on. They must NOT be streamed to the
+# terminal as the model types them, because the completion gate runs only after
+# the full response is received — streaming the raw token makes a *blocked*
+# completion appear on screen with authority ("[TASK_COMPLETE]" then a 🚫 block),
+# looking as if the gate fired after the fact. The kernel prints the authoritative
+# marker itself, only once completion is actually accepted.
+COMPLETION_SENTINELS = ("[TASK_COMPLETE]", "[NEED_USER_INPUT]")
+
+
+class SentinelStripper:
+    """Streaming filter that removes completion sentinels from displayed text.
+
+    Handles sentinels split across arbitrary stream-delta boundaries by holding
+    back only the trailing substring that could still be the start of a sentinel.
+    The RAW text is kept by the caller (content_parts) for the kernel's gate;
+    this only affects what reaches the screen.
+    """
+
+    def __init__(self, sentinels=COMPLETION_SENTINELS):
+        self._sentinels = tuple(sentinels)
+        self._buf = ""
+
+    @staticmethod
+    def _held_suffix_len(buf, sentinels):
+        """Longest k such that buf[-k:] is a proper prefix of some sentinel."""
+        best = 0
+        for s in sentinels:
+            maxk = min(len(buf), len(s) - 1)
+            for k in range(maxk, 0, -1):
+                if s.startswith(buf[-k:]):
+                    if k > best:
+                        best = k
+                    break
+        return best
+
+    def feed(self, text):
+        """Consume a text delta; return the portion safe to display now."""
+        self._buf += text
+        for s in self._sentinels:
+            self._buf = self._buf.replace(s, "")
+        hold = self._held_suffix_len(self._buf, self._sentinels)
+        emit = self._buf[:len(self._buf) - hold] if hold else self._buf
+        self._buf = self._buf[len(self._buf) - hold:] if hold else ""
+        return emit
+
+    def flush(self):
+        """Return any residual buffered text at end of stream.
+
+        A leftover here is a partial that never completed into a sentinel (e.g. a
+        truncated stream), so it is genuine text and should be shown.
+        """
+        out, self._buf = self._buf, ""
+        return out
+
+
 def _enable_windows_ansi() -> bool:
     """Enable ANSI escape processing on Windows via SetConsoleMode.
 
@@ -204,6 +259,7 @@ _TOOL_ICONS = {
     "flagscale_train_monitor": "🚂",
     "evict": "🗑️",
     "recall": "↩️",
+    "shell_jobs": "🧵",
 
 }
 
@@ -451,7 +507,11 @@ def tool_start(name, args_summary=""):
         label += f" {args_summary}"
     # Display full label without truncation for reviewer visibility
     _print(dim(label), end="", flush=True)
-    if name == "shell":
+    # shell always spins (blocks for the whole run). shell_jobs only spins on
+    # 'wait', which blocks up to `timeout`s — list/poll/kill return instantly
+    # and read better inline.
+    spins = name == "shell" or (name == "shell_jobs" and args_summary.startswith("wait"))
+    if spins:
         _active_spinner = _Spinner()
         _print()
         _active_spinner.start()
@@ -666,6 +726,18 @@ def guard_inject(message):
     _print(f"  🛡 {dim(lines[0].strip())}")
     for line in lines[1:]:
         _print(f"     {dim(line.strip())}")
+
+
+def completion_signal(sentinel):
+    """Display the authoritative completion marker AFTER the gate has passed.
+
+    The raw sentinel is stripped from the live stream (SentinelStripper), so this
+    is the single place the marker reaches the screen — only once the kernel's
+    completion gate accepted the completion. This guarantees the marker never
+    appears before, or alongside, a gate block.
+    """
+    _print()
+    _print(green(bold(sentinel)) if _use_color() else sentinel)
 
 
 def guard_block(message):

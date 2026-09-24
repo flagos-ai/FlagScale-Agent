@@ -8,7 +8,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-0.1.0-green.svg)](https://github.com/FlagOpen/FlagScale-Agent)
+[![Version](https://img.shields.io/badge/version-0.1.0-green.svg)](https://github.com/flagos-ai/FlagScale-Agent)
 
 </div>
 
@@ -20,7 +20,7 @@ FlagScale-Agent 是一个专注于大规模分布式训练、推理和服务基�
 
 **为什么选择 FlagScale-Agent？**
 
-- **领域专业化** — 内置 20 个技能和 13 个知识域，涵盖 Megatron-LM、TransformerEngine、NCCL、FlashAttention 等
+- **领域专业化** — 内置 23 个技能和 13 个知识域，涵盖 Megatron-LM、TransformerEngine、NCCL、FlashAttention 等
 - **自主且安全** — 多层 Guard 系统（inject/block/escalate 机制）防止失控执行
 - **持久化智能** — 跨会话记忆系统（fact/pitfall/insight）积累发现和经验教训
 - **结构化执行** — 带验收标准和验证关卡的计划系统确保质量
@@ -38,7 +38,7 @@ FlagScale-Agent 是一个专注于大规模分布式训练、推理和服务基�
 ### 安装
 
 ```bash
-git clone https://github.com/FlagOpen/FlagScale-Agent.git
+git clone https://github.com/flagos-ai/FlagScale-Agent.git
 cd FlagScale-Agent
 pip install -e .
 ```
@@ -115,13 +115,15 @@ Guard 系统有三种工作模式：
 - `train-precision-alignment` — 调试跨迁移的精度不匹配
 - `train-model-porter` — 从 HuggingFace 移植模型到 Megatron-LM
 - `train-reproduce` — 从论文/代码库复现训练结果
+- `train-moe-perf` — 分析和优化 MoE 训练性能
 
 **推理技能：**
 - `infer-env-setup` — 配置 vllm-plugin-FL 推理环境
 - `infer-model-adapt` — 适配新模型到 vllm-plugin-FL
 - `infer-vllm-hw-adapt` — 移植 vllm-plugin-FL 到新硬件后端
 - `infer-sglang-hw-adapt` — 移植 sglang-plugin-FL 到新硬件后端
-- `infer-plugin-upgrade` — 升级 vllm-plugin-FL 到新 vLLM 版本
+- `infer-vllm-plugin-upgrade` — 升级 vllm-plugin-FL 到新 vLLM 版本
+- `infer-sglang-plugin-upgrade` — 升级 sglang-plugin-FL 到新 SGLang 版本
 - `infer-precision-check` — 验证推理输出正确性
 
 **基础设施技能：**
@@ -129,6 +131,8 @@ Guard 系统有三种工作模式：
 - `workspace-layout` — 标准化工作空间目录管理
 - `debug-strategy` — 系统化调试方法论
 - `ops-discipline` — 通用运维最佳实践
+- `te-upstream-sync` — 将 TransformerEngine-FL 与上游版本同步
+- `mg-fl-upstream-sync` — 将 Megatron-LM-FL 与上游版本同步
 
 技能会根据任务自动加载。使用 `load_skill(name)` 手动加载。
 
@@ -635,8 +639,8 @@ FlagScale-Agent/
 
 ## 📬 联系
 
-- **GitHub Issues：** [https://github.com/FlagOpen/FlagScale-Agent/issues](https://github.com/FlagOpen/FlagScale-Agent/issues)
-- **讨论区：** [https://github.com/FlagOpen/FlagScale-Agent/discussions](https://github.com/FlagOpen/FlagScale-Agent/discussions)
+- **GitHub Issues：** [https://github.com/flagos-ai/FlagScale-Agent/issues](https://github.com/flagos-ai/FlagScale-Agent/issues)
+- **讨论区：** [https://github.com/flagos-ai/FlagScale-Agent/discussions](https://github.com/flagos-ai/FlagScale-Agent/discussions)
 
 ---
 

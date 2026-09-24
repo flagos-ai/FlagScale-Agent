@@ -12,6 +12,8 @@ Usage:
     python generate_index.py --config /path/to/config.yaml --docs /path/to/docs --output /path/to/indexes
 """
 
+from __future__ import annotations
+
 import argparse
 import os
 import re
@@ -66,6 +68,12 @@ def generate_index_for_group(
                 src = sources[first_dir]
                 lines.append(f"# Source: {src.get('repo', first_dir)} @ {src.get('commit', 'unknown')}")
 
+    lines.append("")
+    lines.append(
+        "# To read a section: load_knowledge(name='"
+        f"{group_name}', doc='<path below>', start_line=<L>, end_line=<L>)"
+    )
+    lines.append("# Do NOT pass these doc paths to read_file — they are knowledge-internal.")
     lines.append("")
 
     doc_paths = group_config.get("docs", [])

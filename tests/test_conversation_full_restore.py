@@ -24,6 +24,7 @@ def _make_agent_mock(session_dir):
     agent.history = HistoryManager(max_context_tokens=200000)
     agent._session_id = "test123"
     agent._session_dir = session_dir
+    agent._session_lock_fd = None  # no real lock held by this fake agent
     agent._loaded_skills = set()
     agent._session_input_tokens = 0
     agent._session_output_tokens = 0

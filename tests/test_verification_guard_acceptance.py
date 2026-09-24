@@ -15,6 +15,9 @@ def test_step_with_acceptance_requires_verification():
         plan.create("Test", [{"title": "Step A", "acceptance": ["A1", "A2"]}])
         
         guard = VerificationGuard(plan=plan)
+        # isolate the Mode 1 acceptance check from the one-shot premise re-check
+        # block that now fires first on the run's initial step_done.
+        guard._step_done_recheck_reminded = True
         ctx = GuardContext(
             tool_name="plan_update",
             tool_args={"action": "step_done", "step_id": 1}
@@ -30,6 +33,56 @@ def test_step_with_acceptance_requires_verification():
         shutil.rmtree(d)
 
 
+def test_acceptance_block_asks_for_observed_expected_gap():
+    """The block message must pose the three-slot self-check question (observed/
+    expected/gap), not merely 'provide verification'. This is the pseudo-question
+    → self-check-question reconstruction: the message forces the agent to name a
+    concrete observed value, and having no value to write is itself the signal the
+    criterion is unverified."""
+    d = tempfile.mkdtemp()
+    try:
+        plan = TaskPlan(d)
+        plan.create("Test", [{"title": "Step A", "acceptance": ["A1"]}])
+        guard = VerificationGuard(plan=plan)
+        guard._step_done_recheck_reminded = True
+        ctx = GuardContext(
+            tool_name="plan_update",
+            tool_args={"action": "step_done", "step_id": 1},
+        )
+        verdict = guard.check_pre(ctx)
+        assert verdict is not None and verdict.action == "block"
+        m = verdict.message.lower()
+        assert "observed" in m
+        assert "expected" in m
+        assert "gap" in m
+        # must warn against filling the slot with an invented value
+        assert "invent" in m or "no concrete observed" in m
+    finally:
+        shutil.rmtree(d)
+
+
+def test_noacceptance_block_asks_for_observed_value():
+    """The no-acceptance block must ask what was OBSERVED, not just request an
+    _override_reason string."""
+    d = tempfile.mkdtemp()
+    try:
+        plan = TaskPlan(d)
+        plan.create("Test", [{"title": "Step A"}])
+        guard = VerificationGuard(plan=plan)
+        guard._step_done_recheck_reminded = True
+        ctx = GuardContext(
+            tool_name="plan_update",
+            tool_args={"action": "step_done", "step_id": 1},
+        )
+        verdict = guard.check_pre(ctx)
+        assert verdict is not None and verdict.action == "block"
+        m = verdict.message.lower()
+        assert "observe" in m
+        assert "_override_reason" in verdict.message
+    finally:
+        shutil.rmtree(d)
+
+
 def test_step_with_acceptance_passes_with_verification():
     """Step with acceptance passes when verification provided."""
     d = tempfile.mkdtemp()
@@ -38,6 +91,8 @@ def test_step_with_acceptance_passes_with_verification():
         plan.create("Test", [{"title": "Step A", "acceptance": ["A1", "A2"]}])
         
         guard = VerificationGuard(plan=plan)
+        # isolate the Mode 1 acceptance check from the one-shot premise re-check block
+        guard._step_done_recheck_reminded = True
         ctx = GuardContext(
             tool_name="plan_update",
             tool_args={
@@ -61,6 +116,8 @@ def test_step_without_acceptance_requires_override():
         plan.create("Test", ["Simple step"])
         
         guard = VerificationGuard(plan=plan)
+        # isolate the Mode 2 override check from the one-shot premise re-check block
+        guard._step_done_recheck_reminded = True
         ctx = GuardContext(
             tool_name="plan_update",
             tool_args={"action": "step_done", "step_id": 1}
@@ -70,6 +127,7 @@ def test_step_without_acceptance_requires_override():
         assert verdict is not None
         assert verdict.action == "block"
         assert "_override_reason" in verdict.message
+        assert verdict.reason == "step_done_no_verification"
     finally:
         shutil.rmtree(d)
 

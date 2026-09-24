@@ -80,7 +80,7 @@ This is where most porting failures happen. Megatron's data pipeline is tightly 
 
 ### 3.1 How `get_batch` Works in Megatron
 
-Megatron's `get_batch_on_this_tp_rank()` (in `megatron/training/utils.py`) handles the TP/PP data distribution:
+Megatron's `get_batch_on_this_tp_rank()` (in `megatron/core/utils.py` since v0.18.2; formerly `megatron/training/utils.py`) handles the TP/PP data distribution:
 
 ```
 DataLoader (DP rank) → get_batch_on_this_tp_rank() → model forward

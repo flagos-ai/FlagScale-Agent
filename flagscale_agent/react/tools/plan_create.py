@@ -23,9 +23,9 @@ from flagscale_agent.react.tools.base import Tool
 class PlanCreateTool(Tool):
     name = "plan_create"
     description = (
-        "Create a task plan with ordered steps for complex multi-step work. "
-        "Use when starting environment setup, model porting, training runs, "
-        "or any task with 3+ sequential steps. Only one plan can be active at a time."
+        "Create a task plan with ordered steps for multi-step work. "
+        "Use when about to produce a deliverable or act on a task. "
+        "Only one plan can be active at a time."
     )
     parameters = {
         "type": "object",
@@ -53,6 +53,19 @@ class PlanCreateTool(Tool):
                     ]
                 },
                 "description": "Ordered list of step descriptions (strings) or structured steps (objects with title and optional acceptance).",
+            },
+            "thinking": {
+                "type": "string",
+                "description": (
+                    "Optional but recommended for hard/open-ended tasks: your CURRENT "
+                    "model of the problem — the bottleneck, the load-bearing hypothesis, "
+                    "the evidence for it, and a FALSIFIABLE prediction for the next move "
+                    "('if I change X, metric should move to ~Y'). This is the HOME for "
+                    "deliberate/deep reasoning, distinct from fast action. Leave empty when "
+                    "the task is mechanical and fast action is clearly right; fill it when "
+                    "the task needs a theory before you act. You can update it later via "
+                    "plan_update(thinking=...)."
+                ),
             },
         },
         "required": ["title", "steps"],
@@ -98,8 +111,10 @@ class PlanCreateTool(Tool):
         if not normalized:
             return "ERROR: At least one step is required."
         
+        thinking = kwargs.get("thinking", "") or ""
+
         try:
-            plan = self._plan.create(title, normalized, self._session_id)
+            plan = self._plan.create(title, normalized, self._session_id, thinking=thinking)
             return f"Plan created.\n\n{self._plan.summary()}"
         except Exception as e:
             return f"ERROR: {e}"

@@ -1,6 +1,9 @@
 # know-megatron-model
 # Megatron模型层：Transformer抽象、MLA/MTP、RoPE、混合精度、MoE、内存优化
-# Source: Megatron-LM-FL @ c024887
+# Source: Megatron-LM-FL @ e15cb692
+
+# To read a section: load_knowledge(name='know-megatron-model', doc='<path below>', start_line=<L>, end_line=<L>)
+# Do NOT pass these doc paths to read_file — they are knowledge-internal.
 
 ## megatron_lm_fl/06_mixed_precision_fp8.md (674 lines)
 L1: 第六章：混合精度与 FP8 训练

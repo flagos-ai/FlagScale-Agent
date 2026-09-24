@@ -2,6 +2,9 @@
 # 性能分析全链路：Nsys时间线、NCU kernel分析、PyTorch Profiler、Megatron内置profiler集成
 # Source: Profiling-Analysis @ docs-only
 
+# To read a section: load_knowledge(name='know-profiling', doc='<path below>', start_line=<L>, end_line=<L>)
+# Do NOT pass these doc paths to read_file — they are knowledge-internal.
+
 ## profiling/01_profiling_tools_overview.md (276 lines)
 L1: Chapter 01: Profiling工具体系总览
   L3: 1. 设计动机

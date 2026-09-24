@@ -1,6 +1,9 @@
 # know-megatron-parallel
 # Megatron并行机制：TP/PP/DP/CP/EP进程组创建、通信模式、流水线调度
-# Source: Megatron-LM-FL @ c024887
+# Source: Megatron-LM-FL @ e15cb692
+
+# To read a section: load_knowledge(name='know-megatron-parallel', doc='<path below>', start_line=<L>, end_line=<L>)
+# Do NOT pass these doc paths to read_file — they are knowledge-internal.
 
 ## megatron_lm_fl/01_pipeline_parallel.md (579 lines)
 L1: 01 - Pipeline Parallelism (PP) 完整分析

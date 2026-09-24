@@ -21,6 +21,7 @@
 | 5 | **边界与约束** | 标明前置条件、不适用场景、与其他特性的互斥关系 |
 | 6 | **内部一致性** | 同一文档各节详细度匹配，不能有的 10 行有的 50 行 |
 | 7 | **横向对比** | 相似机制之间必须有对比表格（性能/适用场景/trade-off） |
+| 8 | **出处可解析** | 引用出处必须是仓库内相对路径或公开文献标识（arXiv 号/官方仓库/官方博客）——**禁止引用本地绝对路径**（如个人工作区 `/workspace/<user>/...`，其他机器/容器不可见）；本地分析笔记、无公开报告的内部走读只能作为"来源性质声明"（注明非公开文献、引用须标注），不得以路径形式挂为知识出处 |
 
 ---
 
@@ -201,7 +202,7 @@ Delayed Scaling 用前 N 步的 amax 历史推导 scale factor：
 
 ## 六、示例产出指标
 
-基于知识库已有的 **83 篇文档**实践数据（覆盖 17 个知识组，总计 ~32,891 行）：
+基于知识库已有的 **89 篇文档**实践数据（覆盖 19 个知识组，总计 ~34,387 行）：
 
 ### know-megatron-model（7章，平均 ~561 行）
 
@@ -226,15 +227,26 @@ Delayed Scaling 用前 N 步的 amax 历史推导 scale factor：
 | 05_expert_parallelism | 05 - Expert Parallelism (EP) & Mixture-of-Experts 源码深度分析 | 604 |
 | 15_parallel_state | parallel_state 进程组管理 深度源码分析 | 461 |
 
-### know-te-comm（5章，平均 ~559 行）
+### know-te-comm（5章，平均 ~562 行）
 
 | 章节 | 主题 | 行数 |
 |------|------|------|
 | 05_userbuffers_comm_gemm_overlap | 第五章：Userbuffers & Comm-GEMM Overlap 系统深度源码分析 | 559 |
 | 07_distributed_tp_integration | Chapter 07: 分布式通信与张量并行集成 — 源码深度分析 | 596 |
 | 08_cpu_offload_cuda_graph | Chapter 08: CPU Offload & CUDA Graph — 源码深度分析 | 636 |
-| 09_megatron_integration | Chapter 09: Megatron-LM 集成接口 — 源码深度分析 | 652 |
+| 09_megatron_integration | Chapter 09: Megatron-LM 集成接口 — 源码深度分析 | 669 |
 | 11_cuda_kernels | TE-FL 第11章：CUDA Kernel 层深度源码分析 | 352 |
+
+### know-megatron-training（6章，平均 ~352 行）
+
+| 章节 | 主题 | 行数 |
+|------|------|------|
+| 09_optimizer | 优化器系统 (Optimizer System) 源码深度解析 | 598 |
+| 12_dist_checkpointing | 分布式 Checkpoint 系统深度源码分析 | 565 |
+| 13_training_loop | 训练主循环与初始化 深度源码分析 | 410 |
+| 14_transformer_layer_spec | Transformer 层抽象与 ModuleSpec 系统 深度源码分析 | 384 |
+| 18_cuda_graph | CUDA Graph 配置面重构 (Megatron-LM v0.18.2) | 91 |
+| 19_core_structure | v0.18.2 结构变化与 FlagScale 训练代码归属 (Megatron-LM-FL e15cb6928) | 69 |
 
 ### know-energon（6章，平均 ~345 行）
 
@@ -320,14 +332,15 @@ Delayed Scaling 用前 N 步的 amax 历史推导 scale factor：
 | NCCL核心 | 3 | ~531 | 495-557 |
 | TransformerEngine注意力 | 3 | ~498 | 392-624 |
 | 集群基础设施 | 2 | ~490 | 424-557 |
-| Megatron训练循环 | 4 | ~488 | 379-598 |
+| 线性注意力FLA | 1 | ~470 | 470-470 |
 | NCCL运行时 | 4 | ~452 | 430-477 |
 | TransformerEngine FP8量化 | 3 | ~441 | 316-514 |
-| 分析标准方法论 | 4 | ~226 | 132-333 |
+| MoE预训练性能优化 | 3 | ~277 | 86-532 |
+| 分析标准方法论 | 4 | ~229 | 132-345 |
 
 ### 总结
 
-- 全库 83 篇文档，总计 **~32,891 行**
-- 核心深度分析章节：平均 **512 行**
-- 专题分析：平均 **293 行**
+- 全库 89 篇文档，总计 **~34,387 行**
+- 核心深度分析章节：平均 **511 行**
+- 专题分析：平均 **298 行**
 - 推荐标准：核心模块 ≥ 450 行，专题/工具类 ≥ 250 行

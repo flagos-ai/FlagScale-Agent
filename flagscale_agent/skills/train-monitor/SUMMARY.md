@@ -20,4 +20,4 @@ Monitor running FlagScale training jobs: locate logs, check health, detect anoma
 
 **Load when**: monitoring a running training job, diagnosing training anomalies (NaN loss, OOM, hangs), or needing to find/parse training logs.
 
-Key rule: always use `monitor(output_dir=...)` as primary method — it auto-discovers latest logs and scans stderr. Never use raw find commands (they find old logs). Check stderr first, not stdout.
+Key rule: always use `flagscale_train_monitor(output_dir=..., mode="check"|"watch")` as primary method — it auto-discovers latest logs and scans stderr. Never use raw find commands (they find old logs). Check stderr first, not stdout. Four loss-sanity gates: ln(vocab) cold start, gradient zeros share, params-norm freeze, loss trend.

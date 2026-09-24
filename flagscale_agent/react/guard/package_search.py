@@ -21,6 +21,8 @@ This avoids wasted time and incorrect assumptions about which copy is active.
 Exception: locating flagscale_agent's own source via python import is allowed.
 """
 
+from __future__ import annotations
+
 import re
 
 from flagscale_agent.react.guard import Guard, GuardContext, GuardVerdict

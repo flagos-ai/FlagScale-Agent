@@ -2,6 +2,9 @@
 # Megatron-Energon数据加载：架构总览、WebDataset存储索引、TaskEncoder编码、Metadataset混合、Wrappers组合、分布式断点恢复
 # Source: Megatron-Energon @ bef8be2
 
+# To read a section: load_knowledge(name='know-energon', doc='<path below>', start_line=<L>, end_line=<L>)
+# Do NOT pass these doc paths to read_file — they are knowledge-internal.
+
 ## megatron_energon/01_architecture_overview.md (370 lines)
 L1: 第1章：Megatron-Energon 架构总览与数据管道设计
   L3: 1. 概述与设计动机
@@ -34,7 +37,7 @@ L1: 第1章：Megatron-Energon 架构总览与数据管道设计
   L313: 9. 完整 get_batch 流程（Energon + Megatron 并行集成）
 L318: 伪代码：Megatron get_batch() 的并行感知逻辑
     L335: 9.1 DP 数据切分（Energon 直接处理）
-    L339: 9.2 TP broadcast_data（Megatron megatron/training/utils.py）
+    L339: 9.2 TP broadcast_data（Megatron megatron/core/tensor_parallel/data.py）
     L343: 9.3 PP pre_process/post_process 守卫（Megatron pipeline schedule）
   L347: 10. 设计决策对比
   L363: 11. 配置建议与调优指南

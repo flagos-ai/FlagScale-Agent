@@ -35,9 +35,28 @@ class ToolRegistry:
             raise KeyError(f"Tool not found: {name}")
         return self._tools[name]
 
+    @staticmethod
+    def _missing_required(tool: Tool, kwargs: dict) -> list:
+        """Required-arg names (from the tool's JSON schema) absent/empty in kwargs."""
+        required = (getattr(tool, "parameters", None) or {}).get("required") or []
+        return [name for name in required if kwargs.get(name) in (None, "", [], {})]
+
     def execute(self, tool_name: str, **kwargs) -> str:
-        """Execute a tool by name, with unified result truncation."""
+        """Execute a tool by name, with required-arg pre-validation and
+        unified result truncation.
+
+        Missing required arguments are caught BEFORE dispatch so the model gets
+        a friendly, actionable error instead of a KeyError traceback from deep
+        inside the tool.
+        """
         tool = self.get(tool_name)
+        missing = self._missing_required(tool, kwargs)
+        if missing:
+            return (
+                f"ERROR: required argument(s) missing for tool '{tool_name}': "
+                f"{', '.join(missing)}. Re-issue the call with these arguments "
+                f"(names/types per the tool schema)."
+            )
         result = tool.execute(**kwargs)
         if len(result) > tool.max_result_size:
             result = result[:tool.max_result_size] + f"\n... [truncated, total {len(result)} chars]"

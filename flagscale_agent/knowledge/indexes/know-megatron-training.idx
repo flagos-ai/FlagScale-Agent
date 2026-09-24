@@ -1,6 +1,9 @@
 # know-megatron-training
 # Megatron训练循环：初始化、forward/backward、optimizer step、checkpoint保存恢复
-# Source: Megatron-LM-FL @ c024887
+# Source: Megatron-LM-FL @ e15cb692
+
+# To read a section: load_knowledge(name='know-megatron-training', doc='<path below>', start_line=<L>, end_line=<L>)
+# Do NOT pass these doc paths to read_file — they are knowledge-internal.
 
 ## megatron_lm_fl/09_optimizer.md (598 lines)
 L1: 第9章：优化器系统 (Optimizer System) 源码深度解析
@@ -182,7 +185,7 @@ L347: 推荐配置（大模型训练）:
     L398: 12.2 WHY: 为什么需要独立随机种子管理？
   L406: 13. 源码版本信息
 
-## megatron_lm_fl/14_transformer_layer_spec.md (379 lines)
+## megatron_lm_fl/14_transformer_layer_spec.md (384 lines)
 L1: 第14章：Transformer 层抽象与 ModuleSpec 系统 深度源码分析
   L3: 1. 概述与设计动机
     L5: 1.1 核心问题
@@ -215,13 +218,32 @@ L245: transformer_block.py forward():
   L257: 7. 层变体继承体系 (L1419-2160)
     L259: 7.1 类层次
     L274: 7.2 MoETransformerLayer 扩展 (L1914+)
-  L295: 8. Selective Recomputation (L486-555)
-    L297: 8.1 粒度控制
-L300: 通过 config.recompute_modules 精确选择重计算的子模块:
-    L308: 8.2 WHY: 为什么 selective 比 full 更好？
-  L318: 9. Fine-Grained Activation Offloading (L556-565)
-L321: 按模块粒度卸载激活到 CPU:
-  L337: 10. CUDA Graph 集成 (L575-594)
-  L354: 11. 设计决策对比
-  L364: 12. 与其他章节的关联
-  L373: 13. 源码版本信息
+  L297: 8. Selective Recomputation (L486-555)
+    L299: 8.1 粒度控制
+L302: 通过 config.recompute_modules 精确选择重计算的子模块:
+    L310: 8.2 WHY: 为什么 selective 比 full 更好？
+  L320: 9. Fine-Grained Activation Offloading (L556-565)
+L323: 按模块粒度卸载激活到 CPU:
+  L339: 10. CUDA Graph 集成 (L575-594)
+  L359: 11. 设计决策对比
+  L369: 12. 与其他章节的关联
+  L378: 13. 源码版本信息
+
+## megatron_lm_fl/18_cuda_graph.md (91 lines)
+L1: 第18章：CUDA Graph 配置面重构 (Megatron-LM v0.18.2)
+  L6: 1. 重构概览
+  L20: 2. 新枚举定义 (enums.py)
+  L38: 3. 配置字段 (TransformerConfig)
+  L57: 4. 归一化 / 迁移 API (cuda_graph_config.py)
+  L69: 5. 迁移对照表
+  L79: 6. 运行时消费点
+  L88: 7. 何时读本章
+
+## megatron_lm_fl/19_core_structure.md (69 lines)
+L1: 第19章：v0.18.2 结构变化与 FlagScale 训练代码归属 (Megatron-LM-FL e15cb6928)
+  L6: 1. 两仓职责分工（最常犯错的点）
+  L16: 2. FlagScale 侧训练代码结构 (实测)
+  L33: 3. megatron/training/ 目录变化
+  L40: 4. megatron/core/ 新增模块 (v0.18.2)
+  L56: 5. 其他实测 API 变化
+  L65: 6. 何时读本章

@@ -324,7 +324,10 @@ class FlagScaleTrainMonitorTool(Tool):
         last_step_time = None
         last_step_number = 0
         last_stdout_size = 0
+        last_stderr_total = 0
         stderr_checked = {}
+        last_rediscover = time.time()
+        ever_uncertain = False
         hang_timeout = 600  # 10 min without step advance = hang
 
         # Wait for logs to appear
@@ -371,11 +374,22 @@ class FlagScaleTrainMonitorTool(Tool):
 
             poll_count += 1
 
-            # Re-discover logs (handles delayed creation)
-            if not stdout_log:
+            # Re-discover logs (handles delayed creation + stdout lock-in).
+            # Periodic: every 60s re-run discovery so that a stdout selector
+            # stuck on a non-growing file can switch to the real metric rank.
+            now_ts = time.time()
+            if not stdout_log or (now_ts - last_rediscover >= 60):
                 logs = self._discover_logs(output_dir)
-                stdout_log = logs.get("stdout_log", "")
-                stderr_logs = logs.get("stderr_logs", [])
+                last_rediscover = now_ts
+                if not logs.get("error"):
+                    new_stdout = logs.get("stdout_log", "")
+                    stderr_logs = logs.get("stderr_logs", [])
+                    if new_stdout != stdout_log:
+                        stdout_log = new_stdout
+                        last_stdout_size = 0
+                        events.append(
+                            f"[stdout switched to {stdout_log} at {int(elapsed)}s]"
+                        )
 
             # Read stdout
             current_size = 0
@@ -390,6 +404,19 @@ class FlagScaleTrainMonitorTool(Tool):
                     new_content = self._read_tail_from(stdout_log, last_stdout_size, 8192)
                     new_lines = new_content.splitlines()
                     last_stdout_size = current_size
+
+            # Stderr growth counts as liveness too: in remote/shared-storage
+            # setups the metric rank's stdout may stall while 64 stderr logs
+            # keep growing — stdout-only growth misses that heartbeat.
+            stderr_total = 0
+            for sp in stderr_logs:
+                try:
+                    stderr_total += os.path.getsize(sp)
+                except OSError:
+                    pass
+            if stderr_total > last_stderr_total:
+                last_log_growth = time.time()
+                last_stderr_total = stderr_total
 
             # Phase detection
             if not stdout_log or current_size == 0:
@@ -428,9 +455,16 @@ class FlagScaleTrainMonitorTool(Tool):
                     "stderr_error", poll_count, elapsed, events, stderr_error["lines"]
                 )
 
-            # Liveness check (multi-signal)
+            # Liveness check (multi-signal, three-state)
             alive = self._is_alive(phase, last_log_growth)
-            if not alive and phase not in ("startup",):
+            if alive == "uncertain":
+                if not ever_uncertain:
+                    ever_uncertain = True
+                    events.append(
+                        "[UNCERTAIN: no local liveness signal (remote/shared-storage run) "
+                        "and no log growth — NOT declaring DEAD]"
+                    )
+            elif alive is False and phase not in ("startup",):
                 # Final stderr scan
                 stderr_error = self._scan_stderr(stderr_logs, stderr_checked, elapsed)
                 if stderr_error:
@@ -439,6 +473,12 @@ class FlagScaleTrainMonitorTool(Tool):
                         "stderr_error", poll_count, elapsed, events, stderr_error["lines"]
                     )
                 events.append(f"[process DEAD at {int(elapsed)}s]")
+                events.append(
+                    "[if this is a remote/shared-storage run, verify directly: "
+                    "(1) grep 'elapsed time per iteration' <rank>/stdout.log "
+                    "(2) stat -c %Y <rank>/stdout.log "
+                    "(3) nvidia-smi --query-compute-apps=pid --format=csv,noheader]"
+                )
                 tail = self._read_tail(stdout_log, 20) if stdout_log else ["(no stdout)"]
                 return self._format_watch_result(
                     "process_dead", poll_count, elapsed, events, tail
@@ -457,6 +497,11 @@ class FlagScaleTrainMonitorTool(Tool):
             time.sleep(interval)
 
         # Timeout — return final state
+        if ever_uncertain and not any("metrics" in e for e in events):
+            events.append(
+                "[UNCERTAIN: watch ended with no confirmed liveness signal — "
+                "if this is a remote/shared-storage run, verify directly on the training node]"
+            )
         tail = self._read_tail(stdout_log, 20) if stdout_log else ["(no output)"]
         metrics = _parse_megatron_metrics("\n".join(tail))
         health = _health_check(metrics, vocab_size)
@@ -584,25 +629,110 @@ class FlagScaleTrainMonitorTool(Tool):
     def _is_alive(self, phase, last_log_growth_time):
         """Multi-signal liveness check for container environments.
 
-        Priority: log growth > GPU process > pgrep
+        Priority: log growth > GPU process > pgrep.
         Grace periods vary by training phase.
+
+        Returns tri-state: True (alive), False (all signals absent AND
+        at least one local signal available to prove absence), or
+        "uncertain" (all signals absent AND no local signal could be
+        probed — e.g. remote/shared-storage runs where nvidia-smi and
+        pgrep see only this agent's container). Callers must treat
+        "uncertain" as NOT proven dead.
         """
         now = time.time()
         since_growth = now - last_log_growth_time
 
         # Signal 1: log file recently grew (most reliable, no container issues)
         grace = {"startup": 60, "rendezvous": 120, "init": 300, "training": 120}
-        if since_growth < grace.get(phase, 120):
+        if since_growth < self.LIVENESS_GRACE_SECONDS.get(phase, 120):
             return True
 
         # Signal 2: GPU has compute processes (works if nvidia-smi accessible)
-        if self._gpu_has_compute_process():
-            return True
+        gpu_signal = self._gpu_has_compute_process()
 
         # Signal 3: pgrep (least reliable in containers, but useful as backup)
-        if self._pgrep_alive():
+        pgrep_signal = self._pgrep_alive()
+
+        if gpu_signal or pgrep_signal:
             return True
 
+        # Signals 2/3 found nothing. Only conclude death when this host
+        # could actually host the job — i.e. the watched output lives on
+        # LOCAL (non-network) storage. On shared/network storage the
+        # training usually runs on OTHER hosts, so local probes prove
+        # nothing (E62/E29 false-DEAD class).
+        if not self._is_network_storage():
+            return False
+
+        return "uncertain"
+
+    # Known-LOCAL filesystem types (stat -f -c %T strings). Only when the
+    # watched path PROVABLY lives on local storage can negative GPU/pgrep
+    # probes prove the training process dead. Anything else — nfs, lustre,
+    # or an UNRECOGNIZED type (many distributed FSes report
+    # "UNKNOWN (0x...)", e.g. 0x797083 on shared NVMe mounts) — is treated
+    # as network/shared storage where local probes prove nothing.
+    _LOCAL_FS_TYPES = {
+        "ext2/ext3", "ext4", "xfs", "btrfs", "zfs", "tmpfs", "overlay",
+        "ramfs", "f2fs", "jfs", "vfat", "exfat", "ntfs",
+    }
+
+    # Grace period (seconds without log growth) per phase before falling
+    # back to process probes. Class attribute so callers/tests can tighten
+    # it for fast end-to-end runs instead of sleeping through real waits.
+    LIVENESS_GRACE_SECONDS = {"startup": 60, "rendezvous": 120, "init": 300, "training": 120}
+
+    def _is_network_storage(self, path="."):
+        """True unless path is PROVEN to live on local (non-network) storage.
+
+        On shared/remote storage, stdout/stderr are written by training
+        hosts other than (possibly) the agent host, so GPU/pgrep probes on
+        the agent host cannot prove liveness either way. Unknown fs types
+        are treated as network storage: declaring a process dead requires
+        positive evidence, and an unclassifiable filesystem provides none
+        (a false "network" verdict only costs an UNCERTAIN report with
+        direct-check hints — real crashes still surface via stderr scan).
+        """
+        try:
+            result = subprocess.run(
+                ["stat", "-f", "-c", "%T", path],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                return result.stdout.strip().lower() not in self._LOCAL_FS_TYPES
+        except Exception:
+            pass
+        # Could not determine → cannot prove local → conservative.
+        return True
+
+    def _signals_available(self):
+        """True if at least one local liveness probe can actually run here.
+
+        In remote-SSH / shared-storage workflows the agent often runs on a
+        different host than the training job: nvidia-smi finds no GPUs and
+        pgrep finds no training processes — but that proves nothing about
+        the remote run. Returns False in that situation.
+        """
+        try:
+            result = subprocess.run(
+                "nvidia-smi -L", shell=True, capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return True
+        except Exception:
+            pass
+        # No local GPUs: if we are also running where torchrun would run, the
+        # pgrep probe is meaningful; if even pgrep itself fails (missing
+        # binary, restricted procfs), nothing local can prove liveness.
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", "torchrun|python.*train"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode in (0, 1):
+                return True
+        except Exception:
+            pass
         return False
 
     def _gpu_has_compute_process(self):

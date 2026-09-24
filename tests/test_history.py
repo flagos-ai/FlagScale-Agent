@@ -231,19 +231,19 @@ class TestContextPressureV3:
     def test_high_pressure(self):
         hm = HistoryManager(max_context_tokens=200000)
         hm.append({"role": "system", "content": "sys"})
-        # working_window = 200000 * 0.6 = 120000 tokens
-        # Need > 0.7 * 120000 = 84000 estimated tokens
-        # ASCII estimate: len / 4, so need > 336000 chars
-        hm.append({"role": "user", "content": "x" * 400000})
+        # working_window = 200000 * 0.75 = 150000 tokens
+        # Need > 0.7 * 150000 = 105000 estimated tokens
+        # ASCII estimate: len / 4, so need > 420000 chars
+        hm.append({"role": "user", "content": "x" * 500000})
         pressure = hm.get_context_pressure()
         assert pressure > 0.7
 
     def test_actual_tokens_used_when_higher(self):
         hm = HistoryManager(max_context_tokens=200000)
         hm.append({"role": "user", "content": "hi"})
-        # working_window = 120000 tokens
-        # Need >= 0.7 * 120000 = 84000 actual tokens
-        hm.report_actual_tokens(90000)
+        # working_window = 150000 tokens
+        # Need >= 0.7 * 150000 = 105000 actual tokens
+        hm.report_actual_tokens(120000)
         pressure = hm.get_context_pressure()
         assert pressure >= 0.7
 

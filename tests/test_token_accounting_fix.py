@@ -26,13 +26,13 @@ class TestContextPressureEstimation:
         """Context pressure should use character-based estimation, not single API call actual tokens."""
         hm = HistoryManager(max_context_tokens=200000)
         hm.append({"role": "system", "content": "sys"})
-        # working_window = 200000 * 0.6 = 120000 tokens
+        # working_window = 200000 * 0.75 = 150000 tokens
         # ASCII estimate: len / 4, so 40000 chars ≈ 10000 tokens
         hm.append({"role": "user", "content": "x" * 40000})
         
         pressure = hm.get_context_pressure()
         
-        # Estimated tokens ≈ 10000, pressure ≈ 10000/120000 ≈ 0.083
+        # Estimated tokens ≈ 10000, pressure ≈ 10000/150000 ≈ 0.067
         assert 0.05 < pressure < 0.15
 
     def test_pressure_includes_all_messages(self):
@@ -45,7 +45,7 @@ class TestContextPressureEstimation:
         
         pressure = hm.get_context_pressure()
         
-        # Total ≈ 30000 chars / 4 = 7500 tokens, pressure ≈ 7500/120000 ≈ 0.0625
+        # Total ≈ 30000 chars / 4 = 7500 tokens, pressure ≈ 7500/150000 ≈ 0.05
         assert 0.04 < pressure < 0.1
 
     def test_pressure_includes_evicted_placeholders(self):

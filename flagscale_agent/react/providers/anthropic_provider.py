@@ -27,9 +27,10 @@ from flagscale_agent.react.providers.base import LLMProvider
 class AnthropicProvider(LLMProvider):
     schema_format = "anthropic"
 
-    def __init__(self, model: str, api_key: str, base_url: str = None, max_tokens: int = 8192):
+    def __init__(self, model: str, api_key: str, base_url: str = None, max_tokens: int = 8192, thinking_budget: int = 0):
         self._model = model
         self._max_tokens = max_tokens
+        self._thinking_budget = thinking_budget
         self._api_key = api_key
         self._base_url = base_url
         self._is_third_party = base_url and "anthropic.com" not in base_url
@@ -69,10 +70,42 @@ class AnthropicProvider(LLMProvider):
     def _build_kwargs(self, messages, tools):
         system, chat_messages = self._split_system(messages)
         kwargs = {"model": self._model, "max_tokens": self._max_tokens, "messages": chat_messages}
+        if self._thinking_budget and self._thinking_budget > 0:
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": self._thinking_budget}
         if system:
-            kwargs["system"] = system
+            # Split static body from dynamic dashboard for prompt caching.
+            # The dashboard (Turn counter, memory keys) changes every turn and
+            # must be AFTER the cache_control breakpoint to avoid invalidating
+            # the cached static body (~22K chars / ~5.5K tokens).
+            sep = "\n---\n["
+            idx = system.find(sep)
+            if idx >= 0:
+                kwargs["system"] = [
+                    {"type": "text", "text": system[:idx], "cache_control": {"type": "ephemeral"}},
+                    {"type": "text", "text": system[idx:]},
+                ]
+            else:
+                kwargs["system"] = [
+                    {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}},
+                ]
         if tools:
             kwargs["tools"] = tools
+        # Add cache_control to the last message to cache conversation prefix.
+        # Copy to avoid mutating shared message references from history.
+        if chat_messages:
+            last = chat_messages[-1]
+            last_copy = dict(last)
+            content = last.get("content")
+            if isinstance(content, str):
+                last_copy["content"] = [
+                    {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}},
+                ]
+            elif isinstance(content, list):
+                content_copy = [dict(b) if isinstance(b, dict) else b for b in content]
+                if content_copy and isinstance(content_copy[-1], dict):
+                    content_copy[-1]["cache_control"] = {"type": "ephemeral"}
+                last_copy["content"] = content_copy
+            chat_messages[-1] = last_copy
         return kwargs
 
     def chat(self, messages: List[Dict[str, Any]], tools: List[dict]) -> Dict[str, Any]:
@@ -125,12 +158,20 @@ class AnthropicProvider(LLMProvider):
                     block = event.content_block
                     if block.type == "tool_use":
                         yield {"type": "tool_start", "id": block.id, "name": block.name}
+                    elif block.type == "thinking":
+                        yield {"type": "thinking_start"}
                 elif event.type == "content_block_delta":
                     delta = event.delta
                     if delta.type == "text_delta":
                         yield {"type": "text", "content": delta.text}
                     elif delta.type == "input_json_delta":
                         yield {"type": "tool_delta", "id": "", "arguments_delta": delta.partial_json}
+                    elif delta.type == "thinking_delta":
+                        yield {"type": "thinking", "content": delta.thinking}
+                    elif delta.type == "signature_delta":
+                        yield {"type": "signature", "content": delta.signature}
+                elif event.type == "content_block_stop":
+                    yield {"type": "block_stop"}
             
             # Get usage BEFORE closing the stream
             if stream_ctx is not None:
@@ -170,6 +211,12 @@ class AnthropicProvider(LLMProvider):
 
     def format_assistant_message(self, response: Dict[str, Any]) -> Dict[str, Any]:
         content_blocks = []
+        if response.get("thinking"):
+            content_blocks.append({
+                "type": "thinking",
+                "thinking": response["thinking"],
+                "signature": response.get("signature", ""),
+            })
         if response["content"]:
             content_blocks.append({"type": "text", "text": response["content"]})
         if response["tool_calls"]:
