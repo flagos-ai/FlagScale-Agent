@@ -20,7 +20,7 @@ FlagScale-Agent is an autonomous AI agent specialized in large-scale distributed
 
 **Why FlagScale-Agent?**
 
-- **Domain-Specialized** — 18 built-in skills and 13 knowledge domains covering Megatron-LM, TransformerEngine, NCCL, FlashAttention, and more
+- **Domain-Specialized** — 23 built-in skills and 13 knowledge domains covering Megatron-LM, TransformerEngine, NCCL, FlashAttention, and more
 - **Autonomous & Safe** — Multi-layer guard system with inject/block/escalate mechanisms prevents runaway execution
 - **Persistent Intelligence** — Cross-session memory system (fact/pitfall/insight) accumulates findings and lessons learned
 - **Structured Execution** — Plan system with acceptance criteria and verification gates ensures quality
@@ -122,12 +122,15 @@ Skills are domain-specific workflow guides that teach the agent how to handle sp
 - `train-precision-alignment` — Debug precision mismatches across migrations
 - `train-model-porter` — Port models from HuggingFace to Megatron-LM
 - `train-reproduce` — Reproduce training results from papers/repos
+- `train-moe-perf` — Analyze and optimize MoE training performance
 
 **Inference Skills:**
 - `infer-env-setup` — Set up vllm-plugin-FL inference environment
 - `infer-model-adapt` — Adapt new models to vllm-plugin-FL
-- `infer-hw-adapt` — Port vllm-plugin-FL to new hardware backends
-- `infer-plugin-upgrade` — Upgrade vllm-plugin-FL to new vLLM versions
+- `infer-vllm-hw-adapt` — Port vllm-plugin-FL to new hardware backends
+- `infer-sglang-hw-adapt` — Port sglang-plugin-FL to new hardware backends
+- `infer-vllm-plugin-upgrade` — Upgrade vllm-plugin-FL to new vLLM versions
+- `infer-sglang-plugin-upgrade` — Upgrade sglang-plugin-FL to new SGLang versions
 - `infer-precision-check` — Verify inference output correctness
 
 **Infrastructure Skills:**
@@ -135,6 +138,8 @@ Skills are domain-specific workflow guides that teach the agent how to handle sp
 - `workspace-layout` — Standardized workspace directory management
 - `debug-strategy` — Systematic debugging methodology
 - `ops-discipline` — General operational best practices
+- `te-upstream-sync` — Synchronize TransformerEngine-FL with upstream releases
+- `mg-fl-upstream-sync` — Synchronize Megatron-LM-FL with upstream releases
 
 Skills are automatically loaded based on task context. Use `load_skill(name)` to manually load.
 
