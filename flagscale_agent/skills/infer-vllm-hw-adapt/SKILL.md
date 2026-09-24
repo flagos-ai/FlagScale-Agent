@@ -34,8 +34,8 @@ Before editing, record:
 
 - backend, accelerator model, host/container, allocated devices, and driver;
 - base plugin branch/commit and target vLLM tag/commit;
-- Python, PyTorch/vendor fork, accelerator toolkit, communication library,
-  compiler, FlagTree/Triton, FlagGems, and plugin revisions;
+- Python, PyTorch/vendor fork, accelerator toolkit, compiler, FlagTree/Triton,
+  FlagGems, FlagCX, communication-library, and plugin revisions;
 - upstream vLLM and plugin roots, model paths, tests, logs, and CI scope;
 - validation modes requested: imports, unit/functional, offline, serving,
   tensor parallel, graph, multimodal, MoE, or benchmark.
@@ -112,6 +112,15 @@ upstream vLLM failure.
 
 ## Validate on the named hardware
 
+The backend acceptance environment must use the complete **FlagGems, FlagTree,
+and FlagCX** stack simultaneously. Pin and record all three revisions and their
+resolved paths. Prove FlagTree supplies the active Triton compiler/runtime,
+FlagGems executes the intended operator dispatch, and FlagCX executes a real
+collective or tensor-parallel path without silently falling back to NCCL or a
+vendor communication backend. Imports, isolated component tests, or partial
+stack runs do not count. If the backend cannot exercise any component, mark the
+acceptance gate blocked unless the user explicitly changes the requirement.
+
 Select a matrix from the affected paths. A substantial adaptation normally needs:
 
 - vLLM, plugin, platform, worker, model-runner, and vendor-extension imports;
@@ -125,21 +134,20 @@ Select a matrix from the affected paths. A substantial adaptation normally needs
 - explicit verification of dispatch choices and bounded fallbacks;
 - teardown checks so successful runs do not leave task-owned processes.
 
-The backend is accepted only after the vllm-plugin-FL unified runner completes
-every case enabled for the target platform/device. Inventory the exact case list
-with `--dry-run`, then run without scope/task/model/case filters:
+The backend is accepted only after every test under
+`tools/adaptation-gate-cases` passes. Run both documented Qwen3.6 models in eager
+and graph modes and execute all text, image, and mixed text-image single and
+eight-way concurrent scenarios through the committed serve/test scripts. At the
+current gate definition this is four model/mode groups, 20 pytest scenarios, and
+104 requests; derive the inventory from the submitted commit so new cases cannot
+be missed. Preserve every generated JSON result and its request-level assertions.
 
-```bash
-python tests/run.py --platform <platform> --device <device> --dry-run
-python tests/run.py --platform <platform> --device <device>
-```
-
-The discovered and executed case sets must match, and every case must pass.
-Missing weights/assets, unsupported-feature or automatic skips, unstarted cases,
-and infrastructure timeouts block acceptance. Report discovered, executed,
-passed, failed, skipped, and blocked counts with each non-pass case named.
-Focused tests are debugging evidence only and do not replace the complete tool
-matrix.
+The discovered and executed sets must match. Missing weights/fixtures, skips,
+filtered files, unstarted groups, and infrastructure timeouts block acceptance.
+Report discovered, executed, passed, failed, skipped, and blocked counts with
+each non-pass named. Focused tests and `tests/run.py` are supporting evidence
+only. Every gate process must use the same pinned environment with FlagGems,
+FlagTree, and FlagCX enabled together.
 
 Model loading, worker initialization, or HTTP readiness alone is not a pass.
 Require completed generation and a simple deterministic assertion. Record exact
@@ -152,23 +160,30 @@ import/unit evidence but mark offline and serving gates blocked. Do not translat
 
 ## CI and delivery
 
-When backend CI is in scope:
+CI integration is mandatory for a completed backend adaptation:
 
 - keep the platform registry, runner label, image, device selector, model mounts,
   and setup script consistent;
-- assert dependency versions and checkout import paths before tests;
+- assert dependency versions and checkout import/library paths before tests,
+  including the active FlagGems, FlagTree, and FlagCX builds;
 - use named long-running sessions for manual validation;
 - distinguish image-pull/setup time from test time and preserve completed jobs;
 - keep scarce or manual hardware out of automatic PR CI unless repository policy
   enables it;
 - verify an image is pullable and authorized before referencing it in CI;
+- update path triggers (including `tools/adaptation-gate-cases/**`), platform
+  YAML, matrices, reusable jobs, and aggregate status so the backend's applicable
+  adaptation-gate coverage runs and cannot be silently skipped;
+- upload per-case logs/results and fail required jobs on missing cases/assets;
 - do not include credentials, internal host configuration, temporary scripts, or
   standalone diagnostics in the PR.
 
 Run final tests on the exact submitted commit after integrating the latest base.
 The PR must separate current-HEAD passes, older supporting evidence, untested
-paths, infrastructure blockers, and intentional follow-ups. Runtime-compatible
-import changes on another vendor are not evidence that vendor was validated.
+paths, infrastructure blockers, and intentional follow-ups, and include the
+operator/compiler/collective evidence for the simultaneous three-component
+stack. Runtime-compatible import changes on another vendor are not evidence that
+vendor was validated.
 
 ## Related skills
 

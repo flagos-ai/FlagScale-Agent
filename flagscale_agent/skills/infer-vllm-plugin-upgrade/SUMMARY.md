@@ -31,8 +31,8 @@ runtime matrix -> rebase, rerun merge gates, and report auditable evidence.
 
 **Key principles**:
 
-- Treat vLLM, PyTorch, accelerator runtime, FlagTree/Triton, FlagGems, flashinfer,
-  and plugin revision as one tested compatibility tuple.
+- Treat vLLM, PyTorch, accelerator runtime, FlagTree/Triton, FlagGems, FlagCX,
+  flashinfer, and plugin revision as one tested compatibility tuple.
 - Preserve FL dispatch, vendor abstraction, graph capture, custom ops, I/O dumping,
   and explicit backend selection while inheriting new upstream behavior.
 - Use the official NVIDIA runtime as a reference where useful; use
@@ -45,8 +45,11 @@ runtime matrix -> rebase, rerun merge gates, and report auditable evidence.
   registers it, then verify no dangling references remain.
 - Separate current-HEAD evidence from pre-rebase supporting evidence and list
   untested hardware honestly.
-- Final acceptance requires the unfiltered `tests/run.py` matrix for the target
-  platform/device: every discovered case must execute and pass.
+- Final acceptance requires every case under `tools/adaptation-gate-cases`: both
+  Qwen3.6 models, eager and graph, and all text/image/mixed single and concurrent
+  scenarios must pass with FlagGems, FlagTree, and FlagCX enabled together.
+- CI must be updated for the adapted platform, full-stack setup, required gate
+  coverage, result artifacts, and non-skippable aggregate status.
 
 **Constraints**: never modify upstream vLLM, never hardcode CUDA device calls in
 shared paths, preserve unrelated work, install the plugin without changing the

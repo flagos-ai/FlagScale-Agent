@@ -31,20 +31,22 @@ validation → Stage 6 final review and PR.
 **Key principles**:
 
 - detect installed and declared versions before changing code;
-- treat SGLang, PyTorch, sglang-kernel, Triton/FlagTree, FlagGems, and
+- treat SGLang, PyTorch, sglang-kernel, Triton/FlagTree, FlagGems, FlagCX, and
   flashinfer as one tested tuple;
 - upgrade NVIDIA first and preserve other backend pins;
 - never patch installed SGLang source;
 - install PyTorch before FlagTree and remove standalone Triton when FlagTree
   provides the Triton module;
-- pin the tested FlagGems commit and keep NCCL as NVIDIA's default;
+- pin FlagGems, FlagTree, and FlagCX and prove all three are active together;
 - compare plugin inference with vanilla SGLang at the same version;
 - validate eager, serving, streaming, long decode, concurrency, and decode CUDA
   Graph on representative dense/hybrid and MoE paths;
 - keep docs and containerfiles outside the diff unless explicitly requested.
 
 **Completion gate**: no new unit regressions or temporary diagnostic overrides;
-representative models, every target-platform example, every enabled throughput,
-latency, and serve benchmark case, and a documented sustained pressure profile
-pass on NVIDIA; the PR reports exact dependencies, model/TP/graph coverage,
-fallbacks, and untested follow-ups.
+every target-platform example and every enabled concurrent E2E model/case and
+text/VL/mixed mode passes on NVIDIA; CI is updated for example/concurrent
+coverage, result artifacts, and full-stack setup; the PR reports exact
+dependencies, model/TP/graph/concurrency coverage, fallbacks, and untested
+follow-ups. A silent NCCL fallback or separately tested components do not
+satisfy the full-stack gate.

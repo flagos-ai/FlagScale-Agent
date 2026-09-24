@@ -31,4 +31,8 @@ applicable -> integrate resource-aware CI -> report exact-head evidence.
 explicit, distinguish decode from prefill graph claims, separate image-pull
 failures from test results, and never use historical or cached-image evidence as
 a substitute for current-head real-device validation. Every compatible example,
-enabled benchmark case, and the documented sustained pressure profile must pass.
+and every enabled concurrent E2E model/case and text/VL/mixed mode must pass with
+FlagGems, FlagTree, and FlagCX active together. CI must be updated for the target
+platform, example/concurrent coverage, and result artifacts. Require operator,
+compiler, and real collective/TP evidence; partial-stack runs, skips, and silent
+fallbacks fail the gate.

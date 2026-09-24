@@ -1,8 +1,8 @@
 ---
 description: Upgrade sglang-plugin-FL to a newer SGLang release on NVIDIA hardware.
-  Covers upstream and dependency analysis, OOT plugin compatibility fixes, FlagTree
-  and FlagGems alignment, and validation with unit tests, model serving, streaming,
-  concurrency, and CUDA Graph. Use when bumping the SGLang compatibility version or
+  Covers upstream and dependency analysis, OOT plugin compatibility fixes,
+  FlagGems, FlagTree, and FlagCX alignment, and validation with unit tests, model
+  serving, streaming, concurrency, and CUDA Graph. Use when bumping the SGLang compatibility version or
   fixing sglang-plugin-FL after an upstream SGLang upgrade; do not use for a
   model-only port or a non-NVIDIA backend adaptation.
 name: infer-sglang-plugin-upgrade
@@ -28,7 +28,7 @@ name: infer-sglang-plugin-upgrade
 
 Upgrade the NVIDIA path of sglang-plugin-FL without patching the installed
 SGLang package. Treat SGLang, PyTorch, sglang-kernel, the Triton provider,
-FlagTree, FlagGems, and flashinfer as one compatibility tuple.
+FlagTree, FlagGems, FlagCX, and flashinfer as one compatibility tuple.
 
 ## When to Use
 
@@ -65,8 +65,8 @@ Ask only for values that cannot be probed safely.
 5. **When FlagTree supplies Triton, install PyTorch first, remove every
    standalone Triton installation, then install the pinned FlagTree build.**
 6. **Pin the tested FlagGems revision.** Do not report “master” without its SHA.
-7. **Do not add FlagCX by default on NVIDIA.** NCCL remains the normal path
-   unless the requested feature explicitly requires FlagCX.
+7. **Final acceptance requires FlagCX.** Enable it together with FlagGems and
+   FlagTree and prove that distributed execution does not silently use NCCL.
 8. **Fix one compatibility theme at a time and re-run its focused test.**
 9. **Validate with and without the plugin.** Vanilla SGLang at the same version
    is the behavioral baseline.
@@ -86,7 +86,7 @@ Preserve unrelated work and record repository state:
 ```bash
 git status --short --branch
 git remote -v
-grep -nE 'sglang|torch|triton|flagtree|flag.?gems' pyproject.toml
+grep -nE 'sglang|torch|triton|flagtree|flag.?gems|flag.?cx' pyproject.toml
 ```
 
 Probe the actual runtime inside the target container:
@@ -105,7 +105,7 @@ for name in ("torch", "sglang", "sglang_kernel", "triton", "flag_gems"):
         print(name, "ERROR", repr(exc))
 PY
 
-python3 -m pip show torch sglang sglang-kernel triton flagtree flag-gems flashinfer-python
+python3 -m pip show torch sglang sglang-kernel triton flagtree flag-gems flagcx flashinfer-python
 nvidia-smi
 ```
 
@@ -186,9 +186,13 @@ Install FlagGems from the requested tag or commit. Record the resolved SHA and
 package version. Keep any packaging-only wheel correction minimal and separate
 from runtime changes.
 
+Install the pinned FlagCX build for the same runtime and record its revision,
+library path, transport configuration, and communication-backend selection. A
+successful import does not prove that SGLang uses FlagCX.
+
 ```bash
 python3 -m pip check
-python3 -m pip freeze | grep -Ei 'torch|sglang|kernel|flashinfer|triton|flagtree|flag.?gems'
+python3 -m pip freeze | grep -Ei 'torch|sglang|kernel|flashinfer|triton|flagtree|flag.?gems|flag.?cx'
 ```
 
 Do not update repository containerfiles unless container integration is an
@@ -272,7 +276,9 @@ For every representative model, verify:
 6. at least four concurrent requests succeed;
 7. decode CUDA Graph captures and replays for configured batch sizes;
 8. logs prove FlagGems ATen replacement and fused-op dispatch are enabled;
-9. fallbacks are explicit, bounded, and non-blocking.
+9. a real collective or tensor-parallel run proves FlagCX is selected rather
+   than NCCL or another vendor backend;
+10. fallbacks are explicit, bounded, and non-blocking.
 
 Compare against vanilla SGLang at the same version with identical weights,
 tokenizer, prompt, dtype, sampling parameters, and TP. Record exact token IDs
@@ -288,33 +294,53 @@ throughput is a functional observation, not a benchmark claim.
 
 ---
 
-### Mandatory examples and stress acceptance
+### Mandatory examples, concurrency, and CI acceptance
 
-Repository examples and stress testing are release gates, not optional supporting
-evidence. Inventory the runnable scripts documented for the target platform under
-`examples/` (excluding helper modules such as files prefixed with `_`). Run every
-declared-compatible example without removing prompts, baselines, assertions, or
-phases. This includes offline, concurrent, MTP, and multinode examples when those
-capabilities are advertised for the target platform. Missing models, assets,
-hosts, or devices block acceptance rather than turning the example into a pass.
+All final examples and concurrent cases must run in one pinned
+environment with the complete **FlagGems + FlagTree + FlagCX** stack enabled
+simultaneously. Record exact revisions and resolved paths, prove FlagTree owns
+the active Triton runtime, retain FlagGems dispatch evidence, and retain FlagCX
+backend/collective evidence. Component imports, separate component tests, or a
+silent fallback to NCCL do not satisfy this gate. If any part of the stack cannot
+be exercised, report acceptance blocked unless the user changes the requirement.
 
-Run the repository benchmark matrix through the unified tool, including every
-enabled throughput, latency, and serving case:
+Repository examples are release gates, not optional supporting evidence.
+Inventory runnable scripts under `examples/` from the submitted commit, excluding
+helper modules such as names prefixed with `_`. Run every declared-compatible
+offline, concurrent, MTP, and multinode example unchanged when the target claims
+those capabilities. Preserve prompts, baselines, assertions, and all phases.
+
+Also inventory and run every concurrent E2E case enabled for the target platform
+and device, including every configured model/case and each advertised `text`,
+`vl`, and `mixed` mode. Use the unified runner so platform YAML and per-case
+environment overrides are applied:
 
 ```bash
-python tests/run.py --platform <platform> --device <device> --scope benchmark
+python tests/run.py --platform <platform> --device <device> --scope e2e --task concurrent
 ```
 
-Benchmark smoke validates entrypoints only. Also run a sustained serving pressure
-test using the repository/user-approved profile. Record model, TP/PP, graph mode,
-input/output lengths, concurrency or request rate, request count and duration,
-throughput, p50/p95/p99 latency, successful/failed requests, timeouts, OOMs, and
-server/worker health. If no profile exists, define it in the validation record
-before running; do not relabel a tiny dummy-weight smoke as pressure-test success.
+Acceptance requires every applicable example and concurrent case to finish on
+the exact submitted commit with every request successful and no timeout, OOM,
+hang, empty/corrupt response, or unhealthy worker. Missing models, images, hosts,
+or devices block acceptance rather than becoming skips. Report discovered,
+executed, passed, failed, skipped, and blocked items by name, plus model, TP/PP,
+graph mode, concurrency, request totals, failures, and latency/throughput fields
+emitted by the case.
 
-Acceptance requires all applicable examples, all enabled benchmark cases, and the
-sustained pressure profile to finish successfully on the exact submitted commit.
-Report discovered, executed, passed, failed, skipped, and blocked items by name.
+Do not trust a wrapper's exit code alone. Inspect logs for assertion failures,
+tracebacks, repeated or corrupt output, and cleanup/resource-tracker errors.
+Require the configured request count and every requested text/VL/mixed phase to
+be reached; an early text failure cannot leave VL/mixed marked passing. A server
+that fails warmup or serves zero requests is a failure. Pressure/concurrency
+wrappers must propagate child exit codes and verify configured input/output token
+lengths rather than reporting only process liveness.
+
+CI updates are mandatory. Update `examples/**` path triggers, the target platform
+YAML's concurrent matrix, runner/image/model mounts, full-stack setup assertions,
+reusable E2E workflow inputs, artifacts, and aggregate status. Required example
+and concurrent jobs must fail on missing assets or cases; they may not silently
+skip. If scarce hardware keeps a gate manual, encode that policy explicitly and
+retain a required current-head result in the PR evidence.
 
 ---
 
@@ -333,9 +359,11 @@ Confirm:
 - non-NVIDIA pins are untouched unless explicitly in scope;
 - no temporary diagnostic override is required;
 - docs/containerfiles appear only when requested;
-- PR dependency versions and FlagGems SHA match the tested runtime;
+- PR dependency versions and FlagGems, FlagTree, and FlagCX revisions match the
+  tested runtime;
 - compatibility branches have focused coverage;
-- model claims include model, TP, graph mode, and checks performed;
+- model claims include model, TP, graph mode, concurrency/request counts, and
+  checks performed;
 - limitations and untested follow-ups are separate from passing claims.
 
 The PR description should contain:
@@ -363,10 +391,12 @@ The upgrade is complete only when:
 - affected dense/hybrid and MoE paths pass;
 - serving, streaming, long decode, concurrency, and intended CUDA Graph pass on
   real NVIDIA hardware;
+- FlagGems, FlagTree, and FlagCX are simultaneously active, with operator,
+  compiler, and collective evidence and no silent NCCL fallback;
 - every target-platform example passes unchanged;
-- every enabled throughput, latency, and serve benchmark case passes;
-- the documented sustained pressure profile completes without errors, timeouts,
-  OOMs, or unhealthy workers;
+- every enabled concurrent E2E model/case and text/VL/mixed mode passes;
+- CI is updated to cover the target platform, examples/concurrency gates, and
+  complete FlagGems + FlagTree + FlagCX setup without silent skips;
 - the final run uses normal plugin defaults;
 - the diff and PR description match requested scope.
 

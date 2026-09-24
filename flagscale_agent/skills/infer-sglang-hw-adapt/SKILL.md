@@ -36,7 +36,8 @@ Record before editing:
 - backend, accelerator model, allocated devices, driver/toolkit, and container;
 - plugin base commit and exact SGLang tag/commit;
 - Python, vendor PyTorch, SGLang kernel packages, attention/MoE libraries,
-  FlagTree/Triton, FlagGems, flashinfer, and communication-library revisions;
+  FlagTree/Triton, FlagGems, FlagCX, flashinfer, and communication-library
+  revisions;
 - current checkout/import paths, model and image assets, logs, and CI scope;
 - required coverage: dense, MoE, hybrid attention, multimodal, MTP, graph,
   serving, concurrency, tensor/pipeline parallel, or benchmark smoke.
@@ -56,7 +57,8 @@ shadow an editable checkout.
 
 - Never modify installed SGLang source.
 - Treat SGLang, vendor PyTorch, kernel/attention/MoE packages, compiler,
-  FlagGems, flashinfer, communication library, and plugin commit as one tuple.
+  FlagGems, FlagCX, flashinfer, communication library, and plugin commit as one
+  tuple.
 - Gate vendor behavior by platform or inspected capability. Keep registration
   idempotent and avoid broad exception-based compatibility.
 - Preserve original examples, prompts, baselines, and assertions. Add diagnostics
@@ -99,6 +101,15 @@ checks before proceeding.
 
 ## Validate on real hardware
 
+Use the complete **FlagGems + FlagTree + FlagCX** stack simultaneously for final
+hardware acceptance. Record exact revisions and resolved paths; prove FlagTree
+owns the active Triton compiler/runtime, FlagGems dispatches the intended ops,
+and FlagCX executes a real collective or TP/PP path without silently falling
+back to NCCL or a vendor communication backend. Imports, isolated component
+tests, or partial-stack results are insufficient. If any component cannot be
+enabled and exercised, report acceptance blocked unless the user explicitly
+changes the contract.
+
 Choose coverage from the affected paths. A broad backend adaptation normally
 includes:
 
@@ -115,28 +126,34 @@ includes:
 - benchmark entrypoint smoke, clearly separated from controlled performance.
 
 Hardware acceptance additionally requires all runnable examples declared
-compatible with the backend and a real pressure test. Inventory documented
-scripts under `examples/` and run each unchanged; helper modules are not cases.
+compatible with the backend and every enabled concurrent E2E case. Inventory
+documented scripts under `examples/` and run each unchanged; helper modules are
+not cases.
 Offline, concurrent, MTP, and multinode examples are mandatory when the backend
 claims those capabilities. Missing models, image assets, hosts, or devices block
-acceptance rather than justifying a pass or silent skip.
+acceptance rather than justifying a pass or silent skip. Every example and
+concurrent-test process must inherit the same verified full-stack
+environment; do not mix results from partial-stack environments.
 
-Run every enabled throughput, latency, and serving benchmark case through:
+Run the target platform/device's complete concurrent matrix, including every
+configured model/case and advertised text, VL, and mixed mode, through:
 
 ```bash
-python tests/run.py --platform <platform> --device <device> --scope benchmark
+python tests/run.py --platform <platform> --device <device> --scope e2e --task concurrent
 ```
 
-Then run a sustained serving pressure profile, not only the dummy-weight benchmark
-smoke. Record model, TP/PP, graph mode, input/output lengths, concurrency or
-request rate, request count/duration, throughput, p50/p95/p99 latency, failures,
-timeouts, OOMs, and worker health. Use a repository or user-approved profile; if
-none exists, define it explicitly in the validation record before execution.
-
 The final report must list discovered, executed, passed, failed, skipped, and
-blocked examples/benchmark/pressure cases by name. Every applicable example and
-enabled benchmark must pass, and the pressure run must finish without request
-errors, timeouts, OOMs, hangs, or unhealthy workers.
+blocked examples/concurrent cases by name, plus model, TP/PP, graph mode,
+concurrency, request totals, failures, and available latency/throughput fields.
+Every applicable example and concurrent case must pass without request errors,
+timeouts, OOMs, hangs, empty/corrupt responses, or unhealthy workers.
+
+Inspect logs in addition to exit codes: assertion failures, repeated/corrupt
+output, cleanup/resource-tracker tracebacks, or zero served requests are not
+passes. Require the configured request count and every requested text/VL/mixed
+phase to execute; an early phase failure leaves later phases blocked. Any custom
+pressure wrapper must propagate child exit codes and verify configured
+input/output token lengths rather than reporting only process liveness.
 
 For multimodal tests, verify the referenced assets exist before starting a long
 run. For multi-node tests, use matching code, dependencies, model paths, network
@@ -156,6 +173,13 @@ test chain rather than creating an unrelated workflow. Preserve the normal order
 discover/setup -> unit -> functional -> inference/serving/concurrent
                -> benchmark smoke -> notification
 ```
+
+CI updates are a mandatory deliverable. Update `examples/**` path triggers,
+platform YAML concurrent matrices, runner/image/model mounts, full-stack setup
+assertions, reusable E2E inputs, result artifacts, and aggregate status. Required
+example and concurrent jobs must not pass through skips or missing assets. If
+scarce hardware requires a manual gate, encode it explicitly and retain a
+required current-head result in the PR evidence.
 
 Adapt resource policy to the hardware:
 
@@ -180,7 +204,8 @@ and invalidate current-HEAD evidence.
 After rebasing or changing CI, rerun the affected merge gates on the exact new
 head. Keep historical passes as supporting evidence only. The PR must list:
 
-- exact source/base/head commits and dependency tuple;
+- exact source/base/head commits and dependency tuple, including FlagGems,
+  FlagTree, and FlagCX provenance and activation evidence;
 - backend hardware and device allocation;
 - code paths, fallbacks, and scheduling/graph limitations;
 - current-HEAD unit, functional, example, serving, distributed, and CI results;

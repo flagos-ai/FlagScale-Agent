@@ -30,5 +30,9 @@ backend CI -> report current-HEAD evidence and blockers.
 **Key constraints**: never patch vLLM source, never hardcode CUDA in shared paths,
 gate vendor shims narrowly, preserve observable fallbacks, install without
 replacing dependencies, and never claim a hardware pass without completed
-generation on that hardware. Full acceptance also requires every case discovered
-by the target platform/device's unfiltered `tests/run.py` invocation to pass.
+generation on that hardware. Full acceptance also requires every case under
+`tools/adaptation-gate-cases` to pass across both Qwen3.6 models, eager/graph, and
+all text/image/mixed single and concurrent scenarios with FlagGems, FlagTree, and
+FlagCX enabled simultaneously. CI updates, per-case artifacts, and
+operator/compiler/collective evidence are mandatory; skips and silent fallbacks
+do not pass.

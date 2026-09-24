@@ -35,7 +35,8 @@ has made obsolete, and provide evidence on every hardware path claimed by the PR
 - Never edit the upstream or installed vLLM package. Change only plugin-owned
   runtime code, tests, dependency metadata, documentation, and CI when required.
 - Preserve FL dispatch, platform abstraction, vendor backends, custom ops,
-  FlagGems integration, graph capture, I/O dumping, and FL environment controls.
+  FlagGems integration, FlagTree compilation, FlagCX communication, graph
+  capture, I/O dumping, and FL environment controls.
 - Keep device calls behind vLLM/FL platform abstractions. Do not replace them with
   unconditional `torch.cuda` calls on code shared by non-CUDA backends.
 - Preserve unrelated work. Do not stash, reset, clean, rewrite shared history, or
@@ -61,14 +62,15 @@ Record:
 - plugin, upstream vLLM, model, log, and test paths;
 - target hardware and whether execution is local, SSH, containerized, or CI;
 - vLLM, Python, PyTorch, accelerator runtime, compiler, FlagTree/Triton,
-  FlagGems, flashinfer, and plugin revisions;
+  FlagGems, FlagCX, flashinfer, and plugin revisions;
 - requested scope: plan only, NVIDIA reference upgrade, vendor adaptation, or
   all supported hardware.
 
 Use a tested dependency tuple. A nominal vLLM version is insufficient because
-compiler and operator behavior can change with PyTorch, Triton/FlagTree,
-FlagGems, flashinfer, or the accelerator runtime. Detect duplicate or shadowed
-packages, especially a standalone Triton installed alongside FlagTree.
+compiler, operator, and collective behavior can change with PyTorch,
+Triton/FlagTree, FlagGems, FlagCX, flashinfer, or the accelerator runtime.
+Detect duplicate or shadowed packages, especially a standalone Triton installed
+alongside FlagTree or a communication backend that silently bypasses FlagCX.
 
 For NVIDIA, prefer the official vLLM image or matching wheel as the reference
 environment. For backends that cannot install vLLM's CUDA extension, build the
@@ -205,26 +207,47 @@ Use model paths and tensor parallel sizes that fit the actual machine. Never cal
 a run successful merely because weights loaded or the server opened a port. For a
 generation gate, require completion and a simple deterministic content assertion.
 
-### Mandatory unified-runner acceptance
+### Mandatory adaptation-gate acceptance
 
-The final vllm-plugin-FL acceptance gate is the repository's unified test tool,
-`tests/run.py`. First run it with `--dry-run` for the target platform/device and
-save the complete discovered case list. Then run the same platform/device without
-`--task`, `--model`, `--case`, `--cases`, or a narrowed `--scope` so every enabled
-unit, functional, inference, and serving case declared by the platform YAML runs:
+Final acceptance requires the complete FlagOS inference stack: **FlagGems +
+FlagTree + FlagCX**, enabled simultaneously in one pinned environment. Importing
+or testing the components separately is insufficient. Before the final run:
 
-```bash
-python tests/run.py --platform <platform> --device <device> --dry-run
-python tests/run.py --platform <platform> --device <device>
-```
+- record the exact package versions, source commits, build identifiers, and
+  resolved import/library paths for all three components;
+- prove FlagTree provides the active Triton compiler/runtime and no standalone
+  Triton shadows it;
+- prove logs or dispatch diagnostics show that FlagGems executes the intended
+  operator paths rather than globally falling back to native/vendor ops;
+- prove FlagCX is the selected distributed communication backend with a real
+  collective or tensor-parallel execution, not a silent NCCL/vendor fallback.
 
-Completion requires every discovered case to execute and pass. A missing model or
-asset, auto-skip, unsupported-feature skip, filtered matrix, unstarted downstream
-case, or infrastructure timeout is not a pass for full acceptance. Fix the
-environment/configuration or report the gate blocked. Record discovered,
-executed, passed, failed, skipped, and blocked counts plus the names of every
-non-pass case. Focused pytest or filtered `run.py` commands remain useful during
-development, but cannot replace this final unfiltered run.
+If any component cannot be installed, enabled, or exercised on the target
+hardware, mark acceptance blocked. Do not downgrade the requirement or claim a
+pass from a partial stack unless the user explicitly changes the contract.
+
+The final vllm-plugin-FL acceptance gate is every test under
+`tools/adaptation-gate-cases`. Use the directory's committed scripts and fixtures;
+do not replace them with an ad hoc smoke. The current canonical matrix is:
+
+- Qwen3.6-27B and Qwen3.6-35B-A3B;
+- eager and graph modes for each model;
+- `text_single`, `text_concurrent_8`, `image_single`,
+  `image_concurrent_8`, and `mixed_concurrent_8` for each model/mode pair.
+
+Run `run_serve_eager.sh` or `run_serve_graph.sh`, followed by `run_test.sh`, for
+all four model/mode groups. At the current gate definition this is 20 pytest
+scenarios and 104 requests. Preserve the generated JSON result for every
+scenario and verify request-level semantic/quality assertions, not only process
+exit codes. The expected case count must be derived from the submitted commit so
+future additions are included automatically.
+
+Every discovered case must run and pass. A missing model or fixture, skip,
+filtered file, unstarted group, or infrastructure timeout blocks acceptance.
+Report discovered, executed, passed, failed, skipped, and blocked counts plus
+every non-pass name. Focused tests and `tests/run.py` remain valuable supporting
+evidence but do not replace this adaptation gate. Every group must use the same
+pinned environment with FlagGems, FlagTree, and FlagCX enabled together.
 
 On non-NVIDIA hardware, first prove the `empty` vLLM and plugin imports, then the
 vendor platform/worker/model runner, and finally real device inference. If a
@@ -235,14 +258,21 @@ rather than passed.
 
 ## 6. Integrate CI and finalize
 
-When CI is in scope, verify the whole path rather than editing only a version pin:
+Updating CI is part of completion, not optional follow-up. Verify the whole path
+rather than editing only a version pin:
 
-- setup scripts assert the intended vLLM and dependency tuple;
+- setup scripts assert the intended vLLM and dependency tuple, including the
+  pinned FlagGems, FlagTree, and FlagCX builds;
 - the selected runner labels and model paths exist;
 - referenced images are pullable and their tags/digests match the validated image;
 - automatic and manual vendor workflows reflect scarce-hardware policy;
 - generated wheels install with `--no-build-isolation --no-deps` where required;
 - runtime E2E jobs exercise the plugin rather than only importing it.
+- path triggers (including `tools/adaptation-gate-cases/**`), platform YAML,
+  matrices, reusable workflows, and final aggregate status include the adapted
+  backend and all applicable gate coverage;
+- CI retains per-case logs/results as artifacts and treats skips or missing assets
+  as non-passing for the required adaptation gate.
 
 Rebase or merge the latest target base before final verification when repository
 policy requires it. Resolve conflicts semantically: re-check upstream-derived
@@ -263,7 +293,8 @@ the diff unless explicitly requested. Push only task-owned commits.
 The PR report must separate:
 
 - target base and exact plugin commit;
-- runtime/dependency tuple and hardware;
+- runtime/dependency tuple and hardware, including proof that FlagGems,
+  FlagTree, and FlagCX were active together;
 - code and compatibility cleanup;
 - current-HEAD passing evidence;
 - older supporting evidence;
