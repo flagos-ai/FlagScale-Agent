@@ -1,0 +1,99 @@
+# know-ascend-training
+# Ascend训练调优知识：显存、计算效率、通信开销的候选空间与权衡，并行/重计算/融合/图模式机制、配置约束及测量和恢复语义
+
+# To read a section: load_knowledge(name='know-ascend-training', doc='<path below>', start_line=<L>, end_line=<L>)
+# Do NOT pass these doc paths to read_file — they are knowledge-internal.
+
+## ascend_training/stack-capabilities.md (60 lines)
+L1: 三仓配置消费与平台能力
+  L7: 环境指纹与实际路径
+  L24: 能力描述与证据层次
+    L44: 有效配置与跨特性证据
+  L56: 源码参考
+
+## ascend_training/search-space.md (47 lines)
+L3: Ascend 搜索空间与跨方向权衡
+  L7: 三个方向如何相互影响
+  L19: 搜索方法与证据的价值
+  L29: 可比性的边界
+  L33: 按问题查询
+
+## ascend_training/batch-and-accumulation.md (46 lines)
+L3: Ascend micro-batch、梯度累积与调度
+  L5: 批量与更新单位
+  L11: 计算、显存与通信的权衡
+  L25: 当前实现的批量与流水线约束
+  L36: 固定 GBS 的数值等价边界
+
+## ascend_training/parallelism.md (83 lines)
+L3: Ascend 并行策略的机制与权衡
+  L7: 各策略分摊什么
+  L20: 布局、批量与负载的联动
+  L30: 分组与整数约束
+  L47: 词表形状与跨布局语义
+  L55: 昇腾社区的 CP 算法与拓扑取舍
+  L67: 当前 FlagScale / Ascend 实现约束
+
+## ascend_training/communication.md (73 lines)
+L3: Ascend 通信代价与重叠机制
+  L5: 通信耗时来自哪里
+  L19: 分桶、预取与重叠
+  L27: 可形成优化假设的机制
+  L41: HCCL 缓冲区与显存
+  L47: HCCL 算法选择的边界
+  L51: 已知配置依赖与适用范围
+
+## ascend_training/recompute.md (56 lines)
+L3: Ascend 激活重计算的边界与代价
+  L5: 保存张量与峰值内存
+  L11: 重计算边界的取舍
+  L24: 层数、分组与当前配置语义
+  L37: 输出丢弃与重放时机
+  L43: 通信与状态重放
+
+## ascend_training/memory-and-sharding.md (60 lines)
+L3: Ascend 显存来源、分片与卸载
+  L5: 容量由哪些对象决定
+  L18: OOM 阶段与容量边界
+  L33: 分布式优化器分摊什么
+  L41: 激活卸载与预取
+  L47: 缓存分配器与碎片
+  L53: 当前实现的适用边界
+
+## ascend_training/data-and-host.md (44 lines)
+L3: Ascend 数据供给与 Host 下发
+  L5: 等待发生在哪一段
+  L9: worker 与预取
+  L17: CPU 亲和性与任务队列
+  L26: 搬运与同步
+  L32: 当前 FlagScale 数据入口
+
+## ascend_training/graph-execution.md (72 lines)
+L3: Ascend 图编译与捕获重放
+  L5: 优化机制与实现路径
+  L16: 接口参数与训练边界
+  L26: 可形成优化假设的机制
+  L38: 形状、地址与资源
+  L48: 训练状态与组合依赖
+  L56: 成本解释
+
+## ascend_training/measurement-and-records.md (77 lines)
+L1: 训练测量与正确性证据
+  L5: 目标与受控差异
+  L13: 计时与吞吐口径
+  L39: 稳定窗口与 rank
+  L55: 独立 A/B 与正确性
+
+## ascend_training/state-and-resume.md (43 lines)
+L3: 训练状态恢复与数值可比性
+  L7: 初态、更新与完整恢复
+  L17: 跨布局与 optimizer schema
+  L27: LR 与 weight decay 调度
+  L33: RNG 与数据迭代器
+  L39: 对齐证据与观测边界
+
+## ascend_training/native-tuner.md (44 lines)
+L3: FlagScale native tuner 的生成与结果语义
+  L7: 候选如何生成与筛选
+  L24: 控制字段的含义
+  L38: 输出能证明什么

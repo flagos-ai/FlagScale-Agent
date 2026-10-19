@@ -1,560 +1,61 @@
 ---
-description: Launch, stop, and manage FlagScale distributed training jobs. Covers
-  server connection, environment checks, GPU availability, preflight validation, training
-  launch (CLI and legacy), stop commands, log directory structure, and quick verification
-  paths.
+description: Launch, monitor, stop, and verify FlagScale training from a YAML recipe.
+  Use a shared execution workflow with device-specific references for hardware
+  checks, runtime dependencies, and diagnostics.
 name: train-run
 ---
 
-<!--
- Copyright 2026 FlagOS Contributors
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- -->
+<!-- Copyright 2026 FlagOS Contributors. SPDX-License-Identifier: Apache-2.0 -->
 
 # FlagScale Training Launch
 
-Launch, stop, and manage FlagScale distributed training jobs on GPU servers.
+Launch, observe, stop and verify a training job from the supplied recipe. Reuse the caller's environment, workload, plan and experiment record; return execution evidence without starting a separate tuning or profiling workflow.
 
-## Critical Rules
+## 1. Reuse the setup and select hardware tools
 
-1. **If the user says the environment/conda is already set up, DO NOT install packages.** Go straight to preflight verification (Step 3). Only install if preflight imports fail.
-2. **After launching training (not dryrun — dryrun only generates scripts), you MUST immediately call `flagscale_train_monitor(output_dir=...)` to observe the process.** Do not proceed to other tasks without monitoring.
-3. **Never delete experiment output directories.**
+- Work in the confirmed server/container, Python environment and training cwd. If the environment is already set up, do not install packages; investigate only demonstrated missing dependencies.
+- Read the [device index](references/devices/index.md) and only the matching reference. Reuse verified device mapping and runtime facts across candidates; recheck assigned-device availability before each launch and every assigned host for multi-node work.
+- Availability combines authorization, utilization, memory baseline and process visibility. No visible container PID does not prove a device is free; a failed probe means unknown. Do not reset devices or terminate unrelated jobs.
+- For a new setup, or changed environment/data/checkpoint facts, read the relevant [preflight checks](references/preflight.md). An unchanged validated recipe needs only its delta, batch/layout constraints, output path and remaining budget checked. Its scheduled baseline/candidate run supplies validation; no separate smoke run is required.
 
-## Prerequisites
+`load_skill` loads only this file. Read references relative to the active `train-run/SKILL.md`, including a user override if present, not relative to the training cwd. Use documented commands; inspect CLI/launcher/helper source only for an unresolved error or contradictory behavior.
 
-- SSH access to training server
-- Docker container with FlagScale environment (or bare metal with conda)
-- FlagScale cloned and installed in the conda environment (see `train-env-setup` skill)
-- Training config files ready (see `train-config` skill)
+## 2. Choose one launch path
 
----
-
-## Step 1: Connect to Server
-
-SSH into training server, enter Docker container, activate conda env, cd to FlagScale project directory.
+**Direct FlagScale launch** — preserve a full YAML containing `experiment` and `train`; its filename is arbitrary:
 
 ```bash
-sudo docker exec -it <container_name> bash
-# In non-interactive shells (agent), use: conda run --prefix <env_path> <command>
-# In interactive shells (user), use: conda activate <env_name>
-cd <workspace_root>/code/FlagScale
+PYTHONUNBUFFERED=1 flagscale train -c /absolute/path/recipe.yaml --test
 ```
 
----
+| Parameter or setting | Purpose |
+| --- | --- |
+| `-c <yaml>` / `--config <yaml>` | Select the full FlagScale recipe |
+| `--test` | Run real training in the foreground; it does not reduce iterations |
+| `train.model.train_iters` | Set the agreed iteration count in the recipe |
+| `experiment.runner.nproc_per_node` | Match workers per node to the assigned devices |
+| `experiment.exp_dir` | Select this attempt's output directory |
 
-## Step 2: Check Environment and GPU Availability
+If the installed CLI requires MODEL, add its confirmed name after `train`. For rejected arguments, check `flagscale train --help`. Use `--dryrun` instead of `--test` only when generated scripts need inspection; it does not run training. The bounded path requires a fresh output directory, so use a separate directory for any dryrun.
 
-### Determine Environment Type
+**Bounded single-host Megatron measurements** — read [single-run execution](references/single-run.md) once, use its request/launch/wait procedure, and reuse it for subsequent trials. It calls the FlagScale CLI, enforces a timeout and returns compact evidence. Do not also run the direct-launch monitoring loop for the same job; inspect extra logs only for a missing fact or anomaly.
 
-Do this once per server, remember the result:
+Use a unique output directory for each attempt. Preserve config-relative dependencies, checkpoint identity and the caller's fixed workload. Reuse one record containing the config delta, command/cwd, actual output directory, assigned devices/backend, time limit and job identity.
 
-```bash
-if [ -f /.dockerenv ] || grep -q docker /proc/1/cgroup 2>/dev/null; then
-  echo "CONTAINER environment"
-else
-  echo "BARE METAL environment"
-fi
-```
+## 3. Launch, wait and verify
 
-### Check GPU Status
+1. Confirm the preceding owned job has ended and assigned devices remain available.
+2. Use `shell(background=True)` and retain its job id. For a direct CLI launch, call `flagscale_train_monitor(output_dir="<exp_dir>", mode="check")` before waiting, then `shell_jobs(action="wait", job_id=..., timeout=60)`. For the bounded path, follow its returned result and wait procedure.
+3. A monitor response with no logs yet is not failure. Wait within the run's budget; inspect again for progress, completion or an error. Use `mode="watch"` only when the selected device reference confirms its probes are compatible. Log locations and metric interpretation are in [monitoring](references/monitoring.md), read when needed.
+4. Verify expected iterations/progress, loss and gradient health, current-run errors and owned-worker completion. CLI exit 0, loss from one rank, or absence of a crash alone is not success; some launchers return before workers or mask their failures.
+5. Append the terminal result once, then return command, output directory, job/exit evidence, exact loss-rank log and any unresolved error to the caller. Missing evidence remains unverified; do not rerun training just to retrieve known results.
 
-```bash
-nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total --format=csv,noheader
-```
+For measurement or comparison of completed Megatron runs, follow [result analysis](references/result-analysis.md) with the recorded logs, exit evidence, and the caller's measurement contract.
 
-**Interpreting GPU status — depends on environment**:
+## 4. Stop or handle a failure
 
-- **Container**: `nvidia-smi` shows memory/utilization from ALL containers sharing the GPU, but only shows PIDs from the current container. If GPUs show memory occupied but no processes visible, this means OTHER containers are using those GPUs — NOT leaked memory. Report to user: "GPUs X-Y are in use by other containers, GPUs Z are available."
-- **Bare metal**: all processes are visible. If GPUs show memory occupied with no PID, that is genuinely abnormal (zombie GPU memory). Can try `nvidia-smi --gpu-reset` or report to user.
+Use `flagscale train -c <recipe.yaml> --stop` only after verifying that its PID/job belongs to this experiment. A missing PID file is not permission for a broad fallback kill. Retain all run artifacts, and confirm owned workers have exited before reusing devices; wait timeout alone does not stop training.
 
-**Go/no-go**: Target GPUs must show near-zero memory used. If occupied, alert user with the correct explanation based on environment type.
+For an actual failure, read [troubleshooting](references/troubleshooting.md), diagnose the first relevant error and verify the fix before a new attempt. OOM and quality failures return to the tuning caller with evidence; this execution skill does not change its search policy or workload.
 
-### Multi-Node GPU Check
-
-```bash
-while IFS= read -r line; do
-  [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
-  host=$(echo "$line" | awk '{print $1}')
-  echo "=== $host ==="
-  ssh $host "nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total --format=csv,noheader"
-done < <hostfile_path>
-```
-
----
-
-## Step 3: Preflight Check
-
-**ALWAYS run this before starting training.** Environment may have changed since last session.
-
-### 3a. Core Dependencies
-
-```bash
-python -c "
-import torch
-print(f'PyTorch {torch.__version__}, CUDA {torch.version.cuda}')
-print(f'GPUs: {torch.cuda.device_count()} x {torch.cuda.get_device_name(0)}')
-from megatron.plugin.platform import get_platform
-print(f'Megatron platform: {get_platform()}')
-import transformer_engine
-print(f'TransformerEngine: {transformer_engine.__version__}')
-import apex; print('Apex: OK')
-import flash_attn; print(f'Flash-Attention: {flash_attn.__version__}')
-print('All dependencies OK')
-"
-```
-
-If ANY import fails, stop and tell the user which dependency is broken. Suggest running `/skill train-env-setup` to fix.
-
-### 3b. GPU Availability
-
-```bash
-nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total --format=csv,noheader
-```
-
-All target GPUs must show near-zero memory usage.
-
-### 3c. Data Path Validation
-
-Validate ALL data paths referenced in the training config. This is not just "do the files exist" — it's "will the data pipeline actually load them at runtime."
-
-**For Megatron binary format (FlagScale native):**
-```bash
-DATA_PATH="<data_path from config>"
-ls -lh ${DATA_PATH}.bin ${DATA_PATH}.idx
-```
-
-**For third-party frameworks (parquet, JSONL, custom loaders):**
-1. Check that data directories exist and contain expected files:
-   ```bash
-   ls <data_dir>/*.parquet | wc -l   # or *.jsonl, *.json, etc.
-   ```
-2. If the config references a metadata/index file (e.g., parquet_info JSON, dataset_info), open it and verify that the paths INSIDE the file match the actual data locations. Placeholder paths like `your_data_path/`, `/path/to/`, or paths from a different machine are the #1 cause of silent data loading failures.
-   ```bash
-   # Example: check if parquet_info keys match actual data_dir
-   python -c "
-   import json, os
-   info = json.load(open('<parquet_info_path>'))
-   data_dir = '<actual_data_dir>'
-   actual_files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith('.parquet')]
-   matched = [f for f in actual_files if f in info]
-   print(f'Matched: {len(matched)}/{len(actual_files)} files')
-   if len(matched) == 0:
-       print(f'WARNING: Zero matches! Info keys sample: {list(info.keys())[:2]}')
-       print(f'Actual files sample: {actual_files[:2]}')
-   "
-   ```
-3. If paths don't match, fix the metadata file (replace placeholder prefix with actual path) BEFORE launching.
-
-**General rule**: any config file, JSON, or Python dict that maps dataset names to file paths is a potential source of path mismatch. After modifying data paths, always verify the FULL chain: config → dataset registry → metadata files → actual files on disk.
-
-If files are missing or paths don't match, stop and tell the user. Suggest running `/skill train-data-prep`.
-
-### 3d. Topology Freshness (Optional)
-
-If memory contains `topo_compute` from a previous topo-detect run, do a quick sanity check:
-
-```bash
-nvidia-smi --query-gpu=name --format=csv,noheader | head -1
-nvidia-smi --query-gpu=index --format=csv,noheader | wc -l
-```
-
-If GPU count or model differs from what's in memory, warn the user that topology data is stale.
-
-### 3e. Dryrun (Script Generation) — HARD GATE
-
-**CRITICAL DISTINCTION:**
-- `flagscale train <model> --dryrun` = generates launch scripts ONLY. No training is launched, no GPU is used, no process starts. It validates config syntax and produces shell scripts.
-- Validation run (`--train-iters 20`) = actual short training that launches processes, uses GPUs, loads model, and runs 20 iterations. This is what validates the pipeline.
-
-**Step 1: Generate scripts with dryrun**
-```bash
-flagscale train <model> --dryrun
-```
-
-If dryrun fails, it means config has syntax errors or missing fields. Fix and retry.
-
-After dryrun succeeds, inspect the generated launch script:
-```bash
-cat {exp_dir}/logs/scripts/host_*_run.sh
-```
-Verify: correct GPU count (`--nproc_per_node`), correct entrypoint, all expected CLI flags, no placeholder paths (`/path/to/`, `FIXME`, `TODO`).
-
-**If you modify the config after dryrun, you MUST re-run dryrun.** Cached scripts contain hardcoded values from the previous config.
-
-**Step 2: Run a short validation training**
-After dryrun scripts look correct, run actual training with minimal iterations to validate the full pipeline (model loading, data loading, forward/backward pass):
-```bash
-flagscale train <model> --train-iters 20
-```
-Only proceed to full training after this validation passes.
-
-For third-party reproduction tasks (no FlagScale launcher): construct the full launch command, print it, and verify it manually before executing. Check: correct `--nproc_per_node`, correct `PYTHONPATH`, correct entrypoint script, all required CLI args present, no placeholder paths in any referenced config files.
-
-### 3f. Launch Script Validation (MANDATORY)
-
-Before launching, validate the generated launch script against the actual FlagScale source code:
-
-1. **Read the argument parser** — find how each CLI flag is parsed in the entrypoint (e.g., `megatron/training/arguments.py` or the model's custom argparse). Verify your config values match the expected types and formats defined there.
-2. **Read the launcher code** — understand how FlagScale generates and executes launch scripts. Check that your config produces the expected command structure.
-3. **Read existing examples** — look at `examples/<similar_model>/conf/` for reference configs. Compare your config structure, field names, and value formats against working examples.
-4. **Trace the data path** — follow how `--data-path` or equivalent is consumed by the dataloader code. Verify your paths match what the code expects (prefix format, file extensions, index files).
-
-The source code defines what's valid — not a static checklist. If you're unsure about a config value, read the code that consumes it.
-
-### 3g. Config Arithmetic Verification
-
-Before launching, verify ALL of the following. Do not skip any item:
-- `global_batch_size % (micro_batch_size × data_parallel_size) == 0`
-- `num_attention_heads % tensor_model_parallel_size == 0`
-- `num_key_value_heads % tensor_model_parallel_size == 0` (for GQA models)
-- `num_layers % pipeline_model_parallel_size == 0` (if PP > 1)
-
-Also verify config value types match expectations. Read argparse definitions for non-obvious types (e.g., `--rotary-base` expects int, not float).
-
-### 3g. Checkpoint Compatibility Verification
-
-If loading a checkpoint (`--load`):
-1. Verify checkpoint exists and contains `latest_checkpointed_iteration.txt`
-2. Verify checkpoint TP/PP matches config TP/PP — a TP=1 checkpoint cannot be loaded with TP=4 without resharding
-3. Verify `vocab_size` matches between checkpoint and config
-4. Verify checkpoint format (`torch` vs `dist`) matches `ckpt_format` in config
-
-```bash
-ls <checkpoint_path>/latest_checkpointed_iteration.txt
-cat <checkpoint_path>/latest_checkpointed_iteration.txt
-```
-
-### 3h. Memory Budget Estimation
-
-Before launching, estimate per-GPU memory:
-```
-per_gpu_memory = model_params × 2 (bf16) + gradients × 2 + optimizer_states × (8 / DP)
-```
-If this exceeds GPU memory, do NOT launch — fix parallelism or enable activation checkpointing first.
-
-### 3i. Data Pipeline Standalone Test — HARD GATE
-
-**Do NOT launch training without verifying the data pipeline independently.**
-
-This catches: path mismatches, format errors, infinite loops, missing files, wrong tokenization — all in seconds instead of the 10+ minutes of model loading.
-
-```bash
-python -c "
-import sys, time
-sys.path.insert(0, '.')
-# Import the dataset class used in training config
-from <dataset_module> import <DatasetClass>
-
-# Instantiate with the SAME args as training config
-ds = <DatasetClass>(<args_from_config>)
-print(f'Dataset length: {len(ds)}')
-
-# Fetch 3 batches, with timeout
-for i in range(3):
-    t0 = time.time()
-    batch = ds[i]
-    elapsed = time.time() - t0
-    if isinstance(batch, dict):
-        shapes = {k: v.shape if hasattr(v, 'shape') else type(v).__name__ for k, v in batch.items()}
-    else:
-        shapes = batch.shape if hasattr(batch, 'shape') else type(batch).__name__
-    print(f'Batch {i}: {shapes} ({elapsed:.2f}s)')
-    if elapsed > 10:
-        print(f'WARNING: batch {i} took {elapsed:.1f}s — possible infinite loop or I/O issue')
-        break
-print('Data pipeline OK')
-"
-```
-
-If this script hangs, crashes, or shows unexpected shapes, fix the data pipeline BEFORE launching training.
-
-### 3j. Checkpoint Loading Verification
-
-If loading a pretrained checkpoint (not training from scratch), verify it actually loaded by checking step-0 loss.
-
-After the validation run (step 2 of 3e) completes 2 iterations:
-1. Check the loss at iteration 0
-2. Compare with `ln(vocab_size)` — the expected loss for random initialization
-
-```bash
-# Extract step-0 loss from training log
-grep -m1 "lm loss" <log_file>
-python -c "import math; print(f'Random init baseline: {math.log(<vocab_size>):.2f}')"
-```
-
-**Decision rule**:
-- Loss ≈ ln(vocab_size) → checkpoint did NOT load. Model is randomly initialized. STOP and debug.
-- Loss << ln(vocab_size) → checkpoint loaded successfully. Proceed.
-
-Common causes of checkpoint not loading:
-- Conversion code exists but isn't called in the training script
-- `--load` path is wrong or points to empty directory
-- TP/PP mismatch between checkpoint and config (silent fallback to random init)
-- `--finetune` flag missing (Megatron skips optimizer state but still needs the flag to load weights in some modes)
-
-**Only after ALL checks pass (3a through 3j), proceed to start training.**
-
----
-
-## Step 4: Start / Stop Training
-
-**ALWAYS use FlagScale Launcher** — never bypass it with raw `torchrun` or hand-written launch scripts. The launcher provides per-rank log separation, experiment directory structure, config validation, and clean shutdown (`--stop`). Without it, all ranks write to one stream (debug prints get lost or interleaved), there's no experiment directory structure, and you can't use `--stop`. If the launcher fails, fix the root cause — do not work around it.
-
-**Exception — third-party reproduction tasks**: When reproducing a third-party model's training (e.g., LLaVA-OneVision, Qwen-VL) using their own training scripts before migrating to FlagScale, use their native launch method (typically `torchrun` + their training script). The FlagScale launcher doesn't apply here. However, ALL other rules in this skill still apply: experiment registry, preflight checks, data validation, post-launch monitoring, and health checks. The only difference is the launch command itself.
-
-**IMPORTANT**: Always set `PYTHONUNBUFFERED=1` before launching training. Without it, Python buffers stdout and training logs appear delayed or empty, making health monitoring unreliable.
-
-```bash
-# Start (CLI)
-PYTHONUNBUFFERED=1 flagscale train <model>
-# Start (legacy)
-PYTHONUNBUFFERED=1 python run.py --config-path ./examples/<model>/conf --config-name train action=run
-
-# Stop (CLI)
-flagscale train <model> --stop
-# Stop (legacy)
-python run.py --config-path ./examples/<model>/conf --config-name train action=stop
-
-# Dry run (generate scripts only — NO training launched, NO GPU used)
-flagscale train <model> --dryrun
-```
-
-### Pre-Launch and Post-Launch Protocol (MANDATORY)
-
-This protocol is a **HARD GATE**. You CANNOT call `flagscale train` without completing the pre-launch steps. This applies to EVERY launch — including quick retries after config changes. No exceptions.
-
-#### PRE-LAUNCH (do ALL of these BEFORE `flagscale train`):
-
-**0a. Create experiment (first launch only):**
-
-```
-workspace_experiment(action="create", name="<model>_<config>_<purpose>",
-    purpose="<what you are verifying and why>",
-    hypothesis="<expected outcome — e.g., loss ~ ln(vocab) and decreases>")
-```
-
-If the experiment already exists (retry after failure), skip this step.
-
-**0b. Record this attempt — BLOCKING GATE:**
-
-```
-workspace_experiment(action="add_attempt", name="<experiment_name>",
-    change="<what changed vs previous attempt, or 'initial run'>",
-    config={"model": "...", "tp": N, "pp": N, "dp": N, "ep": N,
-            "global_batch_size": N, "micro_batch_size": N, "seq_length": N,
-            "precision": "bf16", "train_iters": N, ...},
-    hardware={"gpus": N, "gpu_type": "...", "driver": "...", "cuda": "..."},
-    output_dir="<unique output directory for this attempt>")
-```
-
-**If you haven't called `add_attempt`, you are NOT allowed to call `flagscale train`.** This is the single most important discipline rule. During rapid debug-fix-retry cycles, this is ESPECIALLY critical — those are exactly the attempts you'll need to reconstruct later.
-
-**Version bumping rule — what counts as a new experiment:**
-- Changed a meaningful parameter (LR, TP/PP, batch size, data, model code) → new experiment (`create`)
-- Launch failed before any metrics (import error, path error, config typo) → same experiment, new attempt (`add_attempt` with change description)
-- Training crashed after producing metrics, restarting with same config → same experiment, new attempt
-
-**0c. Kill old processes and verify GPUs free:**
-
-```bash
-pgrep -fa "torchrun|train_|flagscale" | grep -v grep
-# If any found:
-pkill -9 -f "torchrun|train_|flagscale" 2>/dev/null; sleep 5
-nvidia-smi | grep -E "MiB|%"
-```
-
-#### POST-RESULT (do IMMEDIATELY after monitor/metrics return):
-
-**8a. Record the result — BLOCKING GATE:**
-
-```
-workspace_experiment(action="update_last_attempt", name="<experiment_name>",
-    result="<SUCCESS/FAILED — key metrics, loss trajectory, throughput, or error cause>")
-```
-
-**If you haven't called `update_last_attempt`, you are NOT allowed to proceed to the next task or launch.** Do this BEFORE fixing config, BEFORE analyzing, BEFORE anything else.
-
-**8b. Finalize (when done with this experiment line):**
-
-```
-workspace_experiment(action="finalize", name="<experiment_name>",
-    status="completed|failed",
-    learnings=["lesson 1", "lesson 2", ...],
-    root_cause="<if failed, what was the fundamental problem>")
-```
-
-**Within 30 seconds of launch:**
-1. **Wait 10-15 seconds** before checking logs — the log directory may not exist yet (race condition with nohup/background launch)
-2. Use `flagscale_train_monitor(output_dir="<exp_dir>", mode="check")` to auto-discover logs AND scan stderr — NEVER use raw `find` commands (they may find old logs from previous runs)
-3. If stderr has errors → training failed at startup. Fix and retry.
-4. **Check stderr FIRST, not stdout** — crash info is in stderr. A process showing "wandb initialized" in stdout may already be dead.
-
-**After first metrics appear (usually 1-3 minutes):**
-4. **Use `flagscale_train_monitor(output_dir="<exp_dir>", mode="check", vocab_size=<vocab_size>)`** — do NOT use `tail -f` or `grep` to manually scan logs. The tool parses structured metrics and runs the health checks automatically (`vocab_size` enables the random-output check). For continuous supervision use `mode="watch"` with `duration`.
-5. Interpret the health check results:
-   - `loss ≈ ln(vocab_size)` → model outputs are random. Stop. Check: weights loaded? forward pass correct?
-   - `grad_norm = 0` or `num_zeros ≈ total_params` → gradients not flowing. Check loss computation, frozen params.
-   - `loss not decreasing after 10+ steps` → learning rate, optimizer, or data issue.
-6. Report the first metrics to the user with health assessment. Include: initial loss, loss trend, grad norm, throughput (tokens/sec or samples/sec).
-
-**After training completes or fails — close the experiment:**
-
-8. Record result and finalize — see POST-RESULT section above (8a and 8b). This MUST happen before any further analysis or next launch.
-
-**If health judge killed a long-running command:**
-When the agent's health judge kills a `sleep` or `tail -f` command, do NOT blindly retry with another sleep. Instead:
-1. Check if the training process is still alive: `kill -0 <pid>` or check PID file
-2. Check GPU utilization: `nvidia-smi`
-3. Check the latest log lines directly (no sleep)
-4. Then decide: wait more, or investigate a problem
-
-**Never declare training "successful" based only on "it didn't crash".** A training run that produces random output is worse than a crash — it wastes GPU hours silently.
-
----
-
-## Log Directory Structure
-
-FlagScale training logs are organized as follows. Understanding this structure is CRITICAL — you MUST use the correct commands to find logs, never guess paths.
-
-```
-<exp_dir>/
-├── logs/
-│   ├── host_0_<hostname>.output              # torchrun launcher output
-│   ├── pids/host_0_<hostname>.pid            # launcher PID
-│   ├── scripts/host_0_<hostname>_run.sh      # actual launch script
-│   ├── scripts/host_0_<hostname>_stop.sh     # stop script
-│   └── details/host_0_<hostname>/
-│       ├── 20260424_153816.588538/           # timestamp dir (YYYYMMDD_HHMMSS.us)
-│       │   └── default_<hash>/attempt_0/
-│       │       ├── 0/stdout.log  stderr.log  # rank 0
-│       │       ├── 1/stdout.log  stderr.log  # rank 1
-│       │       └── .../                      # one dir per rank
-│       └── 20260424_162209.763893/           # another run (newer!)
-│           └── ...
-├── checkpoints/
-├── tensorboard/
-└── wandb/
-```
-
-Key points:
-- `exp_dir` comes from `experiment.exp_dir` in `train.yaml`
-- Each training launch creates a NEW timestamp directory under `details/host_X_<hostname>/`
-- Multiple runs accumulate — you MUST find the LATEST timestamp dir, not the first one
-- Each rank (GPU process) has its own `stdout.log` and `stderr.log`
-- Rank 0's stdout.log contains the main training output (loss, iteration, etc.)
-- stderr.log contains errors, warnings, and import failures
-
-### Finding the Latest Logs
-
-**Always use the dedicated tool first** — it handles the full directory traversal, rank scanning, and health checks in one call:
-
-```
-flagscale_train_monitor(output_dir="<exp_dir>", mode="check", vocab_size=<vocab_size>)
-```
-
-If the experiment dir is recorded in the experiment ledger memory entry, use that path directly. NEVER use `find`, `ls -R`, or shell globbing to search for log files.
-
-**Manual fallback** (only if the tool is unavailable):
-EXP_DIR=$(grep 'exp_dir:' examples/<model>/conf/train.yaml | awk '{print $2}')
-LATEST=$(ls -d ${EXP_DIR}/logs/details/host_0_*/[0-9]*/ 2>/dev/null | sort | tail -1)
-ATTEMPT=$(find "$LATEST" -type d -name "attempt_*" | head -1)
-tail -30 ${ATTEMPT}/0/stdout.log
-tail -30 ${ATTEMPT}/0/stderr.log
-```
-
-One-liners:
-```bash
-tail -30 "$(ls -d ${EXP_DIR}/logs/details/host_0_*/[0-9]*/ | sort | tail -1)"/*/attempt_0/0/stdout.log
-tail -30 "$(ls -d ${EXP_DIR}/logs/details/host_0_*/[0-9]*/ | sort | tail -1)"/*/attempt_0/0/stderr.log
-```
-
-**NEVER do this:**
-- Don't hardcode timestamp dirs like `20260424_153816.588538`
-- Don't use `find -name stdout.log` without sorting — it may return old runs
-- Don't use `sleep N && tail` — check directly
-
----
-
-## Quick Verification Paths
-
-When the user wants to quickly verify a training setup works:
-
-1. **Minimal config**: `train_iters: 3-5`, `micro_batch_size: 1`, `global_batch_size: DP × 1`
-2. **Single GPU first**: Start with 1 GPU (TP=1, PP=1, DP=1) before scaling
-3. **Smallest dataset**: Use the smallest available split or demo data
-4. **Dry run**: Use `flagscale train <model> --dryrun` to validate config without launching
-5. **Stage-by-stage**: If the recipe has stages, run one stage at a time to isolate failures
-
-### Common Pitfalls
-
-- `micro_batch_size` must divide `global_batch_size / (TP * PP * DP)`
-- Megatron checkpoint format: `--load` path must contain `latest_checkpointed_iteration.txt`
-- Multi-node: verify NCCL connectivity before launching full training
-- OOM on first iteration: reduce `micro_batch_size` or enable activation checkpointing before reducing parallelism
-
----
-
-## Error Handling
-
-### Launch Failures
-
-| Symptom | Likely Cause | Action |
-|---------|-------------|--------|
-| `ModuleNotFoundError: megatron.*` | Megatron-LM-FL not installed or wrong PYTHONPATH | Check `pip list \| grep megatron`, reinstall if needed |
-| `NCCL error: unhandled system error` | Network issue between nodes or wrong NCCL config | Check `NCCL_SOCKET_IFNAME`, verify SSH connectivity |
-| `RuntimeError: CUDA out of memory` | Model too large for GPU memory | Reduce `micro_batch_size`, enable activation checkpointing, or increase TP/PP |
-| `FileNotFoundError: data path` | Data files missing or wrong path in config | Verify data path with `ls`, check train.yaml data section |
-| `Address already in use` | Previous training process still running | Kill old processes: `pkill -f torchrun`, wait, retry |
-| `Hydra config error` | YAML syntax error or missing required field | Run `flagscale train <model> --dryrun` to check config syntax (generates scripts only) |
-| Process starts but exits silently | Import error or early crash | Check stderr.log of rank 0 immediately |
-
-### Recovery Steps
-
-1. Read FULL stderr.log (not just tail) — multiple errors may exist
-2. Fix ALL identified issues before relaunching
-3. **HYDRA CACHE**: If you edited any config YAML, you MUST clean the cache before relaunching: `rm -rf outputs/<exp>/hydra/ outputs/<exp>/logs/scripts/`. FlagScale may use cached config from a previous run, making your edits appear to have no effect.
-4. Never retry more than once without a clear diagnosis
-
-### Fast Isolated Verification (before relaunching)
-
-A full training launch can take 10+ minutes just to load the model before reaching the code you're debugging. Before relaunching, ask: "can I verify this fix without a full launch?"
-
-**Data pipeline bugs** (the most common category):
-```python
-# Write a quick standalone script — runs in seconds, no model loading
-import sys; sys.path.insert(0, '<project_root>')
-from <dataset_module> import <DatasetClass>
-ds = <DatasetClass>(<args_from_config>)
-batch = next(iter(ds))
-print(f"Batch keys: {batch.keys()}, shapes: {[(k, v.shape) for k, v in batch.items() if hasattr(v, 'shape')]}")
-```
-
-**Import / path errors**: `python -c "import <module>; print('OK')"` — instant.
-
-**Config errors**: run `flagscale train <model> --dryrun` to check syntax (script generation only, no GPU).
-
-**Shape / architecture errors**: instantiate model on meta device, no checkpoint needed.
-
-Only relaunch the full training when the fix is in a component that can't be tested in isolation (e.g., distributed communication, optimizer state, checkpoint loading itself).
-
----
-
-## Related Skills
-
-- `train-config` — generate and validate training configuration YAML files
-- `train-monitor` — monitor running training jobs, check health, detect anomalies
-- `train-env-setup` — install FlagScale and all dependencies
-- `topo-detect` — detect hardware topology for parallelism planning
-- `train-data-prep` — prepare training data in Megatron binary format
+For third-party reproduction explicitly using a native training script, preserve that launcher and apply the same hardware, job tracking and evidence rules. For FlagScale recipes, use the CLI above.
