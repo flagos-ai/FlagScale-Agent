@@ -20,6 +20,10 @@ Port a new model from the latest vLLM upstream into vllm-plugin-FL by migrating 
 
 **Load when**: adding a model that vllm-plugin-FL does not yet support, or when an existing model needs to be re-ported after a major vLLM version bump that changed the model implementation.
 
+Use `infer-day0-adapt` for Day 0 delivery across framework/operator repositories,
+SGLang, or models not yet supported upstream; its contract and evidence
+requirements govern that broader workflow.
+
 **Full pipeline**: Step 0 orientation → Step 1 baseline unit tests → Step 2 upstream source → Step 3 plugin patterns → Step 4 model identity → Step 5 config bridge → Step 6 copy-then-patch → Step 7 register → Step 8 code review → Step 9 regression unit tests → Step 10 functional tests → Step 11 benchmark → Step 12 serve + request → Step 13 E2E correctness → Step 14 final report.
 
 **Key principles**:

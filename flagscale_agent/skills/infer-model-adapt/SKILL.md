@@ -2,7 +2,8 @@
 description: Adapt a new model to vllm-plugin-FL by migrating model code from the
   latest vLLM upstream. Covers source discovery, copy-then-patch workflow, import
   conversion, model registration, and correctness verification against upstream GPU
-  ground truth.
+  ground truth. For Day 0 delivery spanning framework and operator libraries,
+  SGLang, or models not yet implemented upstream, use infer-day0-adapt.
 name: infer-model-adapt
 ---
 
@@ -35,6 +36,11 @@ Use this skill when:
 
 This skill covers everything from source discovery through E2E correctness testing.
 Environment setup (SSH, container, installation) is handled by `infer-env-setup`.
+
+For Day 0 adaptation across framework and operator libraries, SGLang models, or
+models without upstream support, use `infer-day0-adapt`. Its contract and
+evidence requirements govern that workflow; this skill covers upstream-copy
+porting techniques.
 
 ## Critical Rules
 
