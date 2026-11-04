@@ -37,12 +37,14 @@ independent numerics, real inference, applicable graph and performance paths
 - Select implementations before execution; never retry on another backend after
   a launch, mutation, state update, or collective has started.
 - Keep persistent cache/workspace ownership and stream ordering in the framework.
-- Read framework, operator, and quantization references according to the change.
+- Apply the self-contained framework, operator, and conditional feature checks
+  in `SKILL.md` according to the change.
 - Validate graph replay using new inputs, sentinel outputs, and equal initial
   state; apply independent numerical references and justified tolerances.
 - Distinguish implemented/loadable/numerically verified/end-to-end verified
   support; unavailable hardware is an explicit verification gap.
 - Keep transient evidence in PR/CI artifacts and maintain real user examples.
 
-Based on **推理框架插件开发规范v1** and **新模型适配算子层开发规范**;
-the references retain clause identifiers and mandatory/recommended distinctions.
+Based on the Inference Framework Plugin Development Specification v1 and the
+New Model Adaptation Operator-Layer Development Specification; the skill retains
+source clause identifiers and mandatory/recommended distinctions.
