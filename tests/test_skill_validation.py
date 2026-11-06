@@ -43,6 +43,7 @@ EXPECTED_SKILLS = {
     "infer-vllm-hw-adapt",
     "infer-sglang-hw-adapt",
     "infer-model-adapt",
+    "infer-day0-adapt",
     "infer-precision-check",
     "infer-vllm-plugin-upgrade",
     "infer-sglang-plugin-upgrade",

@@ -22,17 +22,16 @@ Adapt one non-NVIDIA sglang-plugin-FL backend after the shared SGLang upgrade.
 `srt_empty`, platform, fused-op, attention/FLA, scheduling, graph, distributed,
 packaging, or CI adaptation. Do not use for the framework-wide bump or vLLM.
 
-**Workflow**: lock the vendor dependency tuple -> verify empty/vendor runtime and
-source provenance -> adapt platform and operators -> run focused/full tests ->
-validate dense/MoE, multimodal, MTP, graph, serving/concurrency, and TP/PP as
-applicable -> integrate resource-aware CI -> report exact-head evidence.
+**Workflow** — record the images and software stack, adapt the backend, run the
+examples, configured `tests/run.py` concurrent E2E, and cross-node FlagCX gates,
+then pass basic CI on the submitted commit and record the results in the PR.
 
-**Key constraints**: preserve original examples and assertions, keep fallbacks
-explicit, distinguish decode from prefill graph claims, separate image-pull
-failures from test results, and never use historical or cached-image evidence as
-a substitute for current-head real-device validation. Every compatible example,
-and every enabled concurrent E2E model/case and text/VL/mixed mode must pass with
-FlagGems, FlagTree, and FlagCX active together. CI must be updated for the target
-platform, example/concurrent coverage, and result artifacts. Require operator,
-compiler, and real collective/TP evidence; partial-stack runs, skips, and silent
-fallbacks fail the gate.
+**Key constraints** — preserve original examples and assertions. Require every
+compatible example and configured concurrent case/mode with FlagGems, FlagTree,
+and FlagCX active together. Detect each node's loaded FlagCX build and binding,
+select compatible settings, and prove collective and model TP/PP communication
+on at least two nodes. Verify per-rank results and exits. Keep the hardware gates
+separate from basic CI and mark unavailable resources as Blocked.
+
+Use four English PR tables for images and software versions, changes and reasons,
+test results, and additional FlagGems/FlagTree dependencies.

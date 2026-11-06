@@ -1,8 +1,9 @@
 ---
 description: Adapt vllm-plugin-FL to a non-NVIDIA hardware backend after the
   shared vLLM upgrade is established. Covers empty-vLLM environments, vendor
-  platform and operator fixes, real-device validation, and backend CI. Do not use
-  for the framework-wide vLLM version bump or an SGLang backend.
+  platform and operator fixes, tools-based acceptance, multi-node FlagCX,
+  and backend CI. Do not use for the framework-wide vLLM version bump or an
+  SGLang backend.
 name: infer-vllm-hw-adapt
 ---
 
@@ -33,9 +34,10 @@ claims proven on that backend.
 Before editing, record:
 
 - backend, accelerator model, host/container, allocated devices, and driver;
+- base image and CI image tags or digests, and the CI runner allocation;
 - base plugin branch/commit and target vLLM tag/commit;
 - Python, PyTorch/vendor fork, accelerator toolkit, compiler, FlagTree/Triton,
-  FlagGems, FlagCX, communication-library, and plugin revisions;
+  FlagGems, FlagGems-vllm, FlagCX, communication-library, and plugin revisions;
 - upstream vLLM and plugin roots, model paths, tests, logs, and CI scope;
 - validation modes requested: imports, unit/functional, offline, serving,
   tensor parallel, graph, multimodal, MoE, or benchmark.
@@ -112,14 +114,18 @@ upstream vLLM failure.
 
 ## Validate on the named hardware
 
-The backend acceptance environment must use the complete **FlagGems, FlagTree,
-and FlagCX** stack simultaneously. Pin and record all three revisions and their
-resolved paths. Prove FlagTree supplies the active Triton compiler/runtime,
-FlagGems executes the intended operator dispatch, and FlagCX executes a real
-collective or tensor-parallel path without silently falling back to NCCL or a
-vendor communication backend. Imports, isolated component tests, or partial
-stack runs do not count. If the backend cannot exercise any component, mark the
-acceptance gate blocked unless the user explicitly changes the requirement.
+Run acceptance with **FlagGems, FlagGems-vllm, FlagTree, and FlagCX** active
+together. Pin all four from the target checkout's dependency and build settings.
+Install the pinned FlagGems-vllm dependency explicitly when using `--no-deps`.
+Record resolved paths and versions in server and worker processes. Verify the
+`flaggems_vllm` import and trace an applicable plugin op through dispatch to
+that package, alongside evidence for generic FlagGems and the active FlagTree
+compiler/runtime. Read `docs/flaggems-vllm.md` when present and enable the fused
+path using the target checkout's switch, such as `VLLM_FL_USE_FLAGGEMS_VLLM=1`.
+Set the stack and switches in the serving environment before workers start.
+A focused plugin test can exercise a required operator absent from the model
+matrix. Use the same pinned stack for that test and the gate runs.
+Mark acceptance blocked if a required component cannot be exercised.
 
 Select a matrix from the affected paths. A substantial adaptation normally needs:
 
@@ -134,20 +140,70 @@ Select a matrix from the affected paths. A substantial adaptation normally needs
 - explicit verification of dispatch choices and bounded fallbacks;
 - teardown checks so successful runs do not leave task-owned processes.
 
-The backend is accepted only after every test under
-`tools/adaptation-gate-cases` passes. Run both documented Qwen3.6 models in eager
-and graph modes and execute all text, image, and mixed text-image single and
-eight-way concurrent scenarios through the committed serve/test scripts. At the
-current gate definition this is four model/mode groups, 20 pytest scenarios, and
-104 requests; derive the inventory from the submitted commit so new cases cannot
-be missed. Preserve every generated JSON result and its request-level assertions.
+### Run the adaptation gate in `tools/`
 
-The discovered and executed sets must match. Missing weights/fixtures, skips,
-filtered files, unstarted groups, and infrastructure timeouts block acceptance.
-Report discovered, executed, passed, failed, skipped, and blocked counts with
-each non-pass named. Focused tests and `tests/run.py` are supporting evidence
-only. Every gate process must use the same pinned environment with FlagGems,
-FlagTree, and FlagCX enabled together.
+Use `tools/adaptation-gate-cases/README.md` and the scripts and tests in the
+submitted vllm-plugin-FL checkout to determine the required model/mode groups,
+fixtures, scenarios, and request totals. The documented matrix covers
+Qwen3.6-27B and Qwen3.6-35B-A3B in both eager and graph modes. Run single text
+and image cases and every concurrent text, image, and mixed text-image case
+in each group. Count pytest scenarios separately from requests within them.
+
+From `tools/adaptation-gate-cases`, start the corresponding server in a named
+session and run the test entrypoint against it in another session. For example,
+use these commands for one eager group, substituting the actual model path
+and an available port. Set the same `SERVED_MODEL_NAME` on both sides if used.
+
+```bash
+MODEL_PATH=/path/to/model PORT=8000 ./run_serve_eager.sh
+MODEL_PATH=/path/to/model PORT=8000 RESULTS_DIR=/path/to/run-results ./run_test.sh
+```
+
+Repeat with `run_serve_graph.sh` for graph mode. Verify the serving PID, model,
+and mode before each test run and confirm graph capture and replay in the graph
+run. Stop the previous task-owned service and confirm the port is free before
+reusing it. Use distinct ports and `SERVER_PID_FILE` paths for concurrent
+groups. Use fresh result directories to preserve every group's JSON files.
+Keep the committed text, image, and mixed tests and response assertions intact.
+Confirm all test files ran and each scenario produced fresh JSON with the
+expected number of passing responses.
+Bind artifacts to the commit, device, model revision, mode, and stack in a run
+record because the JSON schema may omit these fields.
+
+Reconcile discovered, executed, passed, failed, skipped, and blocked counts
+for each model/mode. Missing fixtures or weights, skips, filtered files,
+unstarted groups, and timeouts block acceptance. Keep the server/test logs and
+JSON artifacts. Use focused tests and `tests/run.py` as supporting checks and
+require the complete tools gate for acceptance.
+
+### Validate FlagCX across nodes
+
+Detect the FlagCX build automatically on every allocated node before launch.
+Inspect the plugin's resolved binding and native library selection. For the
+wheel, use the launch environment's `python -m pip show flagcx` or distribution
+metadata and verify the selected `flagcx.api` and `libflagcx.so` paths. For a
+source build, inspect the selected `FLAGCX_PATH` wrapper and record its release
+or source commit and build metadata. Check the workers' mapped library, for
+example via `/proc/<pid>/maps` on Linux, against the selected build. Record the
+native version separately when the loaded library exposes a supported version API.
+
+Select initialization and launcher settings from the detected build and actual
+binding capabilities. Inspect the target plugin's communicator and the matching
+FlagCX docs or examples. Check exported symbols, signatures, and unique-ID
+handling. Legacy source wrappers and newer wheel APIs can pass communicator IDs
+differently. Resolve incompatible or unknown builds before running the gate.
+
+Use at least two distinct hosts with a matching software stack, reachable
+rendezvous, and a verified rank-to-device map. Run a cross-node collective with
+rank-specific inputs through the plugin communicator and a real distributed
+inference request on a supported TP/PP topology. Check expected collective
+values, model responses, and successful exit from every rank. Use traces or logs to
+prove that the data collective crossed hosts through FlagCX. Match the group
+members to their host/rank map and capture call evidence during the request.
+A separate control-plane backend for rendezvous and a vendor adaptor called by
+FlagCX are allowed. An implicit framework collective fallback fails this gate.
+Record topology, per-node versions, paths, and result logs. Mark the multi-node
+gate blocked when the allocation or runtime evidence is unavailable.
 
 Model loading, worker initialization, or HTTP readiness alone is not a pass.
 Require completed generation and a simple deterministic assertion. Record exact
@@ -160,13 +216,21 @@ import/unit evidence but mark offline and serving gates blocked. Do not translat
 
 ## CI and delivery
 
-CI integration is mandatory for a completed backend adaptation:
+Deliver a basic CI lane through the target plugin's existing platform registry
+and reusable workflow. Start with `.github/workflows/ci.yml`, its platform
+workflow, and `.github/configs/` where present. Require a passing run on the
+submitted commit and rerun affected gates after rebasing or changing CI.
+At minimum, cover build/install, resolved stack assertions, focused unit tests,
+and a functional inference smoke test on the target device. Keep the full tools
+gate and multi-node FlagCX validation
+as separate required results. Use the hardware CI jobs where supported or an
+explicit manual gate for scarce resources.
 
 - keep the platform registry, runner label, image, device selector, model mounts,
   and setup script consistent;
 - assert dependency versions and checkout import/library paths before tests,
-  including the active FlagGems, FlagTree, and FlagCX builds;
-- use named long-running sessions for manual validation;
+  including the active FlagGems, FlagGems-vllm, FlagTree, and FlagCX builds;
+- use named tmux sessions for long-running remote validation;
 - distinguish image-pull/setup time from test time and preserve completed jobs;
 - keep scarce or manual hardware out of automatic PR CI unless repository policy
   enables it;
@@ -175,15 +239,47 @@ CI integration is mandatory for a completed backend adaptation:
   YAML, matrices, reusable jobs, and aggregate status so the backend's applicable
   adaptation-gate coverage runs and cannot be silently skipped;
 - upload per-case logs/results and fail required jobs on missing cases/assets;
+- verify the CI run and required job conclusions for the final PR commit.
+  A failed, cancelled, skipped, missing, or zero-case required job leaves the
+  CI gate incomplete;
 - do not include credentials, internal host configuration, temporary scripts, or
   standalone diagnostics in the PR.
 
-Run final tests on the exact submitted commit after integrating the latest base.
-The PR must separate current-HEAD passes, older supporting evidence, untested
-paths, infrastructure blockers, and intentional follow-ups, and include the
-operator/compiler/collective evidence for the simultaneous three-component
-stack. Runtime-compatible import changes on another vendor are not evidence that
-vendor was validated.
+### Write the PR description
+
+Use four concise English tables. Replace each example row with the actual
+environment, changes, results, and dependencies. Link CI runs and artifacts in
+the test table and label historical evidence with its tested commit.
+
+**A. Images and software stack**
+
+| Item | Tag, digest, or version |
+| --- | --- |
+| Base image | Image tag and digest |
+| CI image | Image tag and digest |
+| Software stack | Framework and plugin commits, Python, PyTorch, driver/toolkit, FlagGems, FlagGems-vllm, FlagTree, and FlagCX |
+
+**B. Changes and reasons**
+
+| Change | Reason |
+| --- | --- |
+| Component and relevant code path | Compatibility issue and reason for the fix |
+
+**C. Tests and results**
+
+| Test | Device, topology, and scope | Result and evidence |
+| --- | --- | --- |
+| Tools gate | Model/mode, scenario and request counts | Status, tested commit, artifacts, and any unverified cases |
+| Multi-node FlagCX | Hosts/ranks, TP/PP, resolved version and API | Status, collective values and inference evidence |
+| Basic CI | Runner, required jobs, and tested commit | Status and run link |
+
+**D. Additional FlagGems and FlagTree dependencies**
+
+| Component | Additional requirement | Issue, PR, or exact extra change |
+| --- | --- | --- |
+| FlagGems | Required revision or change, or None | Link or change needed |
+| FlagGems-vllm | Required revision or change, or None | Link or change needed |
+| FlagTree | Required revision or change, or None | Link or change needed |
 
 ## Related skills
 
