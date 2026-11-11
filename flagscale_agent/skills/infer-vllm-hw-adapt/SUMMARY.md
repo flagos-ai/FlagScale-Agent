@@ -22,17 +22,17 @@ Adapt one non-NVIDIA vllm-plugin-FL backend after the shared vLLM upgrade.
 needs platform, worker, attention, operator, graph, packaging, or CI adaptation.
 Do not use for the framework-wide version bump or an SGLang backend.
 
-**Workflow**: record the backend dependency tuple -> build exact or empty vLLM
-environment -> audit vendor contracts -> patch from platform outward -> run
-focused and full tests -> verify real-device inference/serving -> integrate
-backend CI -> report current-HEAD evidence and blockers.
+**Workflow** — record the images and software stack, adapt the backend, run the
+complete tools gate and cross-node FlagCX tests, then pass basic CI on the
+submitted commit and record the evidence in the PR.
 
-**Key constraints**: never patch vLLM source, never hardcode CUDA in shared paths,
-gate vendor shims narrowly, preserve observable fallbacks, install without
-replacing dependencies, and never claim a hardware pass without completed
-generation on that hardware. Full acceptance also requires every case under
-`tools/adaptation-gate-cases` to pass across both Qwen3.6 models, eager/graph, and
-all text/image/mixed single and concurrent scenarios with FlagGems, FlagTree, and
-FlagCX enabled simultaneously. CI updates, per-case artifacts, and
-operator/compiler/collective evidence are mandatory; skips and silent fallbacks
-do not pass.
+**Key constraints** — keep vendor shims scoped and verify the active operator,
+compiler, and communicator paths. Acceptance requires all applicable
+`tools/adaptation-gate-cases` scenarios with FlagGems, FlagGems-vllm, FlagTree,
+and FlagCX active together. Automatically detect each node's FlagCX build and
+binding, select compatible settings, and prove cross-host communication on at
+least two nodes. Require a green basic CI lane and retain the separate hardware
+gate artifacts.
+
+Use four English PR tables for images and software versions, changes and reasons,
+test results, and additional FlagGems/FlagTree dependencies.

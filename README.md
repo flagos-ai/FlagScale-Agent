@@ -20,7 +20,7 @@ FlagScale-Agent is an autonomous AI agent specialized in large-scale distributed
 
 **Why FlagScale-Agent?**
 
-- **Domain-Specialized** — 23 built-in skills and 13 knowledge domains covering Megatron-LM, TransformerEngine, NCCL, FlashAttention, and more
+- **Domain-Specialized** — 24 built-in skills and 13 knowledge domains covering Megatron-LM, TransformerEngine, NCCL, FlashAttention, and more
 - **Autonomous & Safe** — Multi-layer guard system with inject/block/escalate mechanisms prevents runaway execution
 - **Persistent Intelligence** — Cross-session memory system (fact/pitfall/insight) accumulates findings and lessons learned
 - **Structured Execution** — Plan system with acceptance criteria and verification gates ensures quality
@@ -127,6 +127,7 @@ Skills are domain-specific workflow guides that teach the agent how to handle sp
 **Inference Skills:**
 - `infer-env-setup` — Set up vllm-plugin-FL inference environment
 - `infer-model-adapt` — Adapt new models to vllm-plugin-FL
+- `infer-day0-adapt` — Deliver Day 0 model support in vllm-plugin-FL or sglang-plugin-FL, from operator gap analysis to verified integration
 - `infer-vllm-hw-adapt` — Port vllm-plugin-FL to new hardware backends
 - `infer-sglang-hw-adapt` — Port sglang-plugin-FL to new hardware backends
 - `infer-vllm-plugin-upgrade` — Upgrade vllm-plugin-FL to new vLLM versions
