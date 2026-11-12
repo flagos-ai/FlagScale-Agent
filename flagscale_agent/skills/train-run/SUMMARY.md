@@ -16,8 +16,8 @@
 
 # Train-Run — Summary
 
-Launch, stop, and manage FlagScale distributed training jobs on GPU servers.
+Launch, monitor, stop, and verify FlagScale training from a YAML recipe.
 
-**Load when**: launching training, stopping a run, checking GPU availability, or debugging launch failures.
+**Load when**: launching or stopping training, running bounded single-host Megatron trials, or diagnosing launch failures.
 
-Covers: server connection, environment checks, GPU availability, preflight validation (dependencies + data + config arithmetic), training launch via FlagScale CLI, stop commands, post-launch monitoring (stderr first!), log directory structure, and quick verification paths.
+Uses `flagscale train -c ...` with device-specific NVIDIA and Ascend references. Includes scripts for bounded trials and Megatron log analysis, preserving execution evidence and measurement reports for the calling tuning workflow.
